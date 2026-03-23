@@ -1,0 +1,34 @@
+# Build output
+build/
+*.o
+*.3dsx
+*.elf
+*.map
+*.cia
+*.smdh
+banner.bnr
+
+# Proxy server
+venv/
+__pycache__/
+ffmpeg
+ffmpeg.exe
+
+# User config (contains server IP)
+config.json
+
+# Logs & dumps
+logs/
+dumps/
+
+# IDE / AI workspace
+.claude/
+review_result.json
+HANDOFF/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test assets
+test_wallpapers/
