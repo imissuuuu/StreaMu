@@ -9,7 +9,11 @@ echo Starting the server...
 echo (You can close this window to stop the server at any time)
 echo.
 
-venv\Scripts\python.exe proxy.py
+if exist venv\Scripts\python.exe (
+    venv\Scripts\python.exe proxy.py
+) else (
+    venv\bin\python.exe proxy.py
+)
 
 echo.
 pause
