@@ -2,8 +2,6 @@
 #include "ui_constants.h"
 #include <time.h>
 
-#define APP_VERSION "v0.9.0-beta"
-
 // === Loading Spinner ===
 static const char* SPINNER_FRAMES[] = {
     "[/]", "[-]", "[\\]", "[|]"
@@ -120,9 +118,11 @@ void UIRenderer::draw_top_screen(const RenderContext& ctx) {
         C2D_DrawText(&text, C2D_WithColor, clock_x, TOP_SYS_Y, 0, FONT_SM, FONT_SM, col);
     }
 
-    // --- Version ---
+    // --- Version (right-aligned) ---
     C2D_TextParse(&text, m_ui.get_text_buf(), APP_VERSION);
-    C2D_DrawText(&text, C2D_WithColor, TOP_VERSION_X, TOP_SYS_Y, 0, FONT_SM, FONT_SM, m_colors.accent_text);
+    C2D_TextOptimize(&text);
+    float ver_w = text.width * FONT_SM;
+    C2D_DrawText(&text, C2D_WithColor, 400.0f - TOP_MARGIN_X - ver_w, TOP_SYS_Y, 0, FONT_SM, FONT_SM, m_colors.accent_text);
 
     // --- Server Status ---
     if (!ctx.is_server_connected) {

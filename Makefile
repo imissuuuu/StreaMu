@@ -16,6 +16,7 @@ CXX     := $(PREFIX)g++
 LD      := $(PREFIX)g++
 
 TARGET      := streamu
+VERSION     := 1.0.0
 SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens
 INCLUDES    := include include/network include/ui
 
@@ -28,7 +29,7 @@ PORTLIBS      := $(DEVKITPRO)/portlibs/3ds
 LIBS    := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
 
 ARCH    := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
-CFLAGS  := -g -Wall -O2 -mword-relocations -fomit-frame-pointer -ffunction-sections $(ARCH) -DARM11 -D__3DS__
+CFLAGS  := -g -Wall -O2 -mword-relocations -fomit-frame-pointer -ffunction-sections $(ARCH) -DARM11 -D__3DS__ -DAPP_VERSION='"v$(VERSION)"'
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 LDFLAGS := -specs=3dsx.specs -g $(ARCH)
 
@@ -48,7 +49,7 @@ MAKEROM    := $(DEVKITPRO)/tools/bin/makerom
 
 .PHONY: all clean cia
 
-all: $(TARGET).3dsx
+all: $(TARGET).3dsx $(TARGET).cia
 
 $(TARGET).3dsx: $(TARGET).elf $(TARGET).smdh
 	@$(DEVKITPRO)/tools/bin/3dsxtool $< $@ --smdh=$(TARGET).smdh

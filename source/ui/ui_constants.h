@@ -9,7 +9,6 @@ constexpr float TOP_TITLE_Y      = 21.0f;
 constexpr float TOP_STATUS_Y     = 60.0f;
 constexpr float TOP_PLAYING_Y    = 84.0f;
 constexpr float TOP_PLAYING_LINE = 14.0f;
-constexpr float TOP_VERSION_X    = 340.0f;
 constexpr float TOP_OFFLINE_X    = 205.0f;
 constexpr float TOP_ITEM_HEIGHT  = 28.0f;
 
