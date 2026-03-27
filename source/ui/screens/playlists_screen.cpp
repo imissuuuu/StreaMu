@@ -126,6 +126,9 @@ void PlaylistsScreen::draw_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
         if (i == ctx.selected_index) {
             C2D_DrawRectSolid(0, y_pos - 2, 0, 320,
                               BTM_ITEM_HEIGHT_2ROW, ctx.theme->accent);
+            draw_selection_left_bar(y_pos - 2, BTM_ITEM_HEIGHT_2ROW, ctx.theme->accent);
+        } else {
+            draw_item_bg(0, y_pos - 2, 320, BTM_ITEM_HEIGHT_2ROW, ctx.theme->bg_bottom);
         }
 
         std::string display_title = ctx.playlists[i].name;
@@ -144,6 +147,12 @@ void PlaylistsScreen::draw_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
         C2D_DrawText(&text, C2D_WithColor,
                      BTM_MARGIN_X + 8, y_pos + BTM_META_OFFSET, 0,
                      FONT_XS, FONT_XS, meta_color);
+
+        // Dashed separator
+        if (i != ctx.selected_index) {
+            u32 sep = ctx.theme->text_dim & 0x14FFFFFF;
+            draw_dashed_line_h(0, y_pos - 2 + BTM_ITEM_HEIGHT_2ROW - 1, 320, sep);
+        }
     }
 
     if (ctx.playlists.empty()) {

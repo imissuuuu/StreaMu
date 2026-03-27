@@ -5,7 +5,7 @@
 // ============================================================
 // Shared helper: track list drawing for STATE_SEARCH / STATE_PLAYLIST_DETAIL
 // ============================================================
-void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
+void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr, bool show_views) {
     C2D_Text text;
     int max_vis = BTM_MAX_VISIBLE_2ROW;
 
@@ -32,7 +32,14 @@ void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
         if (y_pos >= 240.0f) break;
         // Special rendering for MODE_BTN row
         if (ctx.g_tracks[i].id == "MODE_BTN" && ctx.current_state == STATE_PLAYLIST_DETAIL) {
-            // Highlight only the focused side when selected
+            // PlayBar-style background for both halves
+            u32 bar_bg = (ctx.config.mode == THEME_DARK)
+                         ? C2D_Color32(55, 55, 55, 255)
+                         : C2D_Color32(230, 230, 230, 255);
+            C2D_DrawRectSolid(0, y_pos - 2, 0, 160, BTM_ITEM_HEIGHT_2ROW, bar_bg);
+            C2D_DrawRectSolid(160, y_pos - 2, 0, 160, BTM_ITEM_HEIGHT_2ROW, bar_bg);
+
+            // Highlight focused side when selected
             if (i == ctx.selected_index) {
                 if (ctx.mode_btn_focus == 0) {
                     C2D_DrawRectSolid(0, y_pos - 2, 0, 160,
@@ -46,23 +53,60 @@ void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
             C2D_DrawRectSolid(160, y_pos - 2, 0, 1, BTM_ITEM_HEIGHT_2ROW,
                               ctx.theme->text_dim & 0x80FFFFFF);
 
-            float btn_text_y = y_pos + (BTM_ITEM_HEIGHT_2ROW - FONT_LG * 24.0f) / 2.0f - 2.0f;
+            float btn_cy = y_pos - 2 + BTM_ITEM_HEIGHT_2ROW / 2.0f;
 
-            // SHUFFLE (left half, center=80)
-            u32 shuf_color = (i == ctx.selected_index && ctx.mode_btn_focus == 0)
-                             ? ctx.theme->accent_text : ctx.theme->text_body;
-            C2D_TextParse(&text, ui_mgr.get_text_buf(), "SHUFFLE");
-            float shuf_w = text.width * FONT_LG;
-            C2D_DrawText(&text, C2D_WithColor, 80.0f - shuf_w / 2.0f, btn_text_y, 0,
-                         FONT_LG, FONT_LG, shuf_color);
+            // --- SHUFFLE icon (left half, center=80) ---
+            // Original PlayBar 32x32 pixel art, no scaling
+            {
+                u32 sc = (i == ctx.selected_index && ctx.mode_btn_focus == 0)
+                         ? ctx.theme->accent_text : ctx.theme->text_body;
+                float x0 = 80.0f - 16;
+                float y0 = btn_cy - 11;
+                // Arrow tip top-right
+                C2D_DrawRectSolid(x0+25, y0+0,  0, 1, 1, sc);
+                C2D_DrawRectSolid(x0+25, y0+1,  0, 2, 1, sc);
+                C2D_DrawRectSolid(x0+25, y0+2,  0, 3, 1, sc);
+                // Top arms
+                C2D_DrawRectSolid(x0+2,  y0+3,  0, 7, 1, sc); C2D_DrawRectSolid(x0+20, y0+3,  0, 9, 1, sc);
+                C2D_DrawRectSolid(x0+2,  y0+4,  0, 8, 1, sc); C2D_DrawRectSolid(x0+19, y0+4,  0, 11, 1, sc);
+                C2D_DrawRectSolid(x0+2,  y0+5,  0, 9, 1, sc); C2D_DrawRectSolid(x0+18, y0+5,  0, 12, 1, sc);
+                C2D_DrawRectSolid(x0+2,  y0+6,  0, 10, 1, sc); C2D_DrawRectSolid(x0+17, y0+6,  0, 12, 1, sc);
+                // Cross upper
+                C2D_DrawRectSolid(x0+9,  y0+7,  0, 4, 1, sc); C2D_DrawRectSolid(x0+16, y0+7,  0, 4, 1, sc); C2D_DrawRectSolid(x0+25, y0+7,  0, 3, 1, sc);
+                C2D_DrawRectSolid(x0+10, y0+8,  0, 4, 1, sc); C2D_DrawRectSolid(x0+15, y0+8,  0, 4, 1, sc); C2D_DrawRectSolid(x0+25, y0+8,  0, 2, 1, sc);
+                C2D_DrawRectSolid(x0+11, y0+9,  0, 7, 1, sc); C2D_DrawRectSolid(x0+25, y0+9,  0, 1, 1, sc);
+                // Center
+                C2D_DrawRectSolid(x0+12, y0+10, 0, 5, 1, sc);
+                C2D_DrawRectSolid(x0+12, y0+11, 0, 5, 1, sc);
+                // Cross lower
+                C2D_DrawRectSolid(x0+11, y0+12, 0, 7, 1, sc); C2D_DrawRectSolid(x0+25, y0+12, 0, 1, 1, sc);
+                C2D_DrawRectSolid(x0+10, y0+13, 0, 4, 1, sc); C2D_DrawRectSolid(x0+15, y0+13, 0, 4, 1, sc); C2D_DrawRectSolid(x0+25, y0+13, 0, 2, 1, sc);
+                C2D_DrawRectSolid(x0+9,  y0+14, 0, 4, 1, sc); C2D_DrawRectSolid(x0+16, y0+14, 0, 4, 1, sc); C2D_DrawRectSolid(x0+25, y0+14, 0, 3, 1, sc);
+                // Bottom arms
+                C2D_DrawRectSolid(x0+2,  y0+15, 0, 10, 1, sc); C2D_DrawRectSolid(x0+17, y0+15, 0, 12, 1, sc);
+                C2D_DrawRectSolid(x0+2,  y0+16, 0, 9, 1, sc); C2D_DrawRectSolid(x0+18, y0+16, 0, 12, 1, sc);
+                C2D_DrawRectSolid(x0+2,  y0+17, 0, 8, 1, sc); C2D_DrawRectSolid(x0+19, y0+17, 0, 11, 1, sc);
+                C2D_DrawRectSolid(x0+2,  y0+18, 0, 7, 1, sc); C2D_DrawRectSolid(x0+20, y0+18, 0, 9, 1, sc);
+                // Arrow tip bottom-right
+                C2D_DrawRectSolid(x0+25, y0+19, 0, 3, 1, sc);
+                C2D_DrawRectSolid(x0+25, y0+20, 0, 2, 1, sc);
+                C2D_DrawRectSolid(x0+25, y0+21, 0, 1, 1, sc);
+            }
 
-            // ORDER (right half, center=240)
-            u32 order_color = (i == ctx.selected_index && ctx.mode_btn_focus == 1)
-                              ? ctx.theme->accent_text : ctx.theme->text_body;
-            C2D_TextParse(&text, ui_mgr.get_text_buf(), "ORDER");
-            float order_w = text.width * FONT_LG;
-            C2D_DrawText(&text, C2D_WithColor, 240.0f - order_w / 2.0f, btn_text_y, 0,
-                         FONT_LG, FONT_LG, order_color);
+            // --- ORDER play icon (right half, center=240) ---
+            // ▶ triangle, same size as PlayBar (half_h=12, 24px)
+            {
+                u32 oc = (i == ctx.selected_index && ctx.mode_btn_focus == 1)
+                         ? ctx.theme->accent_text : ctx.theme->text_body;
+                float px = 240.0f;
+                int half_h = 12;
+                int w = half_h * 2;
+                for (int j = 0; j < w; j++) {
+                    float h = half_h * (1.0f - (float)j / w);
+                    if (h < 1) h = 1;
+                    C2D_DrawRectSolid(px - half_h + j, btn_cy - h, 0, 1, h * 2, oc);
+                }
+            }
 
             rendered++;
             continue;
@@ -74,9 +118,12 @@ void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
         if (i == ctx.selected_index) {
             C2D_DrawRectSolid(0, y_pos - 2, 0, 320,
                               BTM_ITEM_HEIGHT_2ROW, ctx.theme->accent);
+            draw_selection_left_bar(y_pos - 2, BTM_ITEM_HEIGHT_2ROW, ctx.theme->accent);
         } else if (is_playing) {
             C2D_DrawRectSolid(0, y_pos - 2, 0, 320,
                               BTM_ITEM_HEIGHT_2ROW, ctx.theme->playing_bg);
+        } else {
+            draw_item_bg(0, y_pos - 2, 320, BTM_ITEM_HEIGHT_2ROW, ctx.theme->bg_bottom);
         }
 
         // Row 1: Title
@@ -84,7 +131,8 @@ void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
         if (is_playing) display_title = ">> " + display_title;
 
         u32   color  = (i == ctx.selected_index) ? ctx.theme->accent_text
-                                                  : ctx.theme->text_body;
+                     : is_playing                ? ctx.theme->accent_text
+                                                 : ctx.theme->text_body;
         C2D_TextParse(&text, ui_mgr.get_text_buf(), display_title.c_str());
         float draw_x = BTM_MARGIN_X;
         if (i == ctx.selected_index) {
@@ -104,7 +152,7 @@ void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
             if (!ctx.g_tracks[i].duration.empty() &&
                 ctx.g_tracks[i].duration != "?")
                 meta += ctx.g_tracks[i].duration;
-            if (!ctx.g_tracks[i].views.empty() &&
+            if (show_views && !ctx.g_tracks[i].views.empty() &&
                 ctx.g_tracks[i].views != "?") {
                 if (!meta.empty()) meta += " \xC2\xB7 ";
                 meta += ctx.g_tracks[i].views;
@@ -115,7 +163,7 @@ void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
                 meta += ctx.g_tracks[i].upload_date;
             }
             if (!meta.empty()) {
-                u32 meta_color = (i == ctx.selected_index)
+                u32 meta_color = (i == ctx.selected_index || is_playing)
                                  ? ctx.theme->accent_text
                                  : ctx.theme->text_body;
                 C2D_TextParse(&text, ui_mgr.get_text_buf(), meta.c_str());
@@ -123,6 +171,11 @@ void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
                              BTM_MARGIN_X + 8, y_pos + BTM_META_OFFSET, 0,
                              FONT_XS, FONT_XS, meta_color);
             }
+        }
+        // Dashed separator below item (skip for selected — accent fill acts as separator)
+        if (i != ctx.selected_index) {
+            u32 sep = ctx.theme->text_dim & 0x14FFFFFF;
+            draw_dashed_line_h(0, y_pos - 2 + BTM_ITEM_HEIGHT_2ROW - 1, 320, sep);
         }
         rendered++;
     }

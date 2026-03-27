@@ -31,7 +31,7 @@ private:
   int wallpaper_selected_ = 0;
   float scroll_offset_ = 0.0f; // Normal mode scroll offset (px)
 
-  static const int ITEM_COUNT = 11; // Mode, Color, Hue, L, R, DpadSpeed, Wallpaper, ServerIP, Language, (separator), Save
+  static const int ITEM_COUNT = 13; // Mode, Color, Hue, Saturation, Brightness, L, R, DpadSpeed, Wallpaper, ServerIP, Language, (separator), Save
 
   void apply_preview(); // Apply editing config to preview immediately
   std::string get_item_label(int index) const;

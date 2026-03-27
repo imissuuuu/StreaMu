@@ -32,6 +32,7 @@ private:
     bool qa_focused_ = false;
 
     bool show_search_result_ = false;
+    int pressed_tile_ = -1;  // Touch-pressed tile ID (-1 = none)
 
     // QA slots
     struct QASlot { std::string label; std::string playlist_id; };

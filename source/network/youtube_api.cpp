@@ -45,7 +45,10 @@ bool YouTubeAPI::start_streaming(const std::string& url) {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L); 
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "3DS-YT");
-        
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);   // TCP connect timeout
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);   // 1 byte/s threshold
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 15L);   // No data for 15s → abort
+
         CURLcode res = curl_easy_perform(curl);
         if (res == CURLE_OK && !should_cancel) {
             success = true;

@@ -308,7 +308,8 @@ void UIRenderer::draw_popup_overlay(const RenderContext& ctx) {
             const Track& t = *found_track;
             std::string ch = t.uploader.length() > 30 ? t.uploader.substr(0, 30) + "..." : t.uploader;
             options.push_back("Channel: " + ch);
-            options.push_back("Views: " + t.views);
+            if (ctx.previous_state == STATE_SEARCH)
+                options.push_back("Views: " + t.views);
             if (!t.upload_date.empty() && t.upload_date != "?") {
                 options.push_back("Date: " + t.upload_date);
             }

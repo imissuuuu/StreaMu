@@ -157,6 +157,6 @@ void PlaylistDetailScreen::draw_top(const RenderContext& ctx,
 
 void PlaylistDetailScreen::draw_bottom(const RenderContext& ctx,
                                        UIManager& ui_mgr) {
-    draw_track_list_bottom(ctx, ui_mgr);
+    draw_track_list_bottom(ctx, ui_mgr, false);
     draw_menu_button(ctx, ui_mgr);
 }

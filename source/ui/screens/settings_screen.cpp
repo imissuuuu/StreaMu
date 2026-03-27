@@ -7,19 +7,24 @@
 
 #define WALLPAPER_DIR "sdmc:/3ds/StreaMu/wallpaper"
 
+// Pinned Save button y position (fixed, always visible regardless of scroll content)
+static constexpr float SAVE_Y = 210.0f;
+
 // Settings screen item indices
 enum SettingsItem {
   ITEM_MODE = 0,
   ITEM_COLOR = 1,
   ITEM_HUE = 2,
-  ITEM_L_BUTTON = 3,
-  ITEM_R_BUTTON = 4,
-  ITEM_DPAD_SPEED = 5,
-  ITEM_WALLPAPER = 6,
-  ITEM_SERVER_IP = 7,
-  ITEM_LANGUAGE = 8,
-  ITEM_SEPARATOR = 9,
-  ITEM_SAVE = 10
+  ITEM_SATURATION = 3,
+  ITEM_BRIGHTNESS = 4,
+  ITEM_L_BUTTON = 5,
+  ITEM_R_BUTTON = 6,
+  ITEM_DPAD_SPEED = 7,
+  ITEM_WALLPAPER = 8,
+  ITEM_SERVER_IP = 9,
+  ITEM_LANGUAGE = 10,
+  ITEM_SEPARATOR = 11,
+  ITEM_SAVE = 12
 };
 
 SettingsScreen::SettingsScreen(ThemeColors &colors, Wallpaper* wallpaper)
@@ -70,6 +75,10 @@ std::string SettingsScreen::get_item_label(int index) const {
     return "Color";
   case ITEM_HUE:
     return "Hue";
+  case ITEM_SATURATION:
+    return "Saturation";
+  case ITEM_BRIGHTNESS:
+    return "Brightness";
   case ITEM_L_BUTTON:
     return "L Button";
   case ITEM_R_BUTTON:
@@ -102,6 +111,16 @@ std::string SettingsScreen::get_item_value(int index) const {
     snprintf(buf, sizeof(buf), "%d", editing_config_.accent_hue);
     return std::string(buf);
   }
+  case ITEM_SATURATION: {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%.2f", editing_config_.accent_saturation);
+    return std::string(buf);
+  }
+  case ITEM_BRIGHTNESS: {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%.2f", editing_config_.accent_brightness);
+    return std::string(buf);
+  }
   case ITEM_L_BUTTON:
     return lr_action_name(editing_config_.l_action);
   case ITEM_R_BUTTON:
@@ -132,6 +151,10 @@ std::string SettingsScreen::get_item_description(int index) const {
            "theme.";
   case ITEM_HUE:
     return "Fine-tune the accent color.\nUse Left/Right to adjust hue (0-360).";
+  case ITEM_SATURATION:
+    return "Adjust color saturation.\nLeft: muted/pastel  Right: vivid.";
+  case ITEM_BRIGHTNESS:
+    return "Adjust color brightness.\nLeft: dark  Right: bright.";
   case ITEM_L_BUTTON:
     return "Set L button behavior.\nDisabled / Skip prev track / Play-Pause "
            "toggle.";
@@ -262,6 +285,13 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
         palette_row_ = row;
         editing_config_.accent_hue = palette_get_hue(palette_row_, palette_col_);
         editing_config_.palette_index = palette_row_ * COLOR_PALETTE_COLS + palette_col_;
+        if (palette_row_ == 4) {
+          editing_config_.accent_saturation = 0.0f;
+          editing_config_.accent_brightness = palette_get_gray_v(palette_col_);
+        } else {
+          editing_config_.accent_saturation = PALETTE_ROW_SV[palette_row_].s;
+          editing_config_.accent_brightness = PALETTE_ROW_SV[palette_row_].v;
+        }
         apply_preview();
         in_palette_mode_ = false;
         in_edit_mode_ = false;
@@ -273,6 +303,13 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
     // Real-time preview
     editing_config_.accent_hue = palette_get_hue(palette_row_, palette_col_);
     editing_config_.palette_index = palette_row_ * COLOR_PALETTE_COLS + palette_col_;
+    if (palette_row_ == 4) {
+      editing_config_.accent_saturation = 0.0f;
+      editing_config_.accent_brightness = palette_get_gray_v(palette_col_);
+    } else {
+      editing_config_.accent_saturation = PALETTE_ROW_SV[palette_row_].s;
+      editing_config_.accent_brightness = PALETTE_ROW_SV[palette_row_].v;
+    }
     apply_preview();
 
     if (kDown & KEY_A) {
@@ -379,6 +416,60 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
     return "";
   }
 
+  // ========== SATURATION / BRIGHTNESS slider edit mode ==========
+  if (in_edit_mode_ && (selected_item_ == ITEM_SATURATION || selected_item_ == ITEM_BRIGHTNESS)) {
+    float* target = (selected_item_ == ITEM_SATURATION)
+        ? &editing_config_.accent_saturation
+        : &editing_config_.accent_brightness;
+
+    touchPosition touch;
+    hidTouchRead(&touch);
+
+    // Tap outside slider -> exit edit mode
+    if (kDown & KEY_TOUCH) {
+      float item_y = 8.0f + selected_item_ * 28.0f - scroll_offset_;
+      if (touch.py < item_y || touch.py >= item_y + 28.0f) {
+        in_edit_mode_ = false;
+        last_tapped_item_ = -1;
+        ctx.touch_state.reset();
+        return "";
+      }
+    }
+    // Slider drag
+    if ((kDown & KEY_TOUCH) || (kHeld & KEY_TOUCH)) {
+      float bar_x = 100, bar_w = 180;
+      float item_y = 8.0f + selected_item_ * 28.0f - scroll_offset_;
+      if (touch.px >= (int)bar_x && touch.px <= (int)(bar_x + bar_w) &&
+          touch.py >= (int)(item_y + 7) && touch.py <= (int)(item_y + 21)) {
+        *target = (float)(touch.px - (int)bar_x) / bar_w;
+        if (*target > 1.0f) *target = 1.0f;
+        if (*target < 0.0f) *target = 0.0f;
+        editing_config_.palette_index = -1;
+        apply_preview();
+      }
+    }
+    // D-pad fine-tune
+    if (kRepeat & KEY_DRIGHT) {
+      *target += 0.05f;
+      if (*target > 1.0f) *target = 1.0f;
+      editing_config_.palette_index = -1;
+      apply_preview();
+    }
+    if (kRepeat & KEY_DLEFT) {
+      *target -= 0.05f;
+      if (*target < 0.0f) *target = 0.0f;
+      editing_config_.palette_index = -1;
+      apply_preview();
+    }
+    if (kDown & KEY_A) { in_edit_mode_ = false; }
+    if (kDown & KEY_B) {
+      editing_config_ = ctx.config;
+      apply_preview();
+      in_edit_mode_ = false;
+    }
+    return "";
+  }
+
   // ========== Normal mode: touch (two-tap + swipe scroll) ==========
   {
     touchPosition touch;
@@ -392,7 +483,8 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
       if (ctx.touch_state.is_dragging) {
         scroll_offset_ += delta_y;
         if (scroll_offset_ < 0.0f) scroll_offset_ = 0.0f;
-        float max_scroll = 98.0f; // content(308) - visible(210)
+        // Items 0..ITEM_SEPARATOR scroll into SAVE_Y; Save is pinned below
+        float max_scroll = 8.0f + (ITEM_SAVE - 1) * 28.0f + 20.0f - SAVE_Y;
         if (scroll_offset_ > max_scroll) scroll_offset_ = max_scroll;
         last_tapped_item_ = -1; // Reset two-tap during drag
       }
@@ -410,25 +502,35 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
           return "trigger_nav_menu";
         }
 
+        // Pinned Save button tap (two-tap)
+        if (tap_y >= (int)SAVE_Y && tap_y < (int)(SAVE_Y + 28)) {
+          if (selected_item_ == ITEM_SAVE && last_tapped_item_ == ITEM_SAVE) {
+            last_tapped_item_ = -1;
+            ctx.config = editing_config_;
+            ConfigManager::save(editing_config_);
+            apply_theme(ctx.config, m_colors);
+            return "trigger_home";
+          } else {
+            selected_item_ = ITEM_SAVE;
+            last_tapped_item_ = ITEM_SAVE;
+          }
+          return "";
+        }
+
         // Settings item tap (two-tap: 1st=select, 2nd=execute)
         float y = 8 - scroll_offset_;
         float item_h = 28;
         bool hit = false;
-        for (int i = 0; i < ITEM_COUNT; i++) {
+        for (int i = 0; i < ITEM_SAVE; i++) {  // Save is pinned; loop excludes it
           if (i == ITEM_SEPARATOR) { y += 20; continue; }
           if (tap_y >= (int)y && tap_y < (int)(y + item_h)) {
             hit = true;
             if (i == selected_item_ && i == last_tapped_item_) {
               // 2nd tap: execute
               last_tapped_item_ = -1;
-              if (i == ITEM_SAVE) {
-                ctx.config = editing_config_;
-                ConfigManager::save(editing_config_);
-                apply_theme(ctx.config, m_colors);
-                return "trigger_home";
-              } else if (i == ITEM_COLOR) {
+              if (i == ITEM_COLOR) {
                 in_palette_mode_ = true;
-              } else if (i == ITEM_HUE) {
+              } else if (i == ITEM_HUE || i == ITEM_SATURATION || i == ITEM_BRIGHTNESS) {
                 in_edit_mode_ = true;
               } else if (i == ITEM_MODE) {
                 editing_config_.mode =
@@ -478,15 +580,16 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
   }
 
   // After D-pad move: scroll to keep selected item visible
-  if (kRepeat & (KEY_DUP | KEY_DDOWN)) {
+  // (ITEM_SAVE is pinned at SAVE_Y, always visible — no scroll needed)
+  if ((kRepeat & (KEY_DUP | KEY_DDOWN)) && selected_item_ != ITEM_SAVE) {
     float item_y = 8.0f;
     for (int i = 0; i < selected_item_; i++) {
       item_y += (i == ITEM_SEPARATOR) ? 20.0f : 28.0f;
     }
     if (item_y < scroll_offset_) {
       scroll_offset_ = item_y;
-    } else if (item_y + 28.0f > scroll_offset_ + 210.0f) {
-      scroll_offset_ = item_y + 28.0f - 210.0f;
+    } else if (item_y + 28.0f > scroll_offset_ + SAVE_Y) {
+      scroll_offset_ = item_y + 28.0f - SAVE_Y;
     }
     if (scroll_offset_ < 0.0f) scroll_offset_ = 0.0f;
   }
@@ -500,6 +603,8 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
       apply_preview();
       break;
     case ITEM_HUE:
+    case ITEM_SATURATION:
+    case ITEM_BRIGHTNESS:
       in_edit_mode_ = true;
       break;
     case ITEM_L_BUTTON:
@@ -718,10 +823,10 @@ void SettingsScreen::draw_bottom(const RenderContext &ctx, UIManager &ui_mgr) {
     float y = 8 - scroll_offset_;
     float item_h = 28;
 
-    for (int i = 0; i < ITEM_COUNT; i++) {
+    for (int i = 0; i < ITEM_SAVE; i++) {  // Save is pinned below; exclude from scroll
       if (i == ITEM_SEPARATOR) {
         // Separator line (skip if off-screen)
-        if (y + 20 >= 0 && y < 210) {
+        if (y + 20 >= 0 && y < SAVE_Y) {
           C2D_DrawRectSolid(8, y + 10, 0, 304, 1, m_colors.text_dim);
         }
         y += 20;
@@ -729,7 +834,7 @@ void SettingsScreen::draw_bottom(const RenderContext &ctx, UIManager &ui_mgr) {
       }
 
       // Skip off-screen items
-      if (y + item_h < 0 || y >= 210) { y += item_h; continue; }
+      if (y + item_h < 0 || y >= SAVE_Y) { y += item_h; continue; }
 
       // Selection highlight (edit mode uses different bg color)
       if (i == selected_item_) {
@@ -782,6 +887,40 @@ void SettingsScreen::draw_bottom(const RenderContext &ctx, UIManager &ui_mgr) {
         C2D_DrawText(&text, C2D_WithColor, bar_x + bar_w + 5, y + 4, 0, 0.5f, 0.5f,
                      value_color);
 
+      } else if (i == ITEM_SATURATION || i == ITEM_BRIGHTNESS) {
+        // Saturation / Brightness slider display
+        C2D_TextParse(&text, buf, label.c_str());
+        C2D_DrawText(&text, C2D_WithColor, 8, y + 4, 0, 0.5f, 0.5f, label_color);
+
+        float bar_x = 100, bar_w = 180;
+        float cur_val = (i == ITEM_SATURATION)
+            ? editing_config_.accent_saturation
+            : editing_config_.accent_brightness;
+        int hue = editing_config_.accent_hue;
+
+        // Gradient bar (8 segments)
+        for (int seg = 0; seg < 8; seg++) {
+          float sx = bar_x + seg * (bar_w / 8);
+          float sw = bar_w / 8;
+          float t = ((float)seg + 0.5f) / 8.0f;
+          u32 seg_color;
+          if (i == ITEM_SATURATION) {
+            seg_color = hsv_to_color32(hue, t, editing_config_.accent_brightness);
+          } else {
+            seg_color = hsv_to_color32(hue, editing_config_.accent_saturation, t);
+          }
+          C2D_DrawRectSolid(sx, y + 10, 0, sw, 8, seg_color);
+        }
+
+        // Cursor position
+        float cursor_x = bar_x + cur_val * bar_w - 2;
+        C2D_DrawRectSolid(cursor_x, y + 7, 0, 4, 14, m_colors.cursor_outline);
+
+        // Value text
+        C2D_TextParse(&text, buf, value.c_str());
+        C2D_DrawText(&text, C2D_WithColor, bar_x + bar_w + 5, y + 4, 0, 0.5f, 0.5f,
+                     value_color);
+
       } else if (i == ITEM_DPAD_SPEED) {
         // D-Pad Speed slider
         C2D_TextParse(&text, buf, get_item_label(i).c_str());
@@ -825,10 +964,23 @@ void SettingsScreen::draw_bottom(const RenderContext &ctx, UIManager &ui_mgr) {
       y += item_h;
     }
 
+    // Pinned Save button (always visible regardless of scroll content)
+    {
+      bool save_sel = (selected_item_ == ITEM_SAVE);
+      if (save_sel) {
+        C2D_DrawRectSolid(0, SAVE_Y, 0, 320, 28, m_colors.accent);
+      }
+      u32 save_color = save_sel ? m_colors.accent_text : m_colors.text_body;
+      C2D_TextParse(&text, buf, "[ Save & Back ]");
+      float tw = 0, th = 0;
+      C2D_TextGetDimensions(&text, 0.55f, 0.55f, &tw, &th);
+      C2D_DrawText(&text, C2D_WithColor, (320 - tw) / 2, SAVE_Y + 4, 0, 0.55f, 0.55f, save_color);
+    }
+
     draw_menu_button(ctx, ui_mgr);
 
     // Footer
-    if (in_edit_mode_ && selected_item_ == ITEM_HUE) {
+    if (in_edit_mode_ && (selected_item_ == ITEM_HUE || selected_item_ == ITEM_SATURATION || selected_item_ == ITEM_BRIGHTNESS)) {
       C2D_TextParse(&text, buf, "Drag slider or D-Pad  Tap outside to confirm");
       C2D_DrawText(&text, C2D_WithColor, 50, 224, 0, 0.4f, 0.4f, m_colors.warn);
     } else {

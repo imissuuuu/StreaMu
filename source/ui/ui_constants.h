@@ -56,6 +56,11 @@ constexpr float TOP_NOW_PLAYING_WIN_W = 400.0f;
 constexpr float TOP_NOW_PLAYING_WIN_H = 50.0f;
 constexpr float TOP_NOW_PLAYING_PAD   = 2.0f;
 
+// Tile visual effects
+constexpr float BEVEL_W          = 3.0f;    // Bevel edge width
+constexpr float PRESS_TEXT_SHIFT = 2.0f;    // Text shift on touch press
+constexpr int   GRAD_STEP       = 2;        // Gradient draw step (px)
+
 // Home Screen 2-Column Layout
 constexpr float HOME_LEFT_X       = 0.0f;
 constexpr float HOME_RIGHT_X      = 160.0f;
@@ -70,6 +75,7 @@ constexpr float HOME_QA_SLOT_FONT = 0.60f;    // QA slot font
 constexpr float HOME_BORDER_W     = 2.0f;     // Border width
 constexpr float HOME_QA_SLOT_H    = 22.0f;    // QA slot row height
 constexpr float HOME_TILE_PAD     = 4.0f;     // Tile inner padding
+constexpr float HOME_CURSOR_W     = 14.0f;    // Space reserved for ▶ cursor
 
 // Hamburger menu button
 constexpr int MENU_BTN_Y  = 206;

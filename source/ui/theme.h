@@ -25,6 +25,8 @@ struct AppConfig {
   std::string wallpaper_file = "";  // Wallpaper filename (in wallpaper/ folder)
   std::string server_ip = "";      // Server IP:Port (e.g. "192.168.1.100:8080")
   std::string language = "en";     // Metadata language ("en" or "ja")
+  float accent_saturation = 0.75f; // 0.0-1.0 (custom mode saturation)
+  float accent_brightness = 0.78f; // 0.0-1.0 (custom mode brightness/value)
 };
 
 // === Theme Colors (changeable at runtime) ===
@@ -173,8 +175,8 @@ inline u32 palette_get_color(int row, int col) {
 // === Apply Theme ===
 inline void apply_theme(const AppConfig &cfg, ThemeColors &colors) {
   int hue = cfg.accent_hue;
-  float s = 0.75f;
-  float v = 0.78f;
+  float s = cfg.accent_saturation;
+  float v = cfg.accent_brightness;
 
   if (cfg.palette_index >= 0) {
     int row = cfg.palette_index / COLOR_PALETTE_COLS;

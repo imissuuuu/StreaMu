@@ -2,6 +2,49 @@
 #include "../ui_constants.h"
 #include "../play_bar.h"
 
+// --- Color helpers (Phase 7-A: gradient, bevel, press feedback) ---
+
+static inline u8 col_r(u32 c) { return c & 0xFF; }
+static inline u8 col_g(u32 c) { return (c >> 8) & 0xFF; }
+static inline u8 col_b(u32 c) { return (c >> 16) & 0xFF; }
+
+static inline u32 darken_color(u32 c, float factor) {
+    return C2D_Color32((u8)(col_r(c) * factor),
+                       (u8)(col_g(c) * factor),
+                       (u8)(col_b(c) * factor), 255);
+}
+
+static void draw_gradient(float x, float y, float w, float h, u32 top_col, u32 bot_col) {
+    int r0 = col_r(top_col), g0 = col_g(top_col), b0 = col_b(top_col);
+    int r1 = col_r(bot_col), g1 = col_g(bot_col), b1 = col_b(bot_col);
+    int ih = (int)h;
+    for (int iy = 0; iy < ih; iy += GRAD_STEP) {
+        float t = (float)iy / (float)ih;
+        u8 r = (u8)(r0 + (int)((r1 - r0) * t));
+        u8 g = (u8)(g0 + (int)((g1 - g0) * t));
+        u8 b = (u8)(b0 + (int)((b1 - b0) * t));
+        float sh = (iy + GRAD_STEP <= ih) ? (float)GRAD_STEP : h - (float)iy;
+        C2D_DrawRectSolid(x, y + (float)iy, 0, w, sh, C2D_Color32(r, g, b, 255));
+    }
+}
+
+static void draw_bevel(float x, float y, float w, float h, bool pressed) {
+    u32 hi = pressed ? C2D_Color32(0, 0, 0, 64)   : C2D_Color32(255, 255, 255, 64);
+    u32 lo = pressed ? C2D_Color32(255, 255, 255, 38) : C2D_Color32(0, 0, 0, 64);
+    C2D_DrawRectSolid(x, y, 0, w, BEVEL_W, hi);              // top
+    C2D_DrawRectSolid(x, y, 0, BEVEL_W, h, hi);              // left
+    C2D_DrawRectSolid(x, y + h - BEVEL_W, 0, w, BEVEL_W, lo); // bottom
+    C2D_DrawRectSolid(x + w - BEVEL_W, y, 0, BEVEL_W, h, lo); // right
+}
+
+static void draw_press_overlay(float x, float y, float w, float h, u32 inset_col) {
+    C2D_DrawRectSolid(x, y, 0, w, h, C2D_Color32(0, 0, 0, 51));
+    C2D_DrawRectSolid(x, y, 0, w, BEVEL_W, inset_col);
+    C2D_DrawRectSolid(x, y, 0, BEVEL_W, h, inset_col);
+    C2D_DrawRectSolid(x, y + h - BEVEL_W, 0, w, BEVEL_W, inset_col);
+    C2D_DrawRectSolid(x + w - BEVEL_W, y, 0, BEVEL_W, h, inset_col);
+}
+
 // --- QA ID helpers ---
 
 std::vector<std::string> HomeScreen::parse_qa_ids(const std::string& csv) {
@@ -88,25 +131,41 @@ void HomeScreen::draw_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
     C2D_Text text;
 
     TileId selected = get_selected_tile();
-    u32 border_color = ctx.theme->text_dim & 0x60FFFFFF;
+    u32 accent = ctx.theme->accent;
+    u32 accent_dark = darken_color(accent, 0.80f);
+    u32 inset_col = darken_color(accent, 0.50f);  // Darkened accent for inset border
 
-    // --- Draw tiles ---
+    // --- Draw tile with gradient + bevel + press feedback ---
     auto draw_tile = [&](TileId id, const char* label) {
         Rect r = get_tile_rect(id);
         bool is_sel = (id == selected && !qa_focused_);
+        bool is_pressed = (id == pressed_tile_);
 
-        // Background highlight
-        if (is_sel) {
-            C2D_DrawRectSolid(r.x, r.y, 0, r.w, r.h, ctx.theme->accent);
+        // Gradient background
+        draw_gradient(r.x, r.y, r.w, r.h, accent, accent_dark);
+
+        // Bevel (inverted when pressed)
+        draw_bevel(r.x, r.y, r.w, r.h, is_pressed);
+
+        // Press overlay
+        if (is_pressed) {
+            draw_press_overlay(r.x, r.y, r.w, r.h, inset_col);
         }
 
-        // Label centered
-        u32 col = is_sel ? ctx.theme->accent_text : ctx.theme->text_body;
+        // Label (with ▶ cursor space reserved)
+        u32 col = ctx.theme->accent_text;
         float font = HOME_TILE_FONT;
         float ty = r.y + (r.h - font * 24.0f) / 2.0f;
         float tx = r.x + HOME_TILE_PAD;
+        if (is_pressed) { tx += PRESS_TEXT_SHIFT; ty += PRESS_TEXT_SHIFT; }
+
+        // ▶ cursor for D-pad selection
+        if (is_sel && !is_pressed) {
+            C2D_TextParse(&text, buf, ">");
+            C2D_DrawText(&text, C2D_WithColor, tx, ty, 0, font, font, col);
+        }
         C2D_TextParse(&text, buf, label);
-        C2D_DrawText(&text, C2D_WithColor, tx, ty, 0, font, font, col);
+        C2D_DrawText(&text, C2D_WithColor, tx + HOME_CURSOR_W, ty, 0, font, font, col);
     };
 
     // Right column tiles
@@ -126,15 +185,34 @@ void HomeScreen::draw_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
     {
         Rect r = get_tile_rect(TILE_QA);
         bool qa_tile_sel = (selected == TILE_QA && !qa_focused_);
+        bool is_pressed = (TILE_QA == pressed_tile_);
 
-        if (qa_tile_sel) {
-            C2D_DrawRectSolid(r.x, r.y, 0, r.w, r.h, ctx.theme->accent);
+        // Gradient background
+        draw_gradient(r.x, r.y, r.w, r.h, accent, accent_dark);
+
+        // Bevel
+        draw_bevel(r.x, r.y, r.w, r.h, is_pressed);
+
+        // Press overlay
+        if (is_pressed) {
+            draw_press_overlay(r.x, r.y, r.w, r.h, inset_col);
         }
 
-        // QA header
-        u32 hdr_col = qa_tile_sel ? ctx.theme->accent_text : ctx.theme->text_dim;
+        float press_off = is_pressed ? PRESS_TEXT_SHIFT : 0.0f;
+
+        // QA header (with ▶ cursor when tile-selected)
+        u32 hdr_col = ctx.theme->accent_text;
+        float hdr_x = r.x + HOME_TILE_PAD + press_off;
+        float hdr_y = r.y + HOME_TILE_PAD + press_off;
+        if (qa_tile_sel && !is_pressed) {
+            C2D_TextParse(&text, buf, ">");
+            C2D_DrawText(&text, C2D_WithColor,
+                         hdr_x, hdr_y,
+                         0, HOME_QA_HEADER_FONT, HOME_QA_HEADER_FONT, hdr_col);
+        }
         C2D_TextParse(&text, buf, "Quick Access");
-        C2D_DrawText(&text, C2D_WithColor, r.x + HOME_TILE_PAD, r.y + HOME_TILE_PAD,
+        C2D_DrawText(&text, C2D_WithColor,
+                     hdr_x + HOME_CURSOR_W, hdr_y,
                      0, HOME_QA_HEADER_FONT, HOME_QA_HEADER_FONT, hdr_col);
 
         // QA slots
@@ -142,52 +220,26 @@ void HomeScreen::draw_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
         for (int i = 0; i < (int)qa_slots_.size(); ++i) {
             bool slot_sel = (qa_focused_ && selected == TILE_QA && i == qa_sel_);
 
-            if (slot_sel) {
-                C2D_DrawRectSolid(r.x, slot_y, 0, r.w, HOME_QA_SLOT_H, ctx.theme->accent);
-            }
-
-            u32 slot_col;
-            if (slot_sel) {
-                slot_col = ctx.theme->accent_text;
-            } else if (qa_tile_sel) {
-                slot_col = ctx.theme->accent_text;
-            } else {
-                slot_col = ctx.theme->text_body;
-            }
-
+            u32 slot_col = ctx.theme->accent_text;
             float text_y = slot_y + (HOME_QA_SLOT_H - HOME_QA_SLOT_FONT * 24.0f) / 2.0f;
+            float slot_x = r.x + HOME_TILE_PAD + HOME_CURSOR_W + press_off;
+
+            // ▶ cursor for selected QA slot
+            if (slot_sel) {
+                C2D_TextParse(&text, buf, ">");
+                C2D_DrawText(&text, C2D_WithColor,
+                             r.x + HOME_TILE_PAD + press_off, text_y + press_off,
+                             0, HOME_QA_SLOT_FONT, HOME_QA_SLOT_FONT, slot_col);
+            }
+
             C2D_TextParse(&text, buf, qa_slots_[i].label.c_str());
-            C2D_DrawText(&text, C2D_WithColor, r.x + HOME_TILE_PAD + 8.0f, text_y,
+            C2D_DrawText(&text, C2D_WithColor,
+                         slot_x, text_y + press_off,
                          0, HOME_QA_SLOT_FONT, HOME_QA_SLOT_FONT, slot_col);
 
             slot_y += HOME_QA_SLOT_H;
         }
     }
-
-    // --- Border lines (block outlines, overlapping at edges) ---
-    float bw = HOME_BORDER_W;
-
-    // Each block draws its own outline (top, bottom, left, right edges)
-    // This creates the "overlapping frame" look
-
-    // Helper: draw rect outline
-    auto draw_outline = [&](float x, float y, float w, float h) {
-        C2D_DrawRectSolid(x, y, 0, w, bw, border_color);           // top
-        C2D_DrawRectSolid(x, y + h - bw, 0, w, bw, border_color);  // bottom
-        C2D_DrawRectSolid(x, y, 0, bw, h, border_color);            // left
-        C2D_DrawRectSolid(x + w - bw, y, 0, bw, h, border_color);   // right
-    };
-
-    // Left column: QA
-    draw_outline(HOME_LEFT_X, HOME_AREA_TOP, HOME_COL_W, HOME_QA_H);
-    // Left column: Playing
-    draw_outline(HOME_LEFT_X, HOME_QA_H, HOME_COL_W, HOME_AREA_BOTTOM - HOME_QA_H);
-    // Right column: Search
-    draw_outline(HOME_RIGHT_X, HOME_AREA_TOP, HOME_COL_W, HOME_TILE_H);
-    // Right column: Playlists
-    draw_outline(HOME_RIGHT_X, HOME_TILE_H, HOME_COL_W, HOME_TILE_H);
-    // Right column: Settings
-    draw_outline(HOME_RIGHT_X, HOME_TILE_H * 2.0f, HOME_COL_W, HOME_AREA_BOTTOM - HOME_TILE_H * 2.0f);
 
     PlayBar::draw(ctx, ui_mgr);
 }
@@ -213,11 +265,27 @@ std::string HomeScreen::update(AppContext& ctx, u32 kDown, u32 kHeld, u32 kRepea
 
     if (kDown & KEY_TOUCH) {
         ctx.touch_state.begin(touch.px, touch.py);
+        // Hit test for press feedback
+        pressed_tile_ = -1;
+        int px = touch.px, py = touch.py;
+        if (py < (int)PlayBar::BAR_Y) {
+            for (int id = 0; id < TILE_COUNT; ++id) {
+                TileId tid = static_cast<TileId>(id);
+                if (tid == TILE_PLAYING && !is_playing_visible(ctx)) continue;
+                Rect r = get_tile_rect(tid);
+                if (px >= (int)r.x && px < (int)(r.x + r.w) &&
+                    py >= (int)r.y && py < (int)(r.y + r.h)) {
+                    pressed_tile_ = (int)tid;
+                    break;
+                }
+            }
+        }
     }
     if ((kHeld & KEY_TOUCH) && ctx.touch_state.is_touching) {
         ctx.touch_state.update(touch.px, touch.py);
     }
     if (!(kHeld & KEY_TOUCH) && ctx.touch_state.is_touching) {
+        pressed_tile_ = -1;
         bool was_tap = ctx.touch_state.end();
         if (was_tap) {
             int tx = ctx.touch_state.current_x;

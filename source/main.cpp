@@ -208,14 +208,12 @@ void download_thread(void *arg) {
     if (stream_url != "") {
       bool success = api->start_streaming(stream_url);
 
-      // Retry: wait for WiFi reconnect (lid close/open), max 5 times, 2s interval
+      // Retry only if server is reachable (e.g. transient extract error)
       if (!success && !YouTubeAPI::should_cancel) {
-        for (int retry = 0; retry < 5 && !YouTubeAPI::should_cancel; ++retry) {
+        if (api->check_connection()) {
           svcSleepThread(2000ULL * 1000 * 1000); // 2s wait
-          if (YouTubeAPI::should_cancel) break;
-          if (api->check_connection()) {
+          if (!YouTubeAPI::should_cancel) {
             success = api->start_streaming(stream_url);
-            if (success) break;
           }
         }
       }

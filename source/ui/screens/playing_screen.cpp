@@ -48,14 +48,18 @@ void PlayingScreen::draw_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
             bool is_playing   = (tr.id == ctx.playing_id);
             bool is_selected  = (i == ctx.selected_index);
 
-            // BG: selected -> accent, playing (not selected) -> playing_bg
+            // BG: selected -> accent + left bar, playing -> accent tint
             if (is_selected) {
                 C2D_DrawRectSolid(0, y_item, 0, 320, ITEM_H, ctx.theme->accent);
+                draw_selection_left_bar(y_item, ITEM_H, ctx.theme->accent);
             } else if (is_playing) {
                 C2D_DrawRectSolid(0, y_item, 0, 320, ITEM_H, ctx.theme->playing_bg);
+            } else {
+                draw_item_bg(0, y_item, 320, ITEM_H, ctx.theme->bg_bottom);
             }
 
-            u32 title_color = is_selected ? ctx.theme->accent_text : ctx.theme->text_body;
+            u32 title_color = (is_selected || is_playing) ? ctx.theme->accent_text
+                                                          : ctx.theme->text_body;
 
             // Add ">>" indicator for playing track
             std::string display_title = is_playing ? (">> " + tr.title) : tr.title;
@@ -78,6 +82,11 @@ void PlayingScreen::draw_bottom(const RenderContext& ctx, UIManager& ui_mgr) {
                 C2D_TextParse(&text, buf, tr.duration.c_str());
                 C2D_DrawText(&text, C2D_WithColor, BTM_MARGIN_X + 8, y_item + BTM_META_OFFSET, 0,
                              FONT_XS, FONT_XS, title_color);
+            }
+            // Dashed separator
+            if (!is_selected) {
+                u32 sep = ctx.theme->text_dim & 0x14FFFFFF;
+                draw_dashed_line_h(0, y_item + ITEM_H - 1, 320, sep);
             }
         }
     }
