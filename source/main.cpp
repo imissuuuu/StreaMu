@@ -334,6 +334,7 @@ int main(int argc, char *argv[]) {
     g_wallpaper.load(wp_path);
   }
   renderer.set_wallpaper(&g_wallpaper);
+  renderer.set_thumbnail(&ctx.thumbnail_tex);
 
   g_staticBuf = ui_mgr.get_text_buf();
 
@@ -356,6 +357,7 @@ int main(int argc, char *argv[]) {
   auto g_api_ptr = std::make_unique<YouTubeAPI>();
   YouTubeAPI &api = *g_api_ptr;
   api.init();
+  ctx.api = &api;
 
   // --- Step 2/4: Config loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 2, 4, "Loading config...");
@@ -1736,6 +1738,8 @@ int main(int argc, char *argv[]) {
 
   g_player_ptr.reset();
   g_playlist_manager_ptr.reset();
+  // Unload GPU textures stored in ctx before destroying ctx
+  ctx.thumbnail_tex.unload();
   g_ctx_ptr.reset();
 
   // 5. Destroy network class before socExit
