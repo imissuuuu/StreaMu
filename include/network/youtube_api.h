@@ -12,7 +12,7 @@ struct Track {
     std::string views;
     std::string uploader;
     std::string upload_date;
-    std::string thumbnail_url; // "https://i.ytimg.com/vi/{id}/default.jpg"
+    std::string thumbnail_url; // "https://i.ytimg.com/vi/{id}/mqdefault.jpg"
 };
 typedef std::function<void(const std::vector<Track>&, bool)> SearchCallback;
 typedef std::function<void(const std::string&, bool)> StreamCallback;

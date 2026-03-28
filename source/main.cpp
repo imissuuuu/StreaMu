@@ -23,6 +23,7 @@ std::unique_ptr<std::vector<uint8_t>>
     g_stream_buffer_ptr; // Dynamic buffer for MP3Player
 LightLock stream_lock;   // Mutex protecting stream_buffer access
 
+#include "stb_image.h"
 #include "app_context.h"
 #include "config_manager.h"
 #include "ui/screen_manager.h"
@@ -161,6 +162,56 @@ void update_playing_title_lines(C2D_TextBuf buf) {
           remaining.substr(0, best_len) + "...");
     }
   }
+}
+
+// Thumbnail download thread: fetch JPEG, decode, crop to square, store pixels
+static void thumbnail_dl_thread(void* arg) {
+    AppContext* c = static_cast<AppContext*>(arg);
+
+    LightLock_Lock(&c->lock);
+    std::string vid_id = c->thumbnail_vid_id;
+    YouTubeAPI* api = c->api;
+    LightLock_Unlock(&c->lock);
+
+    if (!api || vid_id.empty()) {
+        LightLock_Lock(&c->lock);
+        c->thumbnail_loading = false;
+        LightLock_Unlock(&c->lock);
+        return;
+    }
+
+    std::vector<uint8_t> raw;
+    bool ok = api->download_thumbnail(vid_id, raw);
+
+    if (ok && !raw.empty()) {
+        int w = 0, h = 0, ch = 0;
+        u8* rgba = stbi_load_from_memory(raw.data(), (int)raw.size(), &w, &h, &ch, 4);
+        if (rgba && w > 0 && h > 0) {
+            int crop = w < h ? w : h;
+            int ox = (w - crop) / 2;
+            int oy = (h - crop) / 2;
+            std::vector<uint8_t> pixels(crop * crop * 4);
+            for (int row = 0; row < crop; row++) {
+                memcpy(pixels.data() + row * crop * 4,
+                       rgba + ((oy + row) * w + ox) * 4,
+                       crop * 4);
+            }
+            stbi_image_free(rgba);
+
+            LightLock_Lock(&c->lock);
+            c->thumbnail_pixels = std::move(pixels);
+            c->thumbnail_crop_size = crop;
+            c->thumbnail_ready = true;
+            c->thumbnail_loading = false;
+            LightLock_Unlock(&c->lock);
+            return;
+        }
+        if (rgba) stbi_image_free(rgba);
+    }
+
+    LightLock_Lock(&c->lock);
+    c->thumbnail_loading = false;
+    LightLock_Unlock(&c->lock);
 }
 
 void download_thread(void *arg) {
@@ -1652,6 +1703,50 @@ int main(int argc, char *argv[]) {
       }
     }
 
+    // --- Thumbnail async trigger ---
+    {
+        LightLock_Lock(&ctx.lock);
+        bool need_fetch = !ctx.playing_id.empty()
+                       && ctx.playing_id != ctx.thumbnail_vid_id
+                       && !ctx.thumbnail_loading;
+        if (need_fetch) {
+            ctx.thumbnail_vid_id = ctx.playing_id;
+            ctx.thumbnail_loading = true;
+            ctx.thumbnail_ready = false;
+        }
+        LightLock_Unlock(&ctx.lock);
+
+        if (need_fetch) {
+            ctx.thumbnail_tex.unload();
+            Thread t = threadCreate(thumbnail_dl_thread, &ctx, 0x10000, 0x3F, -2, true);
+            if (!t) {
+                LightLock_Lock(&ctx.lock);
+                ctx.thumbnail_loading = false;
+                ctx.thumbnail_vid_id.clear();
+                LightLock_Unlock(&ctx.lock);
+            }
+        }
+    }
+
+    // --- Thumbnail GPU upload (main thread only) ---
+    {
+        LightLock_Lock(&ctx.lock);
+        bool ready = ctx.thumbnail_ready;
+        std::vector<uint8_t> pixels;
+        int crop_size = 0;
+        if (ready) {
+            pixels = std::move(ctx.thumbnail_pixels);
+            crop_size = ctx.thumbnail_crop_size;
+            ctx.thumbnail_ready = false;
+        }
+        LightLock_Unlock(&ctx.lock);
+
+        if (ready) {
+            ctx.thumbnail_tex.unload();
+            ctx.thumbnail_tex.load_from_pixels(pixels.data(), crop_size, crop_size);
+        }
+    }
+
     player.update();
 
     LightLock_Lock(&stream_lock);
@@ -1738,6 +1833,16 @@ int main(int argc, char *argv[]) {
 
   g_player_ptr.reset();
   g_playlist_manager_ptr.reset();
+  // Wait for thumbnail thread to finish (if running)
+  {
+    bool still_loading;
+    do {
+      LightLock_Lock(&ctx.lock);
+      still_loading = ctx.thumbnail_loading;
+      LightLock_Unlock(&ctx.lock);
+      if (still_loading) svcSleepThread(10 * 1000 * 1000);
+    } while (still_loading);
+  }
   // Unload GPU textures stored in ctx before destroying ctx
   ctx.thumbnail_tex.unload();
   g_ctx_ptr.reset();

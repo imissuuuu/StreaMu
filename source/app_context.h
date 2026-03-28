@@ -25,4 +25,10 @@ struct AppContext : public RenderContext {
     // Thumbnail for currently playing track
     Wallpaper thumbnail_tex;
     std::string thumbnail_vid_id; // video ID of the loaded thumbnail
+
+    // Thumbnail async download state (protected by lock)
+    bool thumbnail_loading = false;       // true while thread is running
+    bool thumbnail_ready = false;         // true when raw data is ready for GPU upload
+    std::vector<uint8_t> thumbnail_pixels; // cropped RGBA pixels (set by thread)
+    int thumbnail_crop_size = 0;          // side length of cropped square
 };

@@ -12,9 +12,9 @@ public:
     bool is_loaded() const { return m_loaded; }
     void draw_fullscreen(); // Draw fullscreen on top screen (400x240)
     void draw_at(float x, float y, float size); // Draw scaled/centered into a square
+    bool load_from_pixels(uint8_t* rgba, int w, int h); // Build GPU texture from decoded pixels
 
 private:
-    bool load_from_pixels(uint8_t* rgba, int w, int h); // Build GPU texture from decoded pixels
     C3D_Tex m_tex{};
     Tex3DS_SubTexture m_subtex{};
     C2D_Image m_img{};

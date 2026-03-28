@@ -192,10 +192,9 @@ void UIRenderer::draw_top_screen(const RenderContext& ctx) {
                      C2D_Color32(220, 220, 220, 255));
     }
 
-    // --- Thumbnail (PlayingScreen only) ---
-    // Centered in area between status bar (y=20) and now-playing bar (y=190)
-    if (ctx.current_state == STATE_PLAYING_UI && m_thumbnail && m_thumbnail->is_loaded()) {
-        m_thumbnail->draw_at(136.0f, 41.0f, 128.0f);
+    // --- Thumbnail (all screens except Settings) ---
+    if (ctx.current_state != STATE_SETTINGS && m_thumbnail && m_thumbnail->is_loaded()) {
+        m_thumbnail->draw_at(8.0f, 56.0f, 128.0f);
     }
 
     // --- Now Playing Title (with play/pause icon) ---
