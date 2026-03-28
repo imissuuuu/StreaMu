@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>StreaMu - Retro Windows Style Exploration</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;600&family=VT323&family=Pixelify+Sans:wght@400;500;600;700&display=swap');
+
+  :root {
+    --accent: rgb(50, 120, 199);
+    --accent-bright: rgb(80, 150, 230);
+    --accent-muted: rgb(35, 84, 140);
+    --dark-bg: rgb(30, 30, 30);
+    --dark-text: rgb(220, 220, 220);
+    --dark-dim: rgb(150, 150, 150);
+    --light-bg: rgb(245, 245, 245);
+    --light-text: rgb(30, 30, 30);
+    --light-dim: rgb(120, 120, 120);
+
+    /* Win95 palette */
+    --w95-gray: rgb(192, 192, 192);
+    --w95-darkgray: rgb(128, 128, 128);
+    --w95-white: rgb(255, 255, 255);
+    --w95-black: rgb(0, 0, 0);
+    --w95-blue: rgb(0, 0, 128);
+    --w95-lightblue: rgb(0, 0, 168);
+    --w95-titleblue: rgb(0, 0, 128);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a0f;
+    background-image: radial-gradient(ellipse at 30% 40%, rgba(50, 120, 199, 0.03) 0%, transparent 60%);
+    min-height: 100vh;
+    font-family: 'DM Sans', sans-serif;
+    color: #b0b0b8;
+    padding: 32px 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: #505060;
+    margin-bottom: 4px;
+  }
+  .subtitle { font-size: 12px; color: #404048; margin-bottom: 24px; }
+
+  .section {
+    margin-bottom: 40px;
+    width: 100%;
+    max-width: 780px;
+  }
+  .section-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .section-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 2px; text-transform: uppercase;
+    color: var(--accent); opacity: 0.6;
+  }
+  .section-name { font-size: 15px; font-weight: 700; color: #d0d0d8; }
+  .section-desc {
+    font-size: 11px; color: #606068;
+    margin-left: auto; max-width: 360px;
+    text-align: right; line-height: 1.4;
+  }
+
+  .screen-pair {
+    display: flex; gap: 24px; justify-content: center; flex-wrap: wrap;
+  }
+  .screen-wrapper {
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .theme-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 2px;
+    text-transform: uppercase; color: #404048; margin-bottom: 6px;
+  }
+  .screen-bezel {
+    border: 2px solid #1a1a22;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.03), 0 4px 16px rgba(0,0,0,0.5);
+  }
+
+  .screen {
+    width: 320px;
+    height: 240px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* ===================================
+     COMPARISON: 前回決定の A+dashed (左)
+     =================================== */
+  .ref .list-area { width: 320px; height: 200px; padding-top: 8px; }
+  .ref .play-bar {
+    width: 320px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    gap: 20px; font-size: 10px;
+  }
+  .ref .play-bar-icon { opacity: 0.5; font-size: 12px; }
+
+  .ref .item {
+    width: 100%; height: 27px; padding: 0 8px;
+    display: flex; flex-direction: column; justify-content: center;
+    position: relative;
+  }
+  .ref .item-title { font-size: 11px; font-weight: 500; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ref .item-meta { font-size: 9px; font-weight: 400; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .ref.dark { background: var(--dark-bg); }
+  .ref.dark .item-title { color: var(--dark-text); }
+  .ref.dark .item-meta { color: var(--dark-dim); }
+  .ref.dark .play-bar { background: rgba(0,0,0,0.3); color: var(--dark-dim); border-top: 1px solid rgba(255,255,255,0.05); }
+  .ref.dark .item { border-bottom: 1px dashed rgba(255,255,255,0.07); }
+
+  .ref.light { background: var(--light-bg); }
+  .ref.light .item-title { color: var(--light-text); }
+  .ref.light .item-meta { color: var(--light-dim); }
+  .ref.light .play-bar { background: rgba(0,0,0,0.04); color: var(--light-dim); border-top: 1px solid rgba(0,0,0,0.06); }
+  .ref.light .item { border-bottom: 1px dashed rgba(0,0,0,0.07); }
+
+  .ref .item:last-child { border-bottom: none !important; }
+
+  .ref .item.selected { background: var(--accent); padding-left: 12px; border-bottom-color: transparent !important; }
+  .ref .item.selected::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent-bright); }
+  .ref .item.selected .item-title { color: #fff; font-weight: 700; }
+  .ref .item.selected .item-meta { color: rgba(255,255,255,0.65); }
+
+  .ref.dark .item.playing { background: rgba(50,120,199,0.10); }
+  .ref.light .item.playing { background: rgba(50,120,199,0.07); }
+  .ref.dark .item.playing .item-title { color: var(--accent-bright); }
+  .ref.light .item.playing .item-title { color: var(--accent); }
+
+  /* ===================================
+     R1 — Win95 Classic
+     Full retro: inset listbox, system blue highlight, raised playbar
+     =================================== */
+
+  .r1 {
+    font-family: 'Pixelify Sans', 'MS Gothic', 'Courier New', monospace;
+    image-rendering: pixelated;
+  }
+
+  .r1.dark {
+    background: rgb(40, 40, 45);
+  }
+  .r1.light {
+    background: var(--w95-gray);
+  }
+
+  .r1 .list-area {
+    width: 308px;
+    margin: 4px 6px 0 6px;
+    height: 192px;
+    padding: 2px;
+    overflow: hidden;
+  }
+
+  /* Inset border (Win95 sunken listbox) */
+  .r1.dark .list-area {
+    border-top: 2px solid rgb(15, 15, 18);
+    border-left: 2px solid rgb(15, 15, 18);
+    border-bottom: 2px solid rgb(70, 70, 78);
+    border-right: 2px solid rgb(70, 70, 78);
+    background: rgb(25, 25, 30);
+  }
+  .r1.light .list-area {
+    border-top: 2px solid var(--w95-darkgray);
+    border-left: 2px solid var(--w95-darkgray);
+    border-bottom: 2px solid var(--w95-white);
+    border-right: 2px solid var(--w95-white);
+    background: var(--w95-white);
+  }
+
+  .r1 .item {
+    width: 100%;
+    height: 26px;
+    padding: 0 4px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    position: relative;
+  }
+
+  .r1 .item-title {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .r1 .item-meta {
+    font-size: 10px;
+    font-weight: 400;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Dark theme colors */
+  .r1.dark .item-title { color: rgb(210, 210, 215); }
+  .r1.dark .item-meta { color: rgb(130, 130, 140); }
+
+  /* Light theme colors */
+  .r1.light .item-title { color: var(--w95-black); }
+  .r1.light .item-meta { color: rgb(100, 100, 100); }
+
+  /* Selected: classic Win95 blue highlight */
+  .r1.dark .item.selected {
+    background: var(--accent);
+  }
+  .r1.light .item.selected {
+    background: var(--w95-blue);
+  }
+  .r1 .item.selected .item-title { color: var(--w95-white) !important; font-weight: 700; }
+  .r1 .item.selected .item-meta { color: rgba(255,255,255,0.6) !important; }
+
+  /* Playing: subtle */
+  .r1.dark .item.playing { background: rgba(50,120,199,0.12); }
+  .r1.light .item.playing { background: rgba(0,0,128,0.08); }
+  .r1.dark .item.playing .item-title { color: var(--accent-bright) !important; }
+  .r1.light .item.playing .item-title { color: var(--w95-blue) !important; }
+
+  /* PlayBar: raised toolbar feel */
+  .r1 .play-bar {
+    width: 308px;
+    height: 34px;
+    margin: 4px 6px 0 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    font-size: 11px;
+  }
+  .r1.dark .play-bar {
+    background: rgb(50, 50, 55);
+    border-top: 2px solid rgb(75, 75, 82);
+    border-left: 2px solid rgb(75, 75, 82);
+    border-bottom: 2px solid rgb(20, 20, 24);
+    border-right: 2px solid rgb(20, 20, 24);
+    color: rgb(180, 180, 185);
+  }
+  .r1.light .play-bar {
+    background: var(--w95-gray);
+    border-top: 2px solid var(--w95-white);
+    border-left: 2px solid var(--w95-white);
+    border-bottom: 2px solid var(--w95-darkgray);
+    border-right: 2px solid var(--w95-darkgray);
+    color: var(--w95-black);
+  }
+  .r1 .play-bar-icon { opacity: 0.6; font-size: 13px; }
+
+  /* ===================================
+     R2 — Win95 + Accent Bar hybrid
+     Win95 listbox frame, but uses accent left bar for state
+     =================================== */
+
+  .r2 {
+    font-family: 'Pixelify Sans', 'MS Gothic', 'Courier New', monospace;
+    image-rendering: pixelated;
+  }
+
+  .r2.dark { background: rgb(35, 35, 40); }
+  .r2.light { background: rgb(220, 220, 224); }
+
+  .r2 .list-area {
+    width: 308px;
+    margin: 4px 6px 0 6px;
+    height: 192px;
+    padding: 2px;
+    overflow: hidden;
+  }
+
+  .r2.dark .list-area {
+    border-top: 2px solid rgb(15, 15, 18);
+    border-left: 2px solid rgb(15, 15, 18);
+    border-bottom: 2px solid rgb(65, 65, 72);
+    border-right: 2px solid rgb(65, 65, 72);
+    background: rgb(22, 22, 28);
+  }
+  .r2.light .list-area {
+    border-top: 2px solid var(--w95-darkgray);
+    border-left: 2px solid var(--w95-darkgray);
+    border-bottom: 2px solid var(--w95-white);
+    border-right: 2px solid var(--w95-white);
+    background: var(--w95-white);
+  }
+
+  .r2 .item {
+    width: 100%;
+    height: 26px;
+    padding: 0 4px 0 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    position: relative;
+    border-bottom: 1px dashed rgba(128,128,128,0.15);
+  }
+  .r2 .item:last-child { border-bottom: none; }
+
+  .r2 .item-title {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .r2 .item-meta {
+    font-size: 10px;
+    font-weight: 400;
+    line-height: 1.2;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  .r2.dark .item-title { color: rgb(210, 210, 215); }
+  .r2.dark .item-meta { color: rgb(130, 130, 140); }
+  .r2.light .item-title { color: var(--w95-black); }
+  .r2.light .item-meta { color: rgb(100, 100, 100); }
+
+  /* Selected: accent left bar + tint */
+  .r2 .item.selected {
+    border-bottom-color: transparent;
+  }
+  .r2 .item.selected::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 4px;
+  }
+  .r2.dark .item.selected { background: rgba(50,120,199,0.18); }
+  .r2.dark .item.selected::before { background: var(--accent-bright); }
+  .r2.dark .item.selected .item-title { color: #fff !important; font-weight: 700; }
+  .r2.dark .item.selected .item-meta { color: rgba(200,220,255,0.6) !important; }
+
+  .r2.light .item.selected { background: rgba(0,0,128,0.10); }
+  .r2.light .item.selected::before { background: var(--w95-blue); }
+  .r2.light .item.selected .item-title { color: var(--w95-blue) !important; font-weight: 700; }
+  .r2.light .item.selected .item-meta { color: rgb(0,0,100) !important; }
+
+  /* Playing */
+  .r2 .item.playing::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 2px; bottom: 2px;
+    width: 4px;
+    opacity: 0.5;
+  }
+  .r2.dark .item.playing::before { background: var(--accent-muted); }
+  .r2.light .item.playing::before { background: var(--w95-darkgray); }
+  .r2.dark .item.playing .item-title { color: var(--accent-bright) !important; }
+  .r2.light .item.playing .item-title { color: var(--w95-blue) !important; }
+
+  .r2 .play-bar {
+    width: 308px; height: 34px; margin: 4px 6px 0 6px;
+    display: flex; align-items: center; justify-content: center;
+    gap: 16px; font-size: 11px;
+  }
+  .r2.dark .play-bar {
+    background: rgb(50, 50, 55);
+    border-top: 2px solid rgb(75, 75, 82);
+    border-left: 2px solid rgb(75, 75, 82);
+    border-bottom: 2px solid rgb(20, 20, 24);
+    border-right: 2px solid rgb(20, 20, 24);
+    color: rgb(180, 180, 185);
+  }
+  .r2.light .play-bar {
+    background: var(--w95-gray);
+    border-top: 2px solid var(--w95-white);
+    border-left: 2px solid var(--w95-white);
+    border-bottom: 2px solid var(--w95-darkgray);
+    border-right: 2px solid var(--w95-darkgray);
+    color: var(--w95-black);
+  }
+  .r2 .play-bar-icon { opacity: 0.6; font-size: 13px; }
+
+  /* ===================================
+     R3 — Retro Terminal / DOS
+     Monospace, green-on-dark, "> " cursor, box-drawing borders
+     =================================== */
+
+  .r3 {
+    font-family: 'VT323', 'Courier New', monospace;
+  }
+
+  .r3.dark { background: rgb(8, 16, 8); }
+  .r3.light { background: rgb(20, 20, 50); }
+
+  .r3 .list-area {
+    width: 312px;
+    margin: 4px 4px 0 4px;
+    height: 194px;
+    padding: 3px 4px;
+    overflow: hidden;
+  }
+
+  .r3.dark .list-area {
+    border: 1px solid rgba(80, 200, 80, 0.3);
+  }
+  .r3.light .list-area {
+    border: 1px solid rgba(180, 180, 255, 0.3);
+  }
+
+  .r3 .item {
+    width: 100%;
+    height: 26px;
+    padding: 0 4px 0 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    position: relative;
+  }
+
+  .r3 .item-title {
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.15;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    letter-spacing: 0.5px;
+  }
+  .r3 .item-meta {
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.15;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    letter-spacing: 0.5px;
+  }
+
+  /* Dark = green phosphor */
+  .r3.dark .item-title { color: rgba(80, 200, 80, 0.85); }
+  .r3.dark .item-meta { color: rgba(80, 200, 80, 0.4); }
+
+  /* Light = amber phosphor */
+  .r3.light .item-title { color: rgba(180, 180, 255, 0.85); }
+  .r3.light .item-meta { color: rgba(180, 180, 255, 0.4); }
+
+  /* Selected: inverted + cursor */
+  .r3 .item.selected::before {
+    content: '>';
+    position: absolute;
+    left: 4px;
+    top: 50%;
+    transform: translateY(-55%);
+    font-size: 14px;
+    font-weight: 400;
+  }
+  .r3.dark .item.selected {
+    background: rgba(80, 200, 80, 0.15);
+  }
+  .r3.dark .item.selected::before { color: rgba(80, 200, 80, 1); }
+  .r3.dark .item.selected .item-title { color: rgba(120, 255, 120, 1) !important; }
+  .r3.dark .item.selected .item-meta { color: rgba(80, 200, 80, 0.6) !important; }
+
+  .r3.light .item.selected {
+    background: rgba(180, 180, 255, 0.12);
+  }
+  .r3.light .item.selected::before { color: rgba(200, 200, 255, 1); }
+  .r3.light .item.selected .item-title { color: rgba(220, 220, 255, 1) !important; }
+  .r3.light .item.selected .item-meta { color: rgba(180, 180, 255, 0.6) !important; }
+
+  /* Playing: >> marker */
+  .r3 .item.playing::before {
+    content: '>>';
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-55%);
+    font-size: 12px;
+    letter-spacing: -3px;
+  }
+  .r3.dark .item.playing::before { color: rgba(80, 200, 80, 0.5); }
+  .r3.dark .item.playing .item-title { color: rgba(80, 200, 80, 0.65) !important; }
+  .r3.light .item.playing::before { color: rgba(180, 180, 255, 0.5); }
+  .r3.light .item.playing .item-title { color: rgba(180, 180, 255, 0.65) !important; }
+
+  /* Playbar */
+  .r3 .play-bar {
+    width: 312px; height: 34px; margin: 4px 4px 0 4px;
+    display: flex; align-items: center; justify-content: center;
+    gap: 14px; font-size: 14px;
+  }
+  .r3.dark .play-bar {
+    border-top: 1px solid rgba(80, 200, 80, 0.2);
+    color: rgba(80, 200, 80, 0.5);
+  }
+  .r3.light .play-bar {
+    border-top: 1px solid rgba(180, 180, 255, 0.2);
+    color: rgba(180, 180, 255, 0.5);
+  }
+  .r3 .play-bar-icon { opacity: 0.7; font-size: 14px; }
+
+  /* CRT glow for terminal */
+  .r3.dark::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    box-shadow: inset 0 0 60px rgba(80, 200, 80, 0.03);
+    z-index: 5;
+  }
+  .r3.light::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    box-shadow: inset 0 0 60px rgba(180, 180, 255, 0.03);
+    z-index: 5;
+  }
+
+  /* ===================================
+     NOTES
+     =================================== */
+  .notes {
+    margin-top: 16px;
+    max-width: 780px; width: 100%;
+    padding: 16px 20px;
+    background: rgba(255,255,255,0.015);
+    border: 1px solid rgba(255,255,255,0.04);
+    border-radius: 6px;
+    font-size: 11px; color: #505060; line-height: 1.8;
+  }
+  .notes strong { color: #707080; font-weight: 600; }
+  .notes ul { padding-left: 18px; margin-top: 4px; }
+
+  .legend {
+    margin-bottom: 20px;
+    display: flex; gap: 16px;
+  }
+  .legend-item {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 9px; color: #505058;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+  .legend-dot.sel { background: var(--accent); }
+  .legend-dot.play { background: var(--accent-muted); opacity: 0.6; }
+  .legend-dot.norm { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.08); }
+
+  .compare-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; color: #353540;
+    letter-spacing: 1px; text-transform: uppercase;
+    margin-top: 8px; margin-bottom: 16px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<h1>StreaMu &mdash; Retro Exploration</h1>
+<p class="subtitle">がっつりレトロ案 vs 確定済みの A+dashed</p>
+
+<div class="legend">
+  <span class="legend-item"><span class="legend-dot sel"></span> Selected</span>
+  <span class="legend-item"><span class="legend-dot play"></span> Playing</span>
+  <span class="legend-item"><span class="legend-dot norm"></span> Normal</span>
+</div>
+
+<!-- ======================== REFERENCE: A+dashed ======================== -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-tag">REF</span>
+    <span class="section-name">A + Dashed (確定案)</span>
+    <span class="section-desc">比較用。Minimal Flat + 点線セパレータ。</span>
+  </div>
+  <div class="screen-pair">
+    <div class="screen-wrapper">
+      <span class="theme-label">Dark</span>
+      <div class="screen-bezel">
+        <div class="screen dark ref">
+          <div class="list-area">
+            <div class="item"><div class="item-title">Bohemian Rhapsody</div><div class="item-meta">5:55 · 1.2B views · 2008/10/15</div></div>
+            <div class="item selected"><div class="item-title">Blinding Lights</div><div class="item-meta">3:20 · 4.1B views · 2020/01/29</div></div>
+            <div class="item"><div class="item-title">Shape of You</div><div class="item-meta">3:53 · 6.1B views · 2017/01/30</div></div>
+            <div class="item playing"><div class="item-title">>> Levitating</div><div class="item-meta">3:23 · 820M views · 2020/10/01</div></div>
+            <div class="item"><div class="item-title">Bad Guy</div><div class="item-meta">3:14 · 2.3B views · 2019/03/29</div></div>
+            <div class="item"><div class="item-title">Watermelon Sugar</div><div class="item-meta">2:54 · 1.1B views · 2020/05/18</div></div>
+            <div class="item"><div class="item-title">Stay With Me</div><div class="item-meta">2:52 · 950M views · 2014/04/14</div></div>
+          </div>
+          <div class="play-bar"><span class="play-bar-icon">🔁</span><span class="play-bar-icon">⏮</span><span class="play-bar-icon" style="font-size:16px;">▶</span><span class="play-bar-icon">⏭</span><span class="play-bar-icon">🔀</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="screen-wrapper">
+      <span class="theme-label">Light</span>
+      <div class="screen-bezel">
+        <div class="screen light ref">
+          <div class="list-area">
+            <div class="item"><div class="item-title">Bohemian Rhapsody</div><div class="item-meta">5:55 · 1.2B views · 2008/10/15</div></div>
+            <div class="item selected"><div class="item-title">Blinding Lights</div><div class="item-meta">3:20 · 4.1B views · 2020/01/29</div></div>
+            <div class="item"><div class="item-title">Shape of You</div><div class="item-meta">3:53 · 6.1B views · 2017/01/30</div></div>
+            <div class="item playing"><div class="item-title">>> Levitating</div><div class="item-meta">3:23 · 820M views · 2020/10/01</div></div>
+            <div class="item"><div class="item-title">Bad Guy</div><div class="item-meta">3:14 · 2.3B views · 2019/03/29</div></div>
+            <div class="item"><div class="item-title">Watermelon Sugar</div><div class="item-meta">2:54 · 1.1B views · 2020/05/18</div></div>
+            <div class="item"><div class="item-title">Stay With Me</div><div class="item-meta">2:52 · 950M views · 2014/04/14</div></div>
+          </div>
+          <div class="play-bar"><span class="play-bar-icon">🔁</span><span class="play-bar-icon">⏮</span><span class="play-bar-icon" style="font-size:16px;">▶</span><span class="play-bar-icon">⏭</span><span class="play-bar-icon">🔀</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="compare-label">↓ retro variants ↓</p>
+
+<!-- ======================== R1: Win95 Classic ======================== -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-tag">R1</span>
+    <span class="section-name">Win95 Classic</span>
+    <span class="section-desc">Insetリストボックス + システムブルー選択。Raised PlayBar。ピクセルフォント。</span>
+  </div>
+  <div class="screen-pair">
+    <div class="screen-wrapper">
+      <span class="theme-label">Dark</span>
+      <div class="screen-bezel">
+        <div class="screen dark r1">
+          <div class="list-area">
+            <div class="item"><div class="item-title">Bohemian Rhapsody</div><div class="item-meta">5:55 · 1.2B views · 2008/10/15</div></div>
+            <div class="item selected"><div class="item-title">Blinding Lights</div><div class="item-meta">3:20 · 4.1B views · 2020/01/29</div></div>
+            <div class="item"><div class="item-title">Shape of You</div><div class="item-meta">3:53 · 6.1B views · 2017/01/30</div></div>
+            <div class="item playing"><div class="item-title">>> Levitating</div><div class="item-meta">3:23 · 820M views · 2020/10/01</div></div>
+            <div class="item"><div class="item-title">Bad Guy</div><div class="item-meta">3:14 · 2.3B views · 2019/03/29</div></div>
+            <div class="item"><div class="item-title">Watermelon Sugar</div><div class="item-meta">2:54 · 1.1B views · 2020/05/18</div></div>
+            <div class="item"><div class="item-title">Stay With Me</div><div class="item-meta">2:52 · 950M views · 2014/04/14</div></div>
+          </div>
+          <div class="play-bar"><span class="play-bar-icon">🔁</span><span class="play-bar-icon">⏮</span><span class="play-bar-icon" style="font-size:16px;">▶</span><span class="play-bar-icon">⏭</span><span class="play-bar-icon">🔀</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="screen-wrapper">
+      <span class="theme-label">Light</span>
+      <div class="screen-bezel">
+        <div class="screen light r1">
+          <div class="list-area">
+            <div class="item"><div class="item-title">Bohemian Rhapsody</div><div class="item-meta">5:55 · 1.2B views · 2008/10/15</div></div>
+            <div class="item selected"><div class="item-title">Blinding Lights</div><div class="item-meta">3:20 · 4.1B views · 2020/01/29</div></div>
+            <div class="item"><div class="item-title">Shape of You</div><div class="item-meta">3:53 · 6.1B views · 2017/01/30</div></div>
+            <div class="item playing"><div class="item-title">>> Levitating</div><div class="item-meta">3:23 · 820M views · 2020/10/01</div></div>
+            <div class="item"><div class="item-title">Bad Guy</div><div class="item-meta">3:14 · 2.3B views · 2019/03/29</div></div>
+            <div class="item"><div class="item-title">Watermelon Sugar</div><div class="item-meta">2:54 · 1.1B views · 2020/05/18</div></div>
+            <div class="item"><div class="item-title">Stay With Me</div><div class="item-meta">2:52 · 950M views · 2014/04/14</div></div>
+          </div>
+          <div class="play-bar"><span class="play-bar-icon">🔁</span><span class="play-bar-icon">⏮</span><span class="play-bar-icon" style="font-size:16px;">▶</span><span class="play-bar-icon">⏭</span><span class="play-bar-icon">🔀</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== R2: Win95 + Accent Bar ======================== -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-tag">R2</span>
+    <span class="section-name">Win95 + Accent Bar</span>
+    <span class="section-desc">Win95の枠 + 確定案Aの左バー。レトロと今の案のハイブリッド。点線セパレータ。</span>
+  </div>
+  <div class="screen-pair">
+    <div class="screen-wrapper">
+      <span class="theme-label">Dark</span>
+      <div class="screen-bezel">
+        <div class="screen dark r2">
+          <div class="list-area">
+            <div class="item"><div class="item-title">Bohemian Rhapsody</div><div class="item-meta">5:55 · 1.2B views · 2008/10/15</div></div>
+            <div class="item selected"><div class="item-title">Blinding Lights</div><div class="item-meta">3:20 · 4.1B views · 2020/01/29</div></div>
+            <div class="item"><div class="item-title">Shape of You</div><div class="item-meta">3:53 · 6.1B views · 2017/01/30</div></div>
+            <div class="item playing"><div class="item-title">>> Levitating</div><div class="item-meta">3:23 · 820M views · 2020/10/01</div></div>
+            <div class="item"><div class="item-title">Bad Guy</div><div class="item-meta">3:14 · 2.3B views · 2019/03/29</div></div>
+            <div class="item"><div class="item-title">Watermelon Sugar</div><div class="item-meta">2:54 · 1.1B views · 2020/05/18</div></div>
+            <div class="item"><div class="item-title">Stay With Me</div><div class="item-meta">2:52 · 950M views · 2014/04/14</div></div>
+          </div>
+          <div class="play-bar"><span class="play-bar-icon">🔁</span><span class="play-bar-icon">⏮</span><span class="play-bar-icon" style="font-size:16px;">▶</span><span class="play-bar-icon">⏭</span><span class="play-bar-icon">🔀</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="screen-wrapper">
+      <span class="theme-label">Light</span>
+      <div class="screen-bezel">
+        <div class="screen light r2">
+          <div class="list-area">
+            <div class="item"><div class="item-title">Bohemian Rhapsody</div><div class="item-meta">5:55 · 1.2B views · 2008/10/15</div></div>
+            <div class="item selected"><div class="item-title">Blinding Lights</div><div class="item-meta">3:20 · 4.1B views · 2020/01/29</div></div>
+            <div class="item"><div class="item-title">Shape of You</div><div class="item-meta">3:53 · 6.1B views · 2017/01/30</div></div>
+            <div class="item playing"><div class="item-title">>> Levitating</div><div class="item-meta">3:23 · 820M views · 2020/10/01</div></div>
+            <div class="item"><div class="item-title">Bad Guy</div><div class="item-meta">3:14 · 2.3B views · 2019/03/29</div></div>
+            <div class="item"><div class="item-title">Watermelon Sugar</div><div class="item-meta">2:54 · 1.1B views · 2020/05/18</div></div>
+            <div class="item"><div class="item-title">Stay With Me</div><div class="item-meta">2:52 · 950M views · 2014/04/14</div></div>
+          </div>
+          <div class="play-bar"><span class="play-bar-icon">🔁</span><span class="play-bar-icon">⏮</span><span class="play-bar-icon" style="font-size:16px;">▶</span><span class="play-bar-icon">⏭</span><span class="play-bar-icon">🔀</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== R3: DOS Terminal ======================== -->
+<div class="section">
+  <div class="section-header">
+    <span class="section-tag">R3</span>
+    <span class="section-name">Terminal / DOS</span>
+    <span class="section-desc">グリーン蛍光体 / アンバー蛍光体。VT323フォント大きめ。完全にレトロ振り切り。</span>
+  </div>
+  <div class="screen-pair">
+    <div class="screen-wrapper">
+      <span class="theme-label">Green Phosphor</span>
+      <div class="screen-bezel">
+        <div class="screen dark r3">
+          <div class="list-area">
+            <div class="item"><div class="item-title">Bohemian Rhapsody</div><div class="item-meta">5:55 · 1.2B views</div></div>
+            <div class="item selected"><div class="item-title">Blinding Lights</div><div class="item-meta">3:20 · 4.1B views</div></div>
+            <div class="item"><div class="item-title">Shape of You</div><div class="item-meta">3:53 · 6.1B views</div></div>
+            <div class="item playing"><div class="item-title">Levitating</div><div class="item-meta">3:23 · 820M views</div></div>
+            <div class="item"><div class="item-title">Bad Guy</div><div class="item-meta">3:14 · 2.3B views</div></div>
+            <div class="item"><div class="item-title">Watermelon Sugar</div><div class="item-meta">2:54 · 1.1B views</div></div>
+            <div class="item"><div class="item-title">Stay With Me</div><div class="item-meta">2:52 · 950M views</div></div>
+          </div>
+          <div class="play-bar"><span class="play-bar-icon">[RPT]</span><span class="play-bar-icon">[&lt;&lt;]</span><span class="play-bar-icon">[PLAY]</span><span class="play-bar-icon">[&gt;&gt;]</span><span class="play-bar-icon">[SHF]</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="screen-wrapper">
+      <span class="theme-label">Lavender Phosphor</span>
+      <div class="screen-bezel">
+        <div class="screen light r3">
+          <div class="list-area">
+            <div class="item"><div class="item-title">Bohemian Rhapsody</div><div class="item-meta">5:55 · 1.2B views</div></div>
+            <div class="item selected"><div class="item-title">Blinding Lights</div><div class="item-meta">3:20 · 4.1B views</div></div>
+            <div class="item"><div class="item-title">Shape of You</div><div class="item-meta">3:53 · 6.1B views</div></div>
+            <div class="item playing"><div class="item-title">Levitating</div><div class="item-meta">3:23 · 820M views</div></div>
+            <div class="item"><div class="item-title">Bad Guy</div><div class="item-meta">3:14 · 2.3B views</div></div>
+            <div class="item"><div class="item-title">Watermelon Sugar</div><div class="item-meta">2:54 · 1.1B views</div></div>
+            <div class="item"><div class="item-title">Stay With Me</div><div class="item-meta">2:52 · 950M views</div></div>
+          </div>
+          <div class="play-bar"><span class="play-bar-icon">[RPT]</span><span class="play-bar-icon">[&lt;&lt;]</span><span class="play-bar-icon">[PLAY]</span><span class="play-bar-icon">[&gt;&gt;]</span><span class="play-bar-icon">[SHF]</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== NOTES ======================== -->
+<div class="notes">
+  <strong>各案の特徴</strong>
+  <ul>
+    <li><strong>REF (A+dashed)</strong> — 前回決定の案。シンプルで読みやすい。これがベースライン。</li>
+    <li><strong>R1 (Win95 Classic)</strong> — Inset/Raised の2px枠でWindows 95感。ベタ塗り選択。フォントをピクセル系に。前回NGだったベベルに近いが「OS標準UIの枠」なので装飾過多にはなりにくい。</li>
+    <li><strong>R2 (Win95 + Accent Bar)</strong> — R1のWin95枠に、確定案Aの左バー+ティント選択を組み合わせ。レトロ枠だけ借りてくるハイブリッド。</li>
+    <li><strong>R3 (Terminal)</strong> — 完全に振り切ったレトロ。CRTモニター風。テーマとの整合は低いが、インパクトは最大。</li>
+  </ul>
+  <br>
+  <strong>実装の注意</strong>
+  <ul>
+    <li>R1/R2のInset/Raised枠は既存の <code>draw_bevel()</code> で実装可能（ホーム画面で使用中）</li>
+    <li>R3のフォント変更は3DS上ではシステムフォント固定のため、色と記号で雰囲気を出す方向になる</li>
+    <li>どの案もホーム画面（Phase 7-A）のグラデーション+ベベルタイルとは独立した変更</li>
+  </ul>
+</div>
+
+</body>
+</html>

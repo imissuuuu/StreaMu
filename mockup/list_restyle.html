@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>StreaMu - List UI Restyle Mockups</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #111;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Segoe UI', sans-serif;
+    color: #ccc;
+    padding: 16px;
+  }
+  h1 { font-size: 16px; color: #aaa; margin-bottom: 8px; }
+  h2 { font-size: 13px; color: #888; margin-bottom: 4px; }
+  .controls {
+    margin-bottom: 16px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+  .controls label { font-size: 13px; color: #aaa; }
+  .controls select, .controls input {
+    padding: 4px 8px;
+    background: #333;
+    color: #eee;
+    border: 1px solid #555;
+    border-radius: 4px;
+  }
+  .mockups {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .panel { text-align: center; }
+  .panel p { font-size: 11px; color: #666; margin-top: 4px; max-width: 640px; }
+  .screen-frame {
+    border: 3px solid #444;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .screen {
+    width: 640px;
+    height: 480px;
+    position: relative;
+    user-select: none;
+    overflow: hidden;
+  }
+  .list-item {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .item-title {
+    font-size: 20px;
+    margin-left: 16px;
+    pointer-events: none;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .item-meta {
+    font-size: 16px;
+    margin-left: 32px;
+    margin-top: 1px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .playbar {
+    position: absolute;
+    bottom: 0; left: 0;
+    width: 100%; height: 80px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    z-index: 5;
+  }
+  .playbar-icon {
+    width: 108px;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+  }
+  .playbar-icon.wide {
+    width: 168px;
+  }
+  .note { font-size: 12px; color: #666; margin-top: 12px; }
+</style>
+</head>
+<body>
+
+<h1>List UI Restyle - Mockup Comparison</h1>
+
+<div class="controls">
+  <label>Theme:
+    <select id="themeSelect">
+      <option value="dark">Dark</option>
+      <option value="light">Light</option>
+    </select>
+  </label>
+  <label>Accent Hue:
+    <input type="range" id="hueSlider" min="0" max="360" value="220">
+    <span id="hueValue">220</span>
+  </label>
+  <label>Screen:
+    <select id="screenSelect">
+      <option value="search">Search (Track List)</option>
+      <option value="settings">Settings</option>
+      <option value="playlists">Playlists</option>
+    </select>
+  </label>
+</div>
+
+<div class="mockups">
+  <div class="panel">
+    <h2>A: Selected only (gradient+bevel)</h2>
+    <div class="screen-frame"><div class="screen" id="screenA"></div></div>
+    <p>Selected=gradient+bevel, Non-selected=plain, No separator lines</p>
+  </div>
+  <div class="panel">
+    <h2>B: All items subtle raised</h2>
+    <div class="screen-frame"><div class="screen" id="screenB"></div></div>
+    <p>All items=subtle raised bg, Selected=stronger gradient+bevel, No separators</p>
+  </div>
+  <div class="panel">
+    <h2>C: Card style (gap between items)</h2>
+    <div class="screen-frame"><div class="screen" id="screenC"></div></div>
+    <p>All items=card with micro-bevel, Selected=accent gradient, Gap between cards</p>
+  </div>
+</div>
+
+<p class="note">Click items to change selection / Arrow Up/Down to navigate / Change theme & hue to preview</p>
+
+<script>
+function hsvToRgb(h, s, v) {
+  h = ((h % 360) + 360) % 360;
+  s /= 100; v /= 100;
+  const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+  let r, g, b;
+  if (h < 60)       { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  return [Math.round((r+m)*255), Math.round((g+m)*255), Math.round((b+m)*255)];
+}
+function darken(rgb, f) { return rgb.map(c => Math.round(c * (1 - f))); }
+function lighten(rgb, f) { return rgb.map(c => Math.min(255, Math.round(c + (255 - c) * f))); }
+function rgb(c) { return `rgb(${c[0]},${c[1]},${c[2]})`; }
+function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+
+const TRACKS = [
+  { title: 'Bohemian Rhapsody - Queen', meta: '5:55 · 1.2B views · 1975', playing: false },
+  { title: 'Hotel California - Eagles', meta: '6:30 · 800M views · 1977', playing: true },
+  { title: 'Stairway to Heaven - Led Zeppelin', meta: '8:02 · 600M views · 1971', playing: false },
+  { title: 'Imagine - John Lennon', meta: '3:07 · 500M views · 1971', playing: false },
+  { title: 'Sweet Child O Mine - Guns N Roses', meta: '5:56 · 900M views · 1987', playing: false },
+  { title: 'Smells Like Teen Spirit - Nirvana', meta: '5:01 · 1.5B views · 1991', playing: false },
+  { title: 'Yesterday - The Beatles', meta: '2:05 · 400M views · 1965', playing: false },
+];
+
+const SETTINGS = [
+  { label: 'Theme', value: 'Dark' },
+  { label: 'Accent Color', value: 'Blue' },
+  { label: 'Hue', value: '220', type: 'slider' },
+  { label: 'Language', value: 'English' },
+  { label: 'D-Pad Speed', value: '5', type: 'slider' },
+  { label: 'Wallpaper', value: 'None' },
+  { label: 'Server IP', value: '192.168.1.10' },
+  { label: '[ Save & Back ]', value: '', type: 'button' },
+];
+
+const PLAYLISTS = [
+  { title: 'My Favorites', meta: '12 tracks' },
+  { title: 'Workout Mix', meta: '8 tracks' },
+  { title: 'Chill Vibes', meta: '15 tracks' },
+  { title: 'Road Trip', meta: '20 tracks' },
+  { title: '90s Hits', meta: '25 tracks' },
+  { title: 'Study Music', meta: '10 tracks' },
+  { title: 'Party Playlist', meta: '18 tracks' },
+];
+
+let selectedIdx = 2;
+
+function getColors(isDark, hue) {
+  const accent = hsvToRgb(hue, isDark ? 70 : 60, isDark ? 85 : 80);
+  const bg = isDark ? [30, 30, 30] : [245, 245, 245];
+  const playbarBg = isDark ? [40, 40, 40] : [225, 225, 225];
+  const textBody = isDark ? [210, 210, 210] : [40, 40, 40];
+  const textDim = isDark ? [140, 140, 140] : [120, 120, 120];
+  const playingBg = isDark ? [50, 50, 60] : [220, 220, 235];
+  const brightness = accent[0] * 0.299 + accent[1] * 0.587 + accent[2] * 0.114;
+  const accentText = brightness > 140 ? [20, 20, 20] : [255, 255, 255];
+  // Subtle raised bg for non-selected items
+  const itemBg = isDark ? [42, 42, 42] : [235, 235, 235];
+  return { accent, bg, playbarBg, textBody, textDim, playingBg, accentText, itemBg, isDark };
+}
+
+function getItems() {
+  const screen = document.getElementById('screenSelect').value;
+  if (screen === 'settings') return { type: 'settings', data: SETTINGS };
+  if (screen === 'playlists') return { type: 'playlists', data: PLAYLISTS };
+  return { type: 'search', data: TRACKS };
+}
+
+// --- Pattern A: Selected only ---
+function renderA(container, colors) {
+  const { type, data } = getItems();
+  container.innerHTML = '';
+  container.style.background = rgb(colors.bg);
+  const itemH = type === 'settings' ? 56 : 60;
+  const startY = 16;
+
+  data.forEach((item, i) => {
+    const div = document.createElement('div');
+    div.className = 'list-item';
+    div.style.top = (startY + i * itemH) + 'px';
+    div.style.height = itemH + 'px';
+
+    if (i === selectedIdx) {
+      // Gradient + bevel
+      const [ar,ag,ab] = colors.accent;
+      const dk = darken(colors.accent, 0.20);
+      div.style.background = `linear-gradient(to bottom, ${rgb(colors.accent)}, ${rgb(dk)})`;
+      div.style.borderTop = '3px solid rgba(255,255,255,0.25)';
+      div.style.borderLeft = '3px solid rgba(255,255,255,0.25)';
+      div.style.borderBottom = '3px solid rgba(0,0,0,0.25)';
+      div.style.borderRight = '3px solid rgba(0,0,0,0.25)';
+    } else if (type === 'search' && item.playing) {
+      div.style.background = rgb(colors.playingBg);
+    }
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'item-title';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'item-meta';
+
+    if (type === 'settings') {
+      if (item.type === 'button') {
+        titleEl.textContent = item.label;
+        titleEl.style.textAlign = 'center';
+        titleEl.style.marginLeft = '0';
+      } else {
+        titleEl.textContent = item.label;
+        metaEl.textContent = item.value ? '[ ' + item.value + ' ]' : '';
+        metaEl.style.marginLeft = '16px';
+      }
+    } else {
+      titleEl.textContent = (type === 'search' && item.playing ? '>> ' : '') + item.title;
+      metaEl.textContent = item.meta;
+    }
+
+    if (i === selectedIdx) {
+      titleEl.style.color = rgb(colors.accentText);
+      metaEl.style.color = rgb(colors.accentText);
+    } else {
+      titleEl.style.color = rgb(colors.textBody);
+      metaEl.style.color = rgb(colors.textDim);
+    }
+
+    div.appendChild(titleEl);
+    if (metaEl.textContent) div.appendChild(metaEl);
+    div.addEventListener('click', () => { selectedIdx = i; update(); });
+    container.appendChild(div);
+  });
+
+  addPlayBar(container, colors, 'A');
+}
+
+// --- Pattern B: All items subtle raised ---
+function renderB(container, colors) {
+  const { type, data } = getItems();
+  container.innerHTML = '';
+  container.style.background = rgb(colors.bg);
+  const itemH = type === 'settings' ? 56 : 60;
+  const startY = 16;
+
+  data.forEach((item, i) => {
+    const div = document.createElement('div');
+    div.className = 'list-item';
+    div.style.top = (startY + i * itemH) + 'px';
+    div.style.height = itemH + 'px';
+
+    if (i === selectedIdx) {
+      // Strong gradient + bevel
+      const dk = darken(colors.accent, 0.20);
+      div.style.background = `linear-gradient(to bottom, ${rgb(colors.accent)}, ${rgb(dk)})`;
+      div.style.borderTop = '3px solid rgba(255,255,255,0.25)';
+      div.style.borderLeft = '3px solid rgba(255,255,255,0.25)';
+      div.style.borderBottom = '3px solid rgba(0,0,0,0.25)';
+      div.style.borderRight = '3px solid rgba(0,0,0,0.25)';
+    } else {
+      // Subtle raised: light top edge, dark bottom edge
+      const bgCol = (type === 'search' && item.playing) ? colors.playingBg : colors.itemBg;
+      div.style.background = rgb(bgCol);
+      div.style.borderTop = colors.isDark ? '2px solid rgba(255,255,255,0.08)' : '2px solid rgba(255,255,255,0.5)';
+      div.style.borderLeft = colors.isDark ? '2px solid rgba(255,255,255,0.05)' : '2px solid rgba(255,255,255,0.3)';
+      div.style.borderBottom = colors.isDark ? '2px solid rgba(0,0,0,0.3)' : '2px solid rgba(0,0,0,0.1)';
+      div.style.borderRight = colors.isDark ? '2px solid rgba(0,0,0,0.2)' : '2px solid rgba(0,0,0,0.05)';
+    }
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'item-title';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'item-meta';
+
+    if (type === 'settings') {
+      if (item.type === 'button') {
+        titleEl.textContent = item.label;
+        titleEl.style.textAlign = 'center';
+        titleEl.style.marginLeft = '0';
+      } else {
+        titleEl.textContent = item.label;
+        metaEl.textContent = item.value ? '[ ' + item.value + ' ]' : '';
+        metaEl.style.marginLeft = '16px';
+      }
+    } else {
+      titleEl.textContent = (type === 'search' && item.playing ? '>> ' : '') + item.title;
+      metaEl.textContent = item.meta;
+    }
+
+    if (i === selectedIdx) {
+      titleEl.style.color = rgb(colors.accentText);
+      metaEl.style.color = rgb(colors.accentText);
+    } else {
+      titleEl.style.color = rgb(colors.textBody);
+      metaEl.style.color = rgb(colors.textDim);
+    }
+
+    div.appendChild(titleEl);
+    if (metaEl.textContent) div.appendChild(metaEl);
+    div.addEventListener('click', () => { selectedIdx = i; update(); });
+    container.appendChild(div);
+  });
+
+  addPlayBar(container, colors, 'B');
+}
+
+// --- Pattern C: Card style with gaps ---
+function renderC(container, colors) {
+  const { type, data } = getItems();
+  container.innerHTML = '';
+  container.style.background = rgb(colors.bg);
+  const gap = 4;
+  const itemH = type === 'settings' ? 52 : 56;
+  const startY = 16;
+  const cardMargin = 6;
+
+  data.forEach((item, i) => {
+    const div = document.createElement('div');
+    div.className = 'list-item';
+    div.style.top = (startY + i * (itemH + gap)) + 'px';
+    div.style.height = itemH + 'px';
+    div.style.left = cardMargin + 'px';
+    div.style.width = (640 - cardMargin * 2) + 'px';
+    div.style.borderRadius = '4px';
+
+    if (i === selectedIdx) {
+      const dk = darken(colors.accent, 0.20);
+      div.style.background = `linear-gradient(to bottom, ${rgb(colors.accent)}, ${rgb(dk)})`;
+      div.style.borderTop = '2px solid rgba(255,255,255,0.25)';
+      div.style.borderLeft = '2px solid rgba(255,255,255,0.25)';
+      div.style.borderBottom = '2px solid rgba(0,0,0,0.25)';
+      div.style.borderRight = '2px solid rgba(0,0,0,0.25)';
+    } else {
+      const bgCol = (type === 'search' && item.playing) ? colors.playingBg : colors.itemBg;
+      div.style.background = rgb(bgCol);
+      div.style.borderTop = colors.isDark ? '2px solid rgba(255,255,255,0.06)' : '2px solid rgba(255,255,255,0.4)';
+      div.style.borderLeft = colors.isDark ? '2px solid rgba(255,255,255,0.04)' : '2px solid rgba(255,255,255,0.25)';
+      div.style.borderBottom = colors.isDark ? '2px solid rgba(0,0,0,0.25)' : '2px solid rgba(0,0,0,0.08)';
+      div.style.borderRight = colors.isDark ? '2px solid rgba(0,0,0,0.15)' : '2px solid rgba(0,0,0,0.04)';
+    }
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'item-title';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'item-meta';
+
+    if (type === 'settings') {
+      if (item.type === 'button') {
+        titleEl.textContent = item.label;
+        titleEl.style.textAlign = 'center';
+        titleEl.style.marginLeft = '0';
+      } else {
+        titleEl.textContent = item.label;
+        metaEl.textContent = item.value ? '[ ' + item.value + ' ]' : '';
+        metaEl.style.marginLeft = '16px';
+      }
+    } else {
+      titleEl.textContent = (type === 'search' && item.playing ? '>> ' : '') + item.title;
+      metaEl.textContent = item.meta;
+    }
+
+    if (i === selectedIdx) {
+      titleEl.style.color = rgb(colors.accentText);
+      metaEl.style.color = rgb(colors.accentText);
+    } else {
+      titleEl.style.color = rgb(colors.textBody);
+      metaEl.style.color = rgb(colors.textDim);
+    }
+
+    div.appendChild(titleEl);
+    if (metaEl.textContent) div.appendChild(metaEl);
+    div.addEventListener('click', () => { selectedIdx = i; update(); });
+    container.appendChild(div);
+  });
+
+  addPlayBar(container, colors, 'C');
+}
+
+// --- PlayBar ---
+function addPlayBar(container, colors, variant) {
+  const bar = document.createElement('div');
+  bar.className = 'playbar';
+
+  if (variant === 'A') {
+    // Current style but no separator lines
+    bar.style.background = rgb(colors.playbarBg);
+  } else {
+    // Subtle gradient
+    const pbDk = darken(colors.playbarBg, 0.1);
+    bar.style.background = `linear-gradient(to bottom, ${rgb(colors.playbarBg)}, ${rgb(pbDk)})`;
+    if (variant === 'C') {
+      bar.style.borderTop = colors.isDark ? '2px solid rgba(255,255,255,0.08)' : '2px solid rgba(0,0,0,0.08)';
+    }
+  }
+
+  const icons = ['Loop', 'Prev', 'Play', 'Next', 'Shuf'];
+  icons.forEach((icon, i) => {
+    const zone = document.createElement('div');
+    zone.className = 'playbar-icon' + (i === 2 ? ' wide' : '');
+    zone.textContent = icon;
+    zone.style.color = rgba(colors.textBody, 0.6);
+    // No separator lines in any variant
+    bar.appendChild(zone);
+  });
+
+  container.appendChild(bar);
+}
+
+// --- Navigation ---
+document.addEventListener('keydown', (e) => {
+  const { data } = getItems();
+  if (e.key === 'ArrowDown') { selectedIdx = (selectedIdx + 1) % data.length; e.preventDefault(); update(); }
+  if (e.key === 'ArrowUp') { selectedIdx = (selectedIdx - 1 + data.length) % data.length; e.preventDefault(); update(); }
+});
+
+function update() {
+  const isDark = document.getElementById('themeSelect').value === 'dark';
+  const hue = parseInt(document.getElementById('hueSlider').value);
+  document.getElementById('hueValue').textContent = hue;
+  const colors = getColors(isDark, hue);
+  const { data } = getItems();
+  if (selectedIdx >= data.length) selectedIdx = 0;
+  renderA(document.getElementById('screenA'), colors);
+  renderB(document.getElementById('screenB'), colors);
+  renderC(document.getElementById('screenC'), colors);
+}
+
+document.getElementById('themeSelect').addEventListener('change', update);
+document.getElementById('hueSlider').addEventListener('input', update);
+document.getElementById('screenSelect').addEventListener('change', () => { selectedIdx = 2; update(); });
+update();
+</script>
+</body>
+</html>

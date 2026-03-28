@@ -117,12 +117,19 @@ std::vector<Track> YouTubeAPI::parse_search_results(const std::string& data) {
         std::getline(linestream, upload_date, '\t');
         
         if (!vid.empty()) {
-            results.push_back({title, vid, duration, views, uploader, upload_date});
+            std::string thumb = "https://i.ytimg.com/vi/" + vid + "/default.jpg";
+            results.push_back({title, vid, duration, views, uploader, upload_date, thumb});
         }
     }
     return results;
 }
 // Stub function implementations
-bool YouTubeAPI::download_thumbnail(const std::string&, std::vector<uint8_t>&) { return false; }
+bool YouTubeAPI::download_thumbnail(const std::string& video_id, std::vector<uint8_t>& data) {
+    std::string url = "https://i.ytimg.com/vi/" + video_id + "/default.jpg";
+    std::string raw = http_get(url, 8L);
+    if (raw.empty()) return false;
+    data.assign(raw.begin(), raw.end());
+    return true;
+}
 std::string YouTubeAPI::http_post(const std::string&, const std::string&, const std::string&) { return ""; }
 std::string YouTubeAPI::parse_stream_url(const std::string&) { return ""; }

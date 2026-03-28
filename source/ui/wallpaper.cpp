@@ -1,5 +1,4 @@
 #define STB_IMAGE_IMPLEMENTATION
-#define STBI_ONLY_PNG
 #define STBI_NO_STDIO
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
@@ -55,75 +54,29 @@ static void rgba8_to_tiled(u8* out, const u8* rgba, int w, int h, int tex_w, int
     }
 }
 
-Wallpaper::~Wallpaper() {
-    unload();
-}
-
-bool Wallpaper::load(const std::string& path) {
-    unload();
-
-    // Read file
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) return false;
-
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (fsize <= 0 || fsize > 4 * 1024 * 1024) { // 4MB limit
-        fclose(f);
-        return false;
-    }
-
-    u8* file_data = static_cast<u8*>(malloc(fsize));
-    if (!file_data) { fclose(f); return false; }
-    size_t read_bytes = fread(file_data, 1, fsize, f);
-    fclose(f);
-    if (static_cast<long>(read_bytes) != fsize) { free(file_data); return false; }
-
-    // Decode with stb_image
-    int w = 0, h = 0, channels = 0;
-    u8* rgba = stbi_load_from_memory(file_data, (int)fsize, &w, &h, &channels, 4);
-    free(file_data);
-
-    if (!rgba) return false;
-    if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
-        stbi_image_free(rgba);
-        return false;
-    }
-
+// Shared: build GPU texture from decoded RGBA8 pixels.
+// Returns true on success; on failure, caller must free rgba via stbi_image_free.
+bool Wallpaper::load_from_pixels(u8* rgba, int w, int h) {
     m_orig_w = w;
     m_orig_h = h;
 
-    // Texture size (power of 2)
     int tex_w = (int)next_pow2((unsigned)w);
     int tex_h = (int)next_pow2((unsigned)h);
 
-    // Initialize GPU texture
-    if (!C3D_TexInit(&m_tex, tex_w, tex_h, GPU_RGBA8)) {
-        stbi_image_free(rgba);
-        return false;
-    }
+    if (!C3D_TexInit(&m_tex, tex_w, tex_h, GPU_RGBA8)) return false;
 
-    // Convert to tile format
     size_t tiled_size = tex_w * tex_h * 4;
-    u8* tiled = static_cast<u8*>(calloc(1, tiled_size)); // Zero-init for padding areas
+    u8* tiled = static_cast<u8*>(calloc(1, tiled_size));
     if (!tiled) {
         C3D_TexDelete(&m_tex);
-        stbi_image_free(rgba);
         return false;
     }
 
     rgba8_to_tiled(tiled, rgba, w, h, tex_w, tex_h);
-    stbi_image_free(rgba);
-
-    // Upload
     C3D_TexUpload(&m_tex, tiled);
     C3D_TexSetFilter(&m_tex, GPU_LINEAR, GPU_LINEAR);
     free(tiled);
 
-    // Build C2D_Image (display only actual image region)
-    // Note: top > bottom required or image rotates 90 degrees (citro2d behavior)
     m_subtex.width  = (u16)w;
     m_subtex.height = (u16)h;
     m_subtex.left   = 0.0f;
@@ -138,6 +91,52 @@ bool Wallpaper::load(const std::string& path) {
     return true;
 }
 
+Wallpaper::~Wallpaper() {
+    unload();
+}
+
+bool Wallpaper::load(const std::string& path) {
+    unload();
+
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (fsize <= 0 || fsize > 4 * 1024 * 1024) {
+        fclose(f);
+        return false;
+    }
+
+    u8* file_data = static_cast<u8*>(malloc(fsize));
+    if (!file_data) { fclose(f); return false; }
+    size_t read_bytes = fread(file_data, 1, fsize, f);
+    fclose(f);
+    if (static_cast<long>(read_bytes) != fsize) { free(file_data); return false; }
+
+    bool ok = load_from_memory(file_data, (size_t)fsize);
+    free(file_data);
+    return ok;
+}
+
+bool Wallpaper::load_from_memory(const uint8_t* data, size_t size) {
+    unload();
+
+    int w = 0, h = 0, channels = 0;
+    u8* rgba = stbi_load_from_memory(data, (int)size, &w, &h, &channels, 4);
+    if (!rgba) return false;
+    if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
+        stbi_image_free(rgba);
+        return false;
+    }
+
+    bool ok = load_from_pixels(rgba, w, h);
+    stbi_image_free(rgba);
+    return ok;
+}
+
 void Wallpaper::unload() {
     if (m_loaded) {
         C3D_TexDelete(&m_tex);
@@ -149,9 +148,18 @@ void Wallpaper::unload() {
 
 void Wallpaper::draw_fullscreen() {
     if (!m_loaded) return;
-
-    // Scale to top screen 400x240
     float sx = 400.0f / (float)m_orig_w;
     float sy = 240.0f / (float)m_orig_h;
     C2D_DrawImageAt(m_img, 0, 0, 0, nullptr, sx, sy);
+}
+
+void Wallpaper::draw_at(float x, float y, float size) {
+    if (!m_loaded) return;
+    // Fit image into square (letterbox)
+    float sx = size / (float)m_orig_w;
+    float sy = size / (float)m_orig_h;
+    float s  = sx < sy ? sx : sy;
+    float ox = x + (size - m_orig_w * s) * 0.5f;
+    float oy = y + (size - m_orig_h * s) * 0.5f;
+    C2D_DrawImageAt(m_img, ox, oy, 0, nullptr, s, s);
 }

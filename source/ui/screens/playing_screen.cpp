@@ -1,6 +1,7 @@
 #include "playing_screen.h"
 #include "../ui_constants.h"
 #include "../track_list_helpers.h"
+#include "../../include/network/youtube_api.h"
 #include <time.h>
 
 void PlayingScreen::on_enter(AppContext& ctx) {
@@ -12,6 +13,16 @@ void PlayingScreen::on_enter(AppContext& ctx) {
         if (ctx.playing_tracks[i].id == ctx.playing_id) {
             ctx.selected_index = i;
             break;
+        }
+    }
+
+    // Fetch thumbnail if different track (synchronous, brief freeze is acceptable for prototype)
+    if (ctx.api && !ctx.playing_id.empty() && ctx.playing_id != ctx.thumbnail_vid_id) {
+        ctx.thumbnail_tex.unload();
+        ctx.thumbnail_vid_id = ctx.playing_id;
+        std::vector<uint8_t> raw;
+        if (ctx.api->download_thumbnail(ctx.playing_id, raw)) {
+            ctx.thumbnail_tex.load_from_memory(raw.data(), raw.size());
         }
     }
 }

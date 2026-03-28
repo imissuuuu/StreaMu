@@ -5,13 +5,14 @@
 #include <functional>
 #include <stdint.h>
 
-struct Track { 
-    std::string title; 
-    std::string id; 
+struct Track {
+    std::string title;
+    std::string id;
     std::string duration;
     std::string views;
     std::string uploader;
     std::string upload_date;
+    std::string thumbnail_url; // "https://i.ytimg.com/vi/{id}/default.jpg"
 };
 typedef std::function<void(const std::vector<Track>&, bool)> SearchCallback;
 typedef std::function<void(const std::string&, bool)> StreamCallback;

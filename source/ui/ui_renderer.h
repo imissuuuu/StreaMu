@@ -89,9 +89,11 @@ public:
   void draw_top_screen(const RenderContext &ctx);
   void draw_popup_overlay(const RenderContext &ctx);
   void set_wallpaper(Wallpaper* wp) { m_wallpaper = wp; }
+  void set_thumbnail(Wallpaper* th) { m_thumbnail = th; }
 
 private:
   UIManager &m_ui;
   const ThemeColors &m_colors;
   Wallpaper* m_wallpaper = nullptr;
+  Wallpaper* m_thumbnail = nullptr;
 };

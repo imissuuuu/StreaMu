@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>StreaMu - Cursor Indicator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #111;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'Segoe UI', sans-serif;
+    color: #ccc;
+    padding: 16px;
+  }
+  h2 { margin-bottom: 6px; font-size: 13px; color: #888; }
+  .controls {
+    margin-bottom: 12px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+  .controls label { font-size: 13px; color: #aaa; }
+  .controls select, .controls input {
+    padding: 4px 8px;
+    background: #333;
+    color: #eee;
+    border: 1px solid #555;
+    border-radius: 4px;
+  }
+  .screen-frame {
+    border: 3px solid #444;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .screen {
+    width: 640px;
+    height: 480px;
+    position: relative;
+    user-select: none;
+  }
+  .tile {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    cursor: pointer;
+    overflow: hidden;
+  }
+  .tile-content {
+    display: flex;
+    align-items: center;
+    pointer-events: none;
+    position: relative;
+    z-index: 2;
+  }
+  .tile-cursor {
+    width: 28px;
+    font-size: 22px;
+    text-align: center;
+    flex-shrink: 0;
+    opacity: 0;
+  }
+  .tile.selected .tile-cursor {
+    opacity: 1;
+  }
+  .tile-label {
+    font-size: 28px;
+    font-weight: bold;
+    pointer-events: none;
+  }
+  .tile .bevel-top, .tile .bevel-left, .tile .bevel-bottom, .tile .bevel-right {
+    position: absolute; z-index: 1; pointer-events: none;
+  }
+  .tile .bevel-top    { top: 0; left: 0; right: 0; height: 6px; }
+  .tile .bevel-left   { top: 0; left: 0; bottom: 0; width: 6px; }
+  .tile .bevel-bottom { bottom: 0; left: 0; right: 0; height: 6px; }
+  .tile .bevel-right  { top: 0; right: 0; bottom: 0; width: 6px; }
+  .tile .darken {
+    display: none;
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.20);
+    z-index: 1;
+    pointer-events: none;
+  }
+  .tile.pressed .darken { display: block; }
+  .tile.pressed .tile-content { transform: translate(4px, 4px); }
+  .tile.pressed .bevel-top    { background: rgba(0,0,0,0.25) !important; }
+  .tile.pressed .bevel-left   { background: rgba(0,0,0,0.25) !important; }
+  .tile.pressed .bevel-bottom { background: rgba(255,255,255,0.15) !important; }
+  .tile.pressed .bevel-right  { background: rgba(255,255,255,0.15) !important; }
+
+  .qa-header {
+    position: absolute; top: 8px; left: 10px;
+    font-size: 20px; pointer-events: none; z-index: 2;
+  }
+  .qa-slot {
+    position: absolute; left: 0; width: 100%; height: 44px;
+    display: flex; align-items: center;
+    font-size: 22px; pointer-events: none; z-index: 2;
+  }
+  .qa-slot .tile-cursor {
+    width: 28px; font-size: 18px; text-align: center; flex-shrink: 0; opacity: 0;
+    margin-left: 8px;
+  }
+  .playbar {
+    position: absolute; bottom: 0; left: 0; width: 100%; height: 80px;
+    display: flex; align-items: center; padding: 0 16px;
+    font-size: 18px; z-index: 5;
+  }
+  .panel { text-align: center; }
+  p.note { font-size: 12px; color: #666; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div class="controls">
+  <label>Theme:
+    <select id="themeSelect">
+      <option value="dark">Dark</option>
+      <option value="light">Light</option>
+    </select>
+  </label>
+  <label>Accent Hue:
+    <input type="range" id="hueSlider" min="0" max="360" value="220">
+    <span id="hueValue">220</span>
+  </label>
+</div>
+
+<div class="panel">
+  <h2>Cursor indicator (arrow keys to navigate)</h2>
+  <div class="screen-frame">
+    <div class="screen" id="screen"></div>
+  </div>
+</div>
+
+<p class="note">Arrow keys = D-pad / Click = touch (hold for press feedback)</p>
+
+<script>
+function hsvToRgb(h, sv, v) {
+  h = ((h % 360) + 360) % 360;
+  sv /= 100; v /= 100;
+  const c = v * sv, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+  let r, g, b;
+  if (h < 60)       { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  return [Math.round((r+m)*255), Math.round((g+m)*255), Math.round((b+m)*255)];
+}
+function darkenRgb(r, g, b, f) { return [Math.round(r*(1-f)), Math.round(g*(1-f)), Math.round(b*(1-f))]; }
+function rgbStr(r, g, b) { return `rgb(${r},${g},${b})`; }
+
+const TILES = [
+  { id: 'qa',        label: '',          x: 0,   y: 0,   w: 320, h: 264 },
+  { id: 'playing',   label: 'Playing',   x: 0,   y: 264, w: 320, h: 136 },
+  { id: 'search',    label: 'Search',    x: 320, y: 0,   w: 320, h: 132 },
+  { id: 'playlists', label: 'Playlists', x: 320, y: 132, w: 320, h: 132 },
+  { id: 'settings',  label: 'Settings',  x: 320, y: 264, w: 320, h: 136 },
+];
+const QA_SLOTS = ['Playlist 1', 'Playlist 2', '+ Add'];
+
+function getColors(isDark, hue) {
+  const accent = hsvToRgb(hue, isDark ? 70 : 60, isDark ? 85 : 80);
+  const bg = isDark ? [30,30,30] : [245,245,245];
+  const playbarBg = isDark ? [40,40,40] : [230,230,230];
+  const textBody = isDark ? [220,220,220] : [30,30,30];
+  return { accent, bg, playbarBg, textBody };
+}
+
+let selectedTileId = 'search';
+
+function render(container, colors) {
+  container.innerHTML = '';
+  container.style.background = rgbStr(...colors.bg);
+  const [ar, ag, ab] = colors.accent;
+  const [dr, dg, db] = darkenRgb(ar, ag, ab, 0.20);
+  const brightness = ar * 0.299 + ag * 0.587 + ab * 0.114;
+  const textColor = brightness > 140 ? 'rgb(30,30,30)' : 'rgb(255,255,255)';
+  const textDim = brightness > 140 ? 'rgba(30,30,30,0.6)' : 'rgba(255,255,255,0.6)';
+
+  TILES.forEach(t => {
+    const div = document.createElement('div');
+    div.className = 'tile';
+    if (t.id === selectedTileId) div.classList.add('selected');
+    div.style.cssText = `left:${t.x}px;top:${t.y}px;width:${t.w}px;height:${t.h}px;`;
+    div.style.background = `linear-gradient(to bottom, ${rgbStr(ar,ag,ab)}, ${rgbStr(dr,dg,db)})`;
+
+    // Bevel
+    ['bevel-top','bevel-left'].forEach(cls => {
+      const el = document.createElement('div'); el.className = cls;
+      el.style.background = 'rgba(255,255,255,0.25)'; div.appendChild(el);
+    });
+    ['bevel-bottom','bevel-right'].forEach(cls => {
+      const el = document.createElement('div'); el.className = cls;
+      el.style.background = 'rgba(0,0,0,0.25)'; div.appendChild(el);
+    });
+
+    // Darken overlay (for press)
+    const darken = document.createElement('div');
+    darken.className = 'darken';
+    div.appendChild(darken);
+
+    if (t.id === 'qa') {
+      const hdr = document.createElement('div');
+      hdr.className = 'qa-header';
+      hdr.textContent = 'Quick Access';
+      hdr.style.color = textDim;
+      div.appendChild(hdr);
+      QA_SLOTS.forEach((name, i) => {
+        const slot = document.createElement('div');
+        slot.className = 'qa-slot';
+        slot.style.top = (40 + i * 44) + 'px';
+        const cursor = document.createElement('span');
+        cursor.className = 'tile-cursor';
+        cursor.textContent = '\u25B6';
+        cursor.style.color = textColor;
+        slot.appendChild(cursor);
+        const lbl = document.createElement('span');
+        lbl.textContent = name;
+        lbl.style.color = textColor;
+        slot.appendChild(lbl);
+        div.appendChild(slot);
+      });
+    } else {
+      const content = document.createElement('div');
+      content.className = 'tile-content';
+      content.style.marginLeft = '8px';
+      const cursor = document.createElement('span');
+      cursor.className = 'tile-cursor';
+      cursor.textContent = '\u25B6';
+      cursor.style.color = textColor;
+      content.appendChild(cursor);
+      const lbl = document.createElement('span');
+      lbl.className = 'tile-label';
+      lbl.textContent = t.label;
+      lbl.style.color = textColor;
+      content.appendChild(lbl);
+      div.appendChild(content);
+    }
+
+    // Click to select
+    div.addEventListener('click', () => { selectedTileId = t.id; update(); });
+    // Press feedback
+    div.addEventListener('mousedown', (e) => { e.preventDefault(); div.classList.add('pressed'); });
+    div.addEventListener('mouseup', () => div.classList.remove('pressed'));
+    div.addEventListener('mouseleave', () => div.classList.remove('pressed'));
+
+    container.appendChild(div);
+  });
+
+  const bar = document.createElement('div');
+  bar.className = 'playbar';
+  bar.style.background = rgbStr(...colors.playbarBg);
+  bar.style.color = rgbStr(...colors.textBody);
+  bar.innerHTML = '<span style="opacity:0.6">No track playing</span>';
+  container.appendChild(bar);
+}
+
+// D-pad nav
+const NAV = [[['qa','playing'],['search','playlists','settings']]];
+let navCol = 1, navRow = 0;
+const GRID = [['qa','playing'],['search','playlists','settings']];
+
+function syncNav() {
+  for (let c = 0; c < GRID.length; c++)
+    for (let r = 0; r < GRID[c].length; r++)
+      if (GRID[c][r] === selectedTileId) { navCol = c; navRow = r; }
+}
+
+document.addEventListener('keydown', (e) => {
+  syncNav();
+  let changed = false;
+  if (e.key === 'ArrowDown')  { navRow = (navRow+1) % GRID[navCol].length; changed = true; }
+  if (e.key === 'ArrowUp')    { navRow = (navRow-1+GRID[navCol].length) % GRID[navCol].length; changed = true; }
+  if (e.key === 'ArrowRight' && navCol === 0) { navCol = 1; navRow = Math.min(navRow, GRID[1].length-1); changed = true; }
+  if (e.key === 'ArrowLeft'  && navCol === 1) { navCol = 0; navRow = Math.min(navRow, GRID[0].length-1); changed = true; }
+  if (changed) { e.preventDefault(); selectedTileId = GRID[navCol][navRow]; update(); }
+});
+
+function update() {
+  const isDark = document.getElementById('themeSelect').value === 'dark';
+  const hue = parseInt(document.getElementById('hueSlider').value);
+  document.getElementById('hueValue').textContent = hue;
+  const colors = getColors(isDark, hue);
+  render(document.getElementById('screen'), colors);
+}
+
+document.getElementById('themeSelect').addEventListener('change', update);
+document.getElementById('hueSlider').addEventListener('input', update);
+update();
+</script>
+</body>
+</html>
