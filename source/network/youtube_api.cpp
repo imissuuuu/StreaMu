@@ -128,6 +128,7 @@ bool YouTubeAPI::download_thumbnail(const std::string& video_id, std::vector<uin
     std::string url = "https://i.ytimg.com/vi/" + video_id + "/mqdefault.jpg";
     std::string raw = http_get(url, 8L);
     if (raw.empty()) return false;
+    if (raw.size() > 512 * 1024) return false; // Reject unexpectedly large responses (>512KB)
     data.assign(raw.begin(), raw.end());
     return true;
 }
