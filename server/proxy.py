@@ -3,6 +3,7 @@ import subprocess
 import collections
 import re
 import platform
+import urllib.request
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, AsyncGenerator, Any
@@ -12,7 +13,7 @@ FFMPEG_PATH: str = str(BASE_DIR / ("ffmpeg.exe" if platform.system() == "Windows
 
 from starlette.applications import Starlette
 from starlette.routing import Route
-from starlette.responses import StreamingResponse, PlainTextResponse, HTMLResponse, JSONResponse
+from starlette.responses import StreamingResponse, PlainTextResponse, HTMLResponse, JSONResponse, Response
 from starlette.requests import Request
 import yt_dlp # type: ignore
 import uvicorn # type: ignore
@@ -221,6 +222,28 @@ async def stream(request: Request) -> StreamingResponse | PlainTextResponse:
          
     return StreamingResponse(stream_audio_generator(i), media_type="audio/mpeg")
 
+async def thumbnail(request: Request) -> Response | PlainTextResponse:
+    vid = request.query_params.get("id", "")
+    if not vid or not re.match(r'^[a-zA-Z0-9_\-]{11}$', vid):
+        add_log(f"Blocked invalid thumbnail ID: {vid}")
+        return PlainTextResponse("Invalid video ID format", status_code=400)
+
+    url = f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
+
+    def fetch_image() -> bytes:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            return resp.read()
+
+    try:
+        data = await asyncio.to_thread(fetch_image)
+        if len(data) > 512 * 1024:
+            return PlainTextResponse("Image too large", status_code=502)
+        add_log(f"Thumbnail served: {vid}")
+        return Response(content=data, media_type="image/jpeg")
+    except Exception as e:
+        add_log(f"Thumbnail fetch ERROR for {vid}: {e}")
+        return PlainTextResponse("Failed to fetch thumbnail", status_code=502)
+
 async def get_logs(request: Request) -> JSONResponse:
     return JSONResponse({"logs": list(app_logs)})
 
@@ -320,6 +343,7 @@ async def dashboard(request: Request) -> HTMLResponse:
 routes = [
     Route("/search", search),
     Route("/stream", stream),
+    Route("/thumbnail", thumbnail),
     Route("/api/logs", get_logs),
     Route("/", dashboard)
 ]

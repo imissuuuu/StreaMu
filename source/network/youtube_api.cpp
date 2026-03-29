@@ -117,7 +117,7 @@ std::vector<Track> YouTubeAPI::parse_search_results(const std::string& data) {
         std::getline(linestream, upload_date, '\t');
         
         if (!vid.empty()) {
-            std::string thumb = "https://i.ytimg.com/vi/" + vid + "/mqdefault.jpg";
+            std::string thumb = get_base_url() + "/thumbnail?id=" + vid;
             results.push_back({title, vid, duration, views, uploader, upload_date, thumb});
         }
     }
@@ -125,7 +125,7 @@ std::vector<Track> YouTubeAPI::parse_search_results(const std::string& data) {
 }
 // Stub function implementations
 bool YouTubeAPI::download_thumbnail(const std::string& video_id, std::vector<uint8_t>& data) {
-    std::string url = "https://i.ytimg.com/vi/" + video_id + "/mqdefault.jpg";
+    std::string url = get_base_url() + "/thumbnail?id=" + video_id;
     std::string raw = http_get(url, 8L);
     if (raw.empty()) return false;
     if (raw.size() > 512 * 1024) return false; // Reject unexpectedly large responses (>512KB)
