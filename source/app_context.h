@@ -27,6 +27,7 @@ struct AppContext : public RenderContext {
     std::string thumbnail_vid_id; // video ID of the loaded thumbnail
 
     // Thumbnail async download state (protected by lock)
+    u64 playback_start_time = 0;          // osGetTime() when current track started
     bool thumbnail_loading = false;       // true while thread is running
     bool thumbnail_ready = false;         // true when raw data is ready for GPU upload
     std::vector<uint8_t> thumbnail_pixels; // cropped RGBA pixels (set by thread)

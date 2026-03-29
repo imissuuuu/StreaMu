@@ -611,6 +611,7 @@ int main(int argc, char *argv[]) {
 
     // --- Set new track info ---
     LightLock_Lock(&ctx.lock);
+    ctx.playback_start_time = osGetTime();
     ctx.playing_id       = track.id;
     ctx.playing_title    = track.title;
     ctx.playing_duration = track.duration;
@@ -1708,7 +1709,8 @@ int main(int argc, char *argv[]) {
         LightLock_Lock(&ctx.lock);
         bool need_fetch = !ctx.playing_id.empty()
                        && ctx.playing_id != ctx.thumbnail_vid_id
-                       && !ctx.thumbnail_loading;
+                       && !ctx.thumbnail_loading
+                       && (osGetTime() - ctx.playback_start_time) > 3000;
         if (need_fetch) {
             ctx.thumbnail_vid_id = ctx.playing_id;
             ctx.thumbnail_loading = true;
