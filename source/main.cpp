@@ -620,7 +620,7 @@ int main(int argc, char *argv[]) {
     std::string meta = "";
     if (!track.duration.empty() && track.duration != "?")
       meta += track.duration;
-    if (!track.views.empty() && track.views != "?") {
+    if (!track.views.empty() && track.views != "?" && ctx.active_playlist_id.empty()) {
       if (!meta.empty())
         meta += " ";
       meta += track.views;
@@ -958,13 +958,13 @@ int main(int argc, char *argv[]) {
       } else if (action == "trigger_search_keyboard") {
         kDown |= KEY_Y;
       } else if (action == "start_playback") {
-        start_playback(ctx.g_tracks[ctx.selected_index]);
         LightLock_Lock(&ctx.lock);
         ctx.active_playlist_id   = "";
         ctx.active_playlist_name = "";
         ctx.play_queue.clear();
         ctx.current_track_idx = -1;
         LightLock_Unlock(&ctx.lock);
+        start_playback(ctx.g_tracks[ctx.selected_index]);
       } else if (action == "toggle_pause") {
         if (!ctx.playing_id.empty()) {
           ctx.is_paused = !ctx.is_paused;
@@ -1114,9 +1114,7 @@ int main(int argc, char *argv[]) {
           play_idx--; // Offset for removed MODE_BTN
           if (play_idx < 0) play_idx = 0;
         }
-        LightLock_Unlock(&ctx.lock);
-        start_playback(ctx.g_tracks[play_idx]);
-        LightLock_Lock(&ctx.lock);
+        // Set active_playlist_id BEFORE start_playback so playing_meta omits views
         ctx.active_playlist_id = ctx.selected_playlist_id;
         for (const auto& pl : ctx.playlists) {
           if (pl.id == ctx.selected_playlist_id) {
@@ -1124,6 +1122,9 @@ int main(int argc, char *argv[]) {
             break;
           }
         }
+        LightLock_Unlock(&ctx.lock);
+        start_playback(ctx.g_tracks[play_idx]);
+        LightLock_Lock(&ctx.lock);
         ctx.playing_tracks = ctx.g_tracks;
         // Build queue (shuffled or sequential based on mode)
         ctx.play_queue.clear();
