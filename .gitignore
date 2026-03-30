@@ -33,3 +33,4 @@ Thumbs.db
 # Test assets
 test_wallpapers/
 check_thumbnail.py
+mockup/
