@@ -16,7 +16,7 @@ CXX     := $(PREFIX)g++
 LD      := $(PREFIX)g++
 
 TARGET      := streamu
-VERSION     := 1.1.0
+VERSION     := 1.2.0
 SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens
 INCLUDES    := include include/network include/ui
 
