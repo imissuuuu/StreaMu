@@ -1708,9 +1708,10 @@ int main(int argc, char *argv[]) {
     // --- Thumbnail async trigger ---
     {
         LightLock_Lock(&ctx.lock);
-        bool need_fetch = !ctx.playing_id.empty()
-                       && ctx.playing_id != ctx.thumbnail_vid_id
-                       && !ctx.thumbnail_loading
+        bool track_changed = !ctx.playing_id.empty()
+                          && ctx.playing_id != ctx.thumbnail_vid_id
+                          && !ctx.thumbnail_loading;
+        bool need_fetch = track_changed
                        && (osGetTime() - ctx.playback_start_time) > 3000;
         if (need_fetch) {
             ctx.thumbnail_vid_id = ctx.playing_id;
@@ -1719,8 +1720,10 @@ int main(int argc, char *argv[]) {
         }
         LightLock_Unlock(&ctx.lock);
 
+        if (track_changed)
+            ctx.thumbnail_tex.unload(); // immediately hide stale thumbnail on track change
+
         if (need_fetch) {
-            ctx.thumbnail_tex.unload();
             Thread t = threadCreate(thumbnail_dl_thread, &ctx, 0x10000, 0x3F, -2, true);
             if (!t) {
                 LightLock_Lock(&ctx.lock);

@@ -2,11 +2,13 @@ import asyncio
 import subprocess
 import collections
 import re
+import os
+import sys
 import platform
 import urllib.request
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, AsyncGenerator, Any
+from typing import AsyncGenerator, Any
 
 BASE_DIR: Path = Path(__file__).parent.resolve()
 FFMPEG_PATH: str = str(BASE_DIR / ("ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"))
@@ -149,53 +151,48 @@ async def search(request: Request) -> PlainTextResponse:
     output = await asyncio.to_thread(search_youtube, q, lang)
     return PlainTextResponse(output)
 
-class QuietLogger:
-    def debug(self, msg: str) -> None: pass
-    def warning(self, msg: str) -> None: pass
-    def error(self, msg: str) -> None: pass
-
 async def stream_audio_generator(v_id: str) -> AsyncGenerator[bytes, None]:
     add_log(f"Stream requested: {v_id}")
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-        'logger': QuietLogger(),
-    }
-    raw_url = None
-    
-    def fetch_url() -> Optional[str]:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(v_id, download=False)
-            return info['url'] if info else None
 
-    try:
-        raw_url = await asyncio.to_thread(fetch_url)
-    except yt_dlp.utils.DownloadError as e:
-        add_log(f"URL Fetch ERROR (Download) for {v_id}: {e}")
-        return
-    except KeyError as e:
-        add_log(f"URL Fetch ERROR (Key) for {v_id}: {e}")
-        return
-
-    if not raw_url:
-        return
-
-    add_log(f"Transcoding to MP3 for 3DS: {v_id}")
-    cmd_ffmpeg = [
-        FFMPEG_PATH, "-i", raw_url, "-f", "mp3", 
-        "-ar", "44100", "-ac", "2", "-b:a", "96k", "pipe:1"
+    url = f"https://www.youtube.com/watch?v={v_id}"
+    ydl_cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "-f", "bestaudio/best",
+        "--quiet", "--no-warnings",
+        "-o", "-",
+        url
     ]
-    
-    proc = await asyncio.create_subprocess_exec(
-        *cmd_ffmpeg,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL
-    )
+    ffmpeg_cmd = [
+        FFMPEG_PATH,
+        "-i", "pipe:0",
+        "-f", "mp3", "-ar", "44100", "-ac", "2", "-b:a", "96k",
+        "pipe:1"
+    ]
 
+    r_fd, w_fd = os.pipe()
+    ydl_proc = None
+    ffmpeg_proc = None
     try:
+        ydl_proc = await asyncio.create_subprocess_exec(
+            *ydl_cmd,
+            stdout=w_fd,
+            stderr=subprocess.DEVNULL
+        )
+        os.close(w_fd)
+        w_fd = -1
+
+        ffmpeg_proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdin=r_fd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL
+        )
+        os.close(r_fd)
+        r_fd = -1
+
+        add_log(f"Pipe streaming started: {v_id}")
         while True:
-            data = await proc.stdout.read(8192)
+            data = await ffmpeg_proc.stdout.read(8192)
             if not data:
                 break
             yield data
@@ -206,11 +203,21 @@ async def stream_audio_generator(v_id: str) -> AsyncGenerator[bytes, None]:
     except Exception as e:
         add_log(f"Unexpected stream error: {e}")
     finally:
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        await proc.wait()
+        if w_fd >= 0:
+            try: os.close(w_fd)
+            except OSError: pass
+        if r_fd >= 0:
+            try: os.close(r_fd)
+            except OSError: pass
+        for proc in filter(None, [ffmpeg_proc, ydl_proc]):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        if ffmpeg_proc:
+            await ffmpeg_proc.wait()
+        if ydl_proc:
+            await ydl_proc.wait()
 
 async def stream(request: Request) -> StreamingResponse | PlainTextResponse:
     i = request.query_params.get("i", "")
