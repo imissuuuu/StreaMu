@@ -47,7 +47,7 @@ bool YouTubeAPI::start_streaming(const std::string& url) {
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "3DS-YT");
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);   // TCP connect timeout
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);   // 1 byte/s threshold
-        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 15L);   // No data for 15s → abort
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);   // No data for 60s → abort (seek needs extra time)
 
         CURLcode res = curl_easy_perform(curl);
         if (res == CURLE_OK && !should_cancel) {
@@ -95,9 +95,11 @@ void YouTubeAPI::search(const std::string& query, const std::string& lang, Searc
     else callback({}, false);
 }
 
-void YouTubeAPI::get_audio_stream_url(const std::string& video_id, std::function<void(const std::string&, bool)> callback) {
+void YouTubeAPI::get_audio_stream_url(const std::string& video_id, int seek_seconds, std::function<void(const std::string&, bool)> callback) {
     // Delegate heavy work to PC; 3DS just receives the MP3 stream
     std::string url = get_base_url() + "/stream?i=" + video_id;
+    if (seek_seconds > 0)
+        url += "&t=" + std::to_string(seek_seconds);
     callback(url, true);
 }
 std::vector<Track> YouTubeAPI::parse_search_results(const std::string& data) {
