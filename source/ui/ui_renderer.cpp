@@ -305,6 +305,11 @@ void UIRenderer::draw_popup_overlay(const RenderContext& ctx) {
             if (t.id == ctx.selected_track_id) { found_track = &t; break; }
         }
         if (!found_track) {
+            for (const auto& t : ctx.search_tracks) {
+                if (t.id == ctx.selected_track_id) { found_track = &t; break; }
+            }
+        }
+        if (!found_track) {
             for (const auto& t : ctx.g_tracks) {
                 if (t.id == ctx.selected_track_id) { found_track = &t; break; }
             }

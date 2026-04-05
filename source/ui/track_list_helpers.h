@@ -10,6 +10,13 @@ class UIManager;
 // Shared drawing helper for track list (used by SearchScreen and PlaylistDetailScreen)
 void draw_track_list_bottom(const RenderContext& ctx, UIManager& ui_mgr, bool show_views = true);
 
+// PlayingScreen-style track list: 30px items, y=8..200, used by PlayingScreen and SearchScreen
+void draw_playing_style_list(
+    const std::vector<Track>& tracks,
+    const RenderContext& ctx,
+    UIManager& ui_mgr
+);
+
 // Shared DPad navigation for g_tracks list (wrap-around + horizontal scroll)
 void navigate_track_list(AppContext& ctx, u32 kRepeat);
 

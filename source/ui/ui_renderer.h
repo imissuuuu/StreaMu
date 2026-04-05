@@ -3,6 +3,7 @@
 #include "theme.h"
 #include "ui_manager.h"
 #include "wallpaper.h"
+#include "touch_state.h"
 #include <3ds.h>
 #include <citro2d.h>
 #include <string>
@@ -46,6 +47,7 @@ struct RenderContext {
   int home_selected_index;
 
   std::vector<Track> g_tracks;
+  std::vector<Track> search_tracks;  // SearchScreen-exclusive; never touched by PlaylistDetailScreen
   std::vector<Track> playing_tracks; // Copy of g_tracks at playback start; independent of browsing
   int selected_index;
   int scroll_x;
@@ -72,6 +74,11 @@ struct RenderContext {
   bool shuffle_mode = false;        // Shuffle playback mode
   LoopMode loop_mode = LOOP_OFF;    // Loop mode
   int mode_btn_focus = 1;           // PlaylistDetail button row focus (0=SHUFFLE, 1=ORDER)
+  u64 playback_start_time = 0;      // osGetTime() when current track started (for seek bar)
+  u64 pause_accumulated_ms = 0;    // Total ms spent frozen (paused or buffering) in current track
+  u64 pause_started_at = 0;        // osGetTime() when current freeze started (0 = not frozen)
+  bool is_buffering = false;       // True while audio stream is loading
+  TouchState touch_state;          // Live touch state snapshot for seek bar drag preview
 
   // Drag scroll
   float scroll_offset_y = 0.0f;
