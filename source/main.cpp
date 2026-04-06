@@ -811,6 +811,13 @@ int main(int argc, char *argv[]) {
           ctx.is_paused = !ctx.is_paused;
           ndspChnSetPaused(0, ctx.is_paused);
           ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+          if (ctx.is_paused) {
+            ctx.pause_started_at = osGetTime();
+          } else {
+            if (ctx.pause_started_at > 0)
+              ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+            ctx.pause_started_at = 0;
+          }
         }
       }
       // LR_DISABLED: do nothing
