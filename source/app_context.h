@@ -17,7 +17,7 @@ struct AppContext : public RenderContext {
     // is_paused inherited from RenderContext (no shadowing)
     std::string current_stream_url = "";
     LightLock lock; // Mutex for thread synchronization
-    TouchState touch_state; // Touch input state
+    // touch_state inherited from RenderContext (no shadowing)
 
     // API pointer (set in main after YouTubeAPI is created)
     YouTubeAPI* api = nullptr;
@@ -26,8 +26,10 @@ struct AppContext : public RenderContext {
     Wallpaper thumbnail_tex;
     std::string thumbnail_vid_id; // video ID of the loaded thumbnail
 
+    int seek_target_seconds = -1;         // Requested seek position (-1 = none)
+
     // Thumbnail async download state (protected by lock)
-    u64 playback_start_time = 0;          // osGetTime() when current track started
+    // playback_start_time inherited from RenderContext (no shadowing)
     bool thumbnail_loading = false;       // true while thread is running
     bool thumbnail_ready = false;         // true when raw data is ready for GPU upload
     std::vector<uint8_t> thumbnail_pixels; // cropped RGBA pixels (set by thread)

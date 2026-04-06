@@ -7,7 +7,7 @@
 enum ThemeMode { THEME_LIGHT = 0, THEME_DARK = 1 };
 
 // === L/R Button Behavior ===
-enum LRAction { LR_DISABLED = 0, LR_SKIP = 1, LR_PLAY_PAUSE = 2 };
+enum LRAction { LR_DISABLED = 0, LR_SKIP_BACK = 1, LR_SKIP_FORWARD = 2, LR_PLAY_PAUSE = 3 };
 
 // === Hamburger Menu Button Position ===
 enum MenuButtonSide { MENU_BTN_LEFT = 0, MENU_BTN_RIGHT = 1 };
@@ -17,8 +17,8 @@ struct AppConfig {
   ThemeMode mode = THEME_LIGHT;
   int accent_hue = 220;  // 0-360 (default: blue)
   int palette_index = 0; // Palette index (-1 = custom hue)
-  LRAction l_action = LR_SKIP;
-  LRAction r_action = LR_SKIP;
+  LRAction l_action = LR_SKIP_BACK;
+  LRAction r_action = LR_SKIP_FORWARD;
   MenuButtonSide menu_btn_side = MENU_BTN_LEFT; // For future settings (not yet implemented)
   int dpad_speed = 5; // 1-10 (1=slowest, 5=normal, 10=fastest)
   std::string quick_access_ids = ""; // Comma-separated PL IDs (max 4)

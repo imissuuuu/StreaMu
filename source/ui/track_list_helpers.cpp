@@ -1,6 +1,7 @@
 #include "track_list_helpers.h"
 #include "ui_manager.h"
 #include "ui_constants.h"
+#include "play_bar.h"
 
 // ============================================================
 // Shared helper: track list drawing for STATE_SEARCH / STATE_PLAYLIST_DETAIL
@@ -235,4 +236,75 @@ void navigate_track_list(AppContext& ctx, u32 kRepeat) {
         }
     }
     LightLock_Unlock(&ctx.lock);
+}
+
+// ============================================================
+// PlayingScreen-style list: 30px items, y=BTM_LIST_START_Y..PlayBar::BAR_Y
+// Used by PlayingScreen and SearchScreen
+// ============================================================
+void draw_playing_style_list(
+    const std::vector<Track>& tracks,
+    const RenderContext& ctx,
+    UIManager& ui_mgr)
+{
+    if (tracks.empty()) return;
+    C2D_Text text;
+    C2D_TextBuf buf = ui_mgr.get_text_buf();
+
+    constexpr float START_Y = BTM_LIST_START_Y;       // 8.0f
+    constexpr float END_Y   = PlayBar::BAR_Y;          // 200.0f
+    constexpr float H       = BTM_ITEM_HEIGHT_2ROW;    // 30.0f
+
+    int scroll_items; float y_shift;
+    calc_scroll(ctx.scroll_offset_y, H, scroll_items, y_shift);
+    float y_base = START_Y - y_shift;
+    int first    = scroll_items;
+    int visible  = (int)((END_Y - START_Y) / H) + 1;
+
+    for (int i = first; i < first + visible; ++i) {
+        if (i < 0 || i >= (int)tracks.size()) continue;
+        float y_item = y_base + (i - first) * H;
+        if (y_item + H < START_Y || y_item >= END_Y) continue;
+
+        const Track& tr  = tracks[i];
+        bool is_playing  = (tr.id == ctx.playing_id);
+        bool is_selected = (i == ctx.selected_index);
+
+        if (is_selected) {
+            C2D_DrawRectSolid(0, y_item, 0, 320, H, ctx.theme->accent);
+            draw_selection_left_bar(y_item, H, ctx.theme->accent);
+        } else if (is_playing) {
+            C2D_DrawRectSolid(0, y_item, 0, 320, H, ctx.theme->playing_bg);
+        } else {
+            draw_item_bg(0, y_item, 320, H, ctx.theme->bg_bottom);
+        }
+
+        u32 title_color = (is_selected || is_playing)
+                          ? ctx.theme->accent_text : ctx.theme->text_body;
+
+        std::string display_title = is_playing ? (">> " + tr.title) : tr.title;
+        C2D_TextParse(&text, buf, display_title.c_str());
+        {
+            float draw_x = BTM_MARGIN_X;
+            if (is_selected) {
+                float text_w    = text.width * FONT_SM;
+                float display_w = 320.0f - BTM_MARGIN_X * 2;
+                float eff_scroll = (text_w > display_w)
+                    ? std::min((float)ctx.scroll_x, text_w - display_w) : 0.0f;
+                draw_x = BTM_MARGIN_X - eff_scroll;
+            }
+            C2D_DrawText(&text, C2D_WithColor, draw_x, y_item, 0,
+                         FONT_SM, FONT_SM, title_color);
+        }
+        if (!tr.duration.empty()) {
+            C2D_TextParse(&text, buf, tr.duration.c_str());
+            C2D_DrawText(&text, C2D_WithColor,
+                         BTM_MARGIN_X + 8, y_item + BTM_META_OFFSET, 0,
+                         FONT_XS, FONT_XS, title_color);
+        }
+        if (!is_selected) {
+            u32 sep = ctx.theme->text_dim & 0x14FFFFFF;
+            draw_dashed_line_h(0, y_item + H - 1, 320, sep);
+        }
+    }
 }

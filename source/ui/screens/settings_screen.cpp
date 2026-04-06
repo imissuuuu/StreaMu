@@ -58,8 +58,10 @@ std::string SettingsScreen::lr_action_name(LRAction action) const {
   switch (action) {
   case LR_DISABLED:
     return "Disabled";
-  case LR_SKIP:
-    return "Skip";
+  case LR_SKIP_BACK:
+    return "Skip Back";
+  case LR_SKIP_FORWARD:
+    return "Skip Fwd";
   case LR_PLAY_PAUSE:
     return "Play/Pause";
   default:
@@ -156,11 +158,9 @@ std::string SettingsScreen::get_item_description(int index) const {
   case ITEM_BRIGHTNESS:
     return "Adjust color brightness.\nLeft: dark  Right: bright.";
   case ITEM_L_BUTTON:
-    return "Set L button behavior.\nDisabled / Skip prev track / Play-Pause "
-           "toggle.";
+    return "Set L button behavior.\nDisabled / Skip Back / Skip Fwd / Play-Pause";
   case ITEM_R_BUTTON:
-    return "Set R button behavior.\nDisabled / Skip next track / Play-Pause "
-           "toggle.";
+    return "Set R button behavior.\nDisabled / Skip Back / Skip Fwd / Play-Pause";
   case ITEM_DPAD_SPEED:
     return "D-pad repeat speed when held.\n1=Slow  5=Normal  10=Fast";
   case ITEM_WALLPAPER:
@@ -538,10 +538,10 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
                 apply_preview();
               } else if (i == ITEM_L_BUTTON) {
                 editing_config_.l_action =
-                    (LRAction)(((int)editing_config_.l_action + 1) % 3);
+                    (LRAction)(((int)editing_config_.l_action + 1) % 4);
               } else if (i == ITEM_R_BUTTON) {
                 editing_config_.r_action =
-                    (LRAction)(((int)editing_config_.r_action + 1) % 3);
+                    (LRAction)(((int)editing_config_.r_action + 1) % 4);
               } else if (i == ITEM_DPAD_SPEED) {
                 in_edit_mode_ = true;
               } else if (i == ITEM_WALLPAPER) {
@@ -608,10 +608,10 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld, u32 kR
       in_edit_mode_ = true;
       break;
     case ITEM_L_BUTTON:
-      editing_config_.l_action = (LRAction)(((int)editing_config_.l_action + 1) % 3);
+      editing_config_.l_action = (LRAction)(((int)editing_config_.l_action + 1) % 4);
       break;
     case ITEM_R_BUTTON:
-      editing_config_.r_action = (LRAction)(((int)editing_config_.r_action + 1) % 3);
+      editing_config_.r_action = (LRAction)(((int)editing_config_.r_action + 1) % 4);
       break;
     case ITEM_COLOR:
       in_palette_mode_ = true;

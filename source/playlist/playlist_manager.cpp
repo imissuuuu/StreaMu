@@ -149,6 +149,21 @@ bool PlaylistManager::remove_track(const std::string& playlist_id, const std::st
     return false;
 }
 
+bool PlaylistManager::rename_track(const std::string& playlist_id, const std::string& track_id, const std::string& new_title) {
+    for (auto& pl : m_playlists) {
+        if (pl.id == playlist_id) {
+            for (auto& t : pl.tracks) {
+                if (t.id == track_id) {
+                    t.title = new_title;
+                    save();
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool PlaylistManager::is_track_in_playlist(const std::string& playlist_id, const std::string& track_id) const {
     for (const auto& pl : m_playlists) {
         if (pl.id == playlist_id) {

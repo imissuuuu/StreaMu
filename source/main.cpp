@@ -34,7 +34,6 @@ LightLock stream_lock;   // Mutex protecting stream_buffer access
 #include "ui/screens/playlists_screen.h"
 #include "ui/screens/playlist_detail_screen.h"
 #include "ui/screens/playing_screen.h"
-#include <memory>
 
 // Use smart pointers to ensure destructors run before socExit (prevents crash).
 std::unique_ptr<MP3Player> g_player_ptr;
@@ -237,7 +236,7 @@ void download_thread(void *arg) {
 
         LightLock_Lock(&ctx.lock);
         if (ok && !res.empty()) {
-          ctx.g_tracks = res;
+          ctx.search_tracks = res;
           ctx.g_status_msg = "";
           ctx.is_server_connected = true; // Mark online on success
         } else {
@@ -262,7 +261,7 @@ void download_thread(void *arg) {
       // Retry only if server is reachable (e.g. transient extract error)
       if (!success && !YouTubeAPI::should_cancel) {
         if (api->check_connection()) {
-          svcSleepThread(2000ULL * 1000 * 1000); // 2s wait
+          svcSleepThread(500ULL * 1000 * 1000); // 0.5s wait
           if (!YouTubeAPI::should_cancel) {
             success = api->start_streaming(stream_url);
           }
@@ -271,6 +270,12 @@ void download_thread(void *arg) {
 
       LightLock_Lock(&ctx.lock);
       ctx.is_downloading = false;
+      ctx.is_buffering = false;
+      // Unfreeze seek bar (unless user is still paused)
+      if (!ctx.is_paused && ctx.pause_started_at > 0) {
+        ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+        ctx.pause_started_at = 0;
+      }
       // Don't change connection state if failure was due to cancellation
       if (!YouTubeAPI::should_cancel) {
         bool is_online = success ? true : api->check_connection();
@@ -378,12 +383,7 @@ int main(int argc, char *argv[]) {
   auto g_renderer_ptr = std::make_unique<UIRenderer>(ui_mgr, g_theme_colors);
   UIRenderer &renderer = *g_renderer_ptr;
 
-  // Load wallpaper texture
   Wallpaper g_wallpaper;
-  if (!ctx.config.wallpaper_file.empty()) {
-    std::string wp_path = std::string("sdmc:/3ds/StreaMu/wallpaper/") + ctx.config.wallpaper_file;
-    g_wallpaper.load(wp_path);
-  }
   renderer.set_wallpaper(&g_wallpaper);
   renderer.set_thumbnail(&ctx.thumbnail_tex);
 
@@ -391,7 +391,6 @@ int main(int argc, char *argv[]) {
 
   // --- Step 1/4: System Init ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 1, 4, "Initializing system...");
-  svcSleepThread(300000000LL); // 0.3s minimum display
 
   aptSetSleepAllowed(false);
   osSetSpeedupEnable(true); // Enable New 3DS 804MHz CPU + L2 cache (no-op on Old 3DS)
@@ -410,16 +409,20 @@ int main(int argc, char *argv[]) {
   api.init();
   ctx.api = &api;
 
+  // Load wallpaper texture (after system init so loading screen is visible first)
+  if (!ctx.config.wallpaper_file.empty()) {
+    std::string wp_path = std::string("sdmc:/3ds/StreaMu/wallpaper/") + ctx.config.wallpaper_file;
+    g_wallpaper.load(wp_path);
+  }
+
   // --- Step 2/4: Config loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 2, 4, "Loading config...");
-  svcSleepThread(300000000LL); // 0.3s minimum display
 
   playlist_manager.init();
   ctx.playlists = playlist_manager.get_playlists();
 
   // --- Step 3/4: Playlists loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 3, 4, "Loading playlists...");
-  svcSleepThread(500000000LL); // 0.5s minimum display
 
   // UI Architecture Phase 1: ScreenManager Setup
   ScreenManager screen_mgr;
@@ -610,8 +613,16 @@ int main(int argc, char *argv[]) {
     YouTubeAPI::should_cancel = false; // Clear cancel flag
 
     // --- Set new track info ---
+    int seek_secs = ctx.seek_target_seconds;
+    ctx.seek_target_seconds = -1;
+
     LightLock_Lock(&ctx.lock);
-    ctx.playback_start_time = osGetTime();
+    ctx.pause_accumulated_ms = 0;
+    ctx.pause_started_at = osGetTime(); // freeze bar: buffering starts now
+    ctx.is_buffering = true;
+    ctx.playback_start_time = (seek_secs > 0)
+        ? osGetTime() - (u64)seek_secs * 1000ULL
+        : osGetTime();
     ctx.playing_id       = track.id;
     ctx.playing_title    = track.title;
     ctx.playing_duration = track.duration;
@@ -637,7 +648,7 @@ int main(int argc, char *argv[]) {
     ctx.g_status_msg = "Buffering...";
     LightLock_Unlock(&ctx.lock);
 
-    api.get_audio_stream_url(ctx.playing_id, [&](const std::string &url,
+    api.get_audio_stream_url(ctx.playing_id, seek_secs, [&](const std::string &url,
                                                  bool ok) {
       LightLock_Lock(&ctx.lock);
       if (ok && !url.empty()) {
@@ -709,6 +720,7 @@ int main(int argc, char *argv[]) {
         }
       } else {
         ctx.current_track_idx++;
+        bool do_play = true;
         if (ctx.current_track_idx >= (int)ctx.play_queue.size()) {
           if (ctx.loop_mode == LOOP_ALL) {
             ctx.current_track_idx = 0;
@@ -719,23 +731,24 @@ int main(int argc, char *argv[]) {
             ctx.playing_id = "";
             ctx.current_track_idx = -1;
             LightLock_Unlock(&ctx.lock);
-            goto auto_next_done;
+            do_play = false;
           }
         }
-        int next_idx = ctx.play_queue[ctx.current_track_idx];
-        if (next_idx < 0 || next_idx >= (int)ctx.playing_tracks.size()) {
-          ctx.play_queue.clear();
-          ctx.current_track_idx = -1;
-          MP3Player::is_playing = false;
-          LightLock_Unlock(&ctx.lock);
-        } else {
-          Track next_track = ctx.playing_tracks[next_idx];
-          ctx.selected_index = next_idx;
-          LightLock_Unlock(&ctx.lock);
-          start_playback(next_track);
+        if (do_play) {
+          int next_idx = ctx.play_queue[ctx.current_track_idx];
+          if (next_idx < 0 || next_idx >= (int)ctx.playing_tracks.size()) {
+            ctx.play_queue.clear();
+            ctx.current_track_idx = -1;
+            MP3Player::is_playing = false;
+            LightLock_Unlock(&ctx.lock);
+          } else {
+            Track next_track = ctx.playing_tracks[next_idx];
+            ctx.selected_index = next_idx;
+            LightLock_Unlock(&ctx.lock);
+            start_playback(next_track);
+          }
         }
       }
-      auto_next_done:;
     }
 
     hidScanInput();
@@ -763,57 +776,54 @@ int main(int argc, char *argv[]) {
     }
 
     // L/R button handling (customizable in settings)
-    // R button
-    if (kDown & KEY_R) {
-      if (ctx.config.r_action == LR_SKIP) {
+    // L/R button handling (customizable in settings)
+    auto handle_lr = [&](LRAction action) {
+      if (action == LR_SKIP_FORWARD) {
         LightLock_Lock(&ctx.lock);
         if (!ctx.play_queue.empty()) {
           ctx.current_track_idx++;
-          if (ctx.current_track_idx >= (int)ctx.play_queue.size()) {
+          if (ctx.current_track_idx >= (int)ctx.play_queue.size())
             ctx.current_track_idx = 0;
-          }
-          int next_idx = ctx.play_queue[ctx.current_track_idx];
-          Track next_track = ctx.playing_tracks[next_idx];
+          int idx = ctx.play_queue[ctx.current_track_idx];
+          Track t = ctx.playing_tracks[idx];
           LightLock_Unlock(&ctx.lock);
-          start_playback(next_track);
+          start_playback(t);
           svcSleepThread(500 * 1000 * 1000);
         } else {
           LightLock_Unlock(&ctx.lock);
         }
-      } else if (ctx.config.r_action == LR_PLAY_PAUSE) {
-        if (ctx.playing_id != "") {
-          ctx.is_paused = !ctx.is_paused;
-          ndspChnSetPaused(0, ctx.is_paused);
-          ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
-        }
-      }
-      // LR_DISABLED: do nothing
-    }
-    // L button
-    if (kDown & KEY_L) {
-      if (ctx.config.l_action == LR_SKIP) {
+      } else if (action == LR_SKIP_BACK) {
         LightLock_Lock(&ctx.lock);
         if (!ctx.play_queue.empty()) {
           ctx.current_track_idx--;
-          if (ctx.current_track_idx < 0) {
+          if (ctx.current_track_idx < 0)
             ctx.current_track_idx = (int)ctx.play_queue.size() - 1;
-          }
-          int prev_idx = ctx.play_queue[ctx.current_track_idx];
-          Track prev_track = ctx.playing_tracks[prev_idx];
+          int idx = ctx.play_queue[ctx.current_track_idx];
+          Track t = ctx.playing_tracks[idx];
           LightLock_Unlock(&ctx.lock);
-          start_playback(prev_track);
+          start_playback(t);
           svcSleepThread(500 * 1000 * 1000);
         } else {
           LightLock_Unlock(&ctx.lock);
         }
-      } else if (ctx.config.l_action == LR_PLAY_PAUSE) {
+      } else if (action == LR_PLAY_PAUSE) {
         if (ctx.playing_id != "") {
           ctx.is_paused = !ctx.is_paused;
           ndspChnSetPaused(0, ctx.is_paused);
           ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+          if (ctx.is_paused) {
+            ctx.pause_started_at = osGetTime();
+          } else {
+            if (ctx.pause_started_at > 0)
+              ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+            ctx.pause_started_at = 0;
+          }
         }
       }
-    }
+      // LR_DISABLED: do nothing
+    };
+    if (kDown & KEY_R) handle_lr(ctx.config.r_action);
+    if (kDown & KEY_L) handle_lr(ctx.config.l_action);
 
     if (kDown & KEY_START) {
       LightLock_Lock(&ctx.lock);
@@ -828,12 +838,11 @@ int main(int argc, char *argv[]) {
     if (kDown & KEY_SELECT) {
       LightLock_Lock(&ctx.lock);
       if (ctx.current_state == STATE_SEARCH) {
-        if (!ctx.g_tracks.empty() &&
-            ctx.g_tracks[ctx.selected_index].id != "SEARCH_BTN") {
+        if (!ctx.search_tracks.empty()) {
           ctx.previous_state = ctx.current_state;
           ctx.current_state = STATE_POPUP_TRACK_OPTIONS;
           ctx.popup_selected_index = 0;
-          ctx.selected_track_id = ctx.g_tracks[ctx.selected_index].id;
+          ctx.selected_track_id = ctx.search_tracks[ctx.selected_index].id;
         }
       } else if (ctx.current_state == STATE_PLAYLISTS) {
         if (!ctx.playlists.empty()) {
@@ -893,6 +902,18 @@ int main(int argc, char *argv[]) {
         ctx.is_paused = !ctx.is_paused;
         ndspChnSetPaused(0, ctx.is_paused);
         ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+        if (ctx.is_paused) {
+          // Start freeze only if not already frozen by buffering
+          if (!ctx.is_buffering)
+            ctx.pause_started_at = osGetTime();
+        } else {
+          // End freeze only if buffering is also done
+          if (!ctx.is_buffering) {
+            if (ctx.pause_started_at > 0)
+              ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+            ctx.pause_started_at = 0;
+          }
+        }
       }
     }
 
@@ -964,12 +985,22 @@ int main(int argc, char *argv[]) {
         ctx.play_queue.clear();
         ctx.current_track_idx = -1;
         LightLock_Unlock(&ctx.lock);
-        start_playback(ctx.g_tracks[ctx.selected_index]);
+        start_playback(ctx.search_tracks[ctx.selected_index]);
       } else if (action == "toggle_pause") {
         if (!ctx.playing_id.empty()) {
           ctx.is_paused = !ctx.is_paused;
           ndspChnSetPaused(0, ctx.is_paused);
           ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+          if (ctx.is_paused) {
+            if (!ctx.is_buffering)
+              ctx.pause_started_at = osGetTime();
+          } else {
+            if (!ctx.is_buffering) {
+              if (ctx.pause_started_at > 0)
+                ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+              ctx.pause_started_at = 0;
+            }
+          }
         }
       } else if (action == "prev_track") {
         LightLock_Lock(&ctx.lock);
@@ -1036,6 +1067,22 @@ int main(int argc, char *argv[]) {
           LightLock_Unlock(&ctx.lock);
         }
         next_done:;
+      } else if (action == "seek") {
+        LightLock_Lock(&ctx.lock);
+        Track seek_track;
+        bool seek_valid = false;
+        for (const auto& t : ctx.playing_tracks) {
+          if (t.id == ctx.playing_id) { seek_track = t; seek_valid = true; break; }
+        }
+        // Fallback: search result playback uses search_tracks (playing_tracks is empty)
+        if (!seek_valid) {
+          for (const auto& t : ctx.search_tracks) {
+            if (t.id == ctx.playing_id) { seek_track = t; seek_valid = true; break; }
+          }
+        }
+        LightLock_Unlock(&ctx.lock);
+        if (seek_valid) start_playback(seek_track);
+        else ctx.seek_target_seconds = -1;
       } else if (action == "toggle_loop") {
         if (ctx.loop_mode == LOOP_OFF) ctx.loop_mode = LOOP_ALL;
         else if (ctx.loop_mode == LOOP_ALL) ctx.loop_mode = LOOP_ONE;
@@ -1214,7 +1261,7 @@ int main(int argc, char *argv[]) {
           else if (ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS)
             popup_item_count = 3;
           else if (ctx.current_state == STATE_POPUP_TRACK_OPTIONS)
-            popup_item_count = (ctx.previous_state == STATE_PLAYLIST_DETAIL || ctx.previous_state == STATE_PLAYING_UI) ? 3 : 2;
+            popup_item_count = (ctx.previous_state == STATE_PLAYLIST_DETAIL || ctx.previous_state == STATE_PLAYING_UI) ? 4 : 2;
           else if (ctx.current_state == STATE_POPUP_TRACK_DETAILS)
             popup_item_count = 5;
           else if (ctx.current_state == STATE_EXIT_CONFIRM)
@@ -1310,13 +1357,24 @@ int main(int argc, char *argv[]) {
             playlist_manager.create_playlist(std::string(mybuf));
             ctx.playlists = playlist_manager.get_playlists();
             std::string new_pl_id = ctx.playlists.back().id;
-            playlist_manager.add_track(new_pl_id,
-                                       ctx.g_tracks[ctx.selected_index]);
+            {
+              Track t; auto f = [&](const std::vector<Track>& v) {
+                for (auto& tr : v) if (tr.id == ctx.selected_track_id) { t = tr; return true; }
+                return false; };
+              f(ctx.playing_tracks) || f(ctx.search_tracks) || f(ctx.g_tracks);
+              if (!t.id.empty()) playlist_manager.add_track(new_pl_id, t);
+            }
             ctx.playlists = playlist_manager.get_playlists();
           }
         } else { // Add to existing playlist
           std::string pl_id = ctx.playlists[ctx.popup_selected_index - 1].id;
-          playlist_manager.add_track(pl_id, ctx.g_tracks[ctx.selected_index]);
+          {
+            Track t; auto f = [&](const std::vector<Track>& v) {
+              for (auto& tr : v) if (tr.id == ctx.selected_track_id) { t = tr; return true; }
+              return false; };
+            f(ctx.playing_tracks) || f(ctx.search_tracks) || f(ctx.g_tracks);
+            if (!t.id.empty()) playlist_manager.add_track(pl_id, t);
+          }
           ctx.playlists = playlist_manager.get_playlists();
         }
         ctx.current_state = ctx.previous_state;
@@ -1407,9 +1465,9 @@ int main(int argc, char *argv[]) {
         ctx.current_state = ctx.previous_state;
       }
     } else if (ctx.current_state == STATE_POPUP_TRACK_OPTIONS) {
-      // Search: [Details, Add] = 2 items / PL/Playing: [Details, Remove, Add] = 3 items
+      // Search: [Details, Add] = 2 items / PL/Playing: [Details, Rename, Remove, Add] = 4 items
       bool has_delete = (ctx.previous_state == STATE_PLAYLIST_DETAIL || ctx.previous_state == STATE_PLAYING_UI);
-      int item_count = has_delete ? 3 : 2;
+      int item_count = has_delete ? 4 : 2;
       if (kRepeat & KEY_DDOWN) {
         ctx.popup_selected_index++;
         if (ctx.popup_selected_index >= item_count)
@@ -1425,7 +1483,45 @@ int main(int argc, char *argv[]) {
         if (ctx.popup_selected_index == 0) { // Show details
           ctx.current_state = STATE_POPUP_TRACK_DETAILS;
           ctx.popup_selected_index = 4; // Cursor on "[ Close ]"
-        } else if (has_delete && ctx.popup_selected_index == 1) { // Remove
+        } else if (has_delete && ctx.popup_selected_index == 1) { // Rename
+          std::string current_title = "";
+          LightLock_Lock(&ctx.lock);
+          for (const auto& t : ctx.g_tracks) {
+            if (t.id == ctx.selected_track_id) { current_title = t.title; break; }
+          }
+          if (current_title.empty()) {
+            for (const auto& t : ctx.playing_tracks) {
+              if (t.id == ctx.selected_track_id) { current_title = t.title; break; }
+            }
+          }
+          LightLock_Unlock(&ctx.lock);
+          SwkbdState swkbd;
+          char mybuf[256] = "";
+          swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, -1);
+          swkbdSetFeatures(&swkbd, SWKBD_PREDICTIVE_INPUT);
+          swkbdSetHintText(&swkbd, "Track Name");
+          if (!current_title.empty())
+            swkbdSetInitialText(&swkbd, current_title.c_str());
+          if (swkbdInputText(&swkbd, mybuf, sizeof(mybuf)) == SWKBD_BUTTON_CONFIRM && strlen(mybuf) > 0) {
+            std::string new_title(mybuf);
+            std::string pl_id = (ctx.previous_state == STATE_PLAYING_UI)
+                ? ctx.active_playlist_id : ctx.selected_playlist_id;
+            playlist_manager.rename_track(pl_id, ctx.selected_track_id, new_title);
+            ctx.playlists = playlist_manager.get_playlists();
+            LightLock_Lock(&ctx.lock);
+            for (auto& t : ctx.g_tracks) {
+              if (t.id == ctx.selected_track_id) { t.title = new_title; break; }
+            }
+            for (auto& t : ctx.playing_tracks) {
+              if (t.id == ctx.selected_track_id) { t.title = new_title; break; }
+            }
+            bool need_title_update = (ctx.playing_id == ctx.selected_track_id);
+            if (need_title_update) ctx.playing_title = new_title;
+            LightLock_Unlock(&ctx.lock);
+            if (need_title_update) update_playing_title_lines(ui_mgr.get_text_buf());
+          }
+          ctx.current_state = ctx.previous_state;
+        } else if (has_delete && ctx.popup_selected_index == 2) { // Remove
           if (ctx.previous_state == STATE_PLAYING_UI) {
             // Remove from PlayingScreen: use active_playlist_id
             playlist_manager.remove_track(ctx.active_playlist_id,
@@ -1492,7 +1588,7 @@ int main(int argc, char *argv[]) {
               ctx.selected_index = 0;
           }
           ctx.current_state = ctx.previous_state;
-        } else { // Add to playlist (Search:idx1, PL/Playing:idx2)
+        } else { // Add to playlist (Search:idx1, PL/Playing:idx3)
           ctx.current_state = STATE_POPUP_PLAYLIST_ADD;
           ctx.popup_selected_index = 0;
         }
@@ -1673,7 +1769,7 @@ int main(int argc, char *argv[]) {
       char mybuf[256] = "";
       swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, -1);
       swkbdSetFeatures(&swkbd, SWKBD_PREDICTIVE_INPUT);
-      swkbdSetHintText(&swkbd, "Search YouTube");
+      swkbdSetHintText(&swkbd, "Search music...");
       SwkbdButton button = swkbdInputText(&swkbd, mybuf, sizeof(mybuf));
 
       if (button == SWKBD_BUTTON_CONFIRM && strlen(mybuf) > 0) {
@@ -1698,7 +1794,7 @@ int main(int argc, char *argv[]) {
         ctx.playing_title = "";
         ctx.playing_title_lines.clear();
 
-        ctx.g_tracks.clear();
+        ctx.search_tracks.clear();
         ctx.search_query = url_encode(std::string(mybuf));
         ctx.selected_index = 0;
         screen_mgr.change_screen(ctx, "SearchScreen");
@@ -1708,9 +1804,10 @@ int main(int argc, char *argv[]) {
     // --- Thumbnail async trigger ---
     {
         LightLock_Lock(&ctx.lock);
-        bool need_fetch = !ctx.playing_id.empty()
-                       && ctx.playing_id != ctx.thumbnail_vid_id
-                       && !ctx.thumbnail_loading
+        bool track_changed = !ctx.playing_id.empty()
+                          && ctx.playing_id != ctx.thumbnail_vid_id
+                          && !ctx.thumbnail_loading;
+        bool need_fetch = track_changed
                        && (osGetTime() - ctx.playback_start_time) > 3000;
         if (need_fetch) {
             ctx.thumbnail_vid_id = ctx.playing_id;
@@ -1719,8 +1816,10 @@ int main(int argc, char *argv[]) {
         }
         LightLock_Unlock(&ctx.lock);
 
+        if (track_changed)
+            ctx.thumbnail_tex.unload(); // immediately hide stale thumbnail on track change
+
         if (need_fetch) {
-            ctx.thumbnail_tex.unload();
             Thread t = threadCreate(thumbnail_dl_thread, &ctx, 0x10000, 0x3F, -2, true);
             if (!t) {
                 LightLock_Lock(&ctx.lock);
@@ -1751,6 +1850,17 @@ int main(int argc, char *argv[]) {
     }
 
     player.update();
+
+    // Clear buffering flag once audio actually starts playing
+    if (ctx.is_buffering && player.has_started_playing()) {
+      LightLock_Lock(&ctx.lock);
+      ctx.is_buffering = false;
+      if (!ctx.is_paused && ctx.pause_started_at > 0) {
+        ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+        ctx.pause_started_at = 0;
+      }
+      LightLock_Unlock(&ctx.lock);
+    }
 
     LightLock_Lock(&stream_lock);
     size_t sb_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
