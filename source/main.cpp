@@ -383,12 +383,7 @@ int main(int argc, char *argv[]) {
   auto g_renderer_ptr = std::make_unique<UIRenderer>(ui_mgr, g_theme_colors);
   UIRenderer &renderer = *g_renderer_ptr;
 
-  // Load wallpaper texture
   Wallpaper g_wallpaper;
-  if (!ctx.config.wallpaper_file.empty()) {
-    std::string wp_path = std::string("sdmc:/3ds/StreaMu/wallpaper/") + ctx.config.wallpaper_file;
-    g_wallpaper.load(wp_path);
-  }
   renderer.set_wallpaper(&g_wallpaper);
   renderer.set_thumbnail(&ctx.thumbnail_tex);
 
@@ -396,7 +391,6 @@ int main(int argc, char *argv[]) {
 
   // --- Step 1/4: System Init ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 1, 4, "Initializing system...");
-  svcSleepThread(300000000LL); // 0.3s minimum display
 
   aptSetSleepAllowed(false);
   osSetSpeedupEnable(true); // Enable New 3DS 804MHz CPU + L2 cache (no-op on Old 3DS)
@@ -415,16 +409,20 @@ int main(int argc, char *argv[]) {
   api.init();
   ctx.api = &api;
 
+  // Load wallpaper texture (after system init so loading screen is visible first)
+  if (!ctx.config.wallpaper_file.empty()) {
+    std::string wp_path = std::string("sdmc:/3ds/StreaMu/wallpaper/") + ctx.config.wallpaper_file;
+    g_wallpaper.load(wp_path);
+  }
+
   // --- Step 2/4: Config loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 2, 4, "Loading config...");
-  svcSleepThread(300000000LL); // 0.3s minimum display
 
   playlist_manager.init();
   ctx.playlists = playlist_manager.get_playlists();
 
   // --- Step 3/4: Playlists loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 3, 4, "Loading playlists...");
-  svcSleepThread(500000000LL); // 0.5s minimum display
 
   // UI Architecture Phase 1: ScreenManager Setup
   ScreenManager screen_mgr;
