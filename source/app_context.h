@@ -26,6 +26,8 @@ struct AppContext : public RenderContext {
     Wallpaper thumbnail_tex;
     std::string thumbnail_vid_id; // video ID of the loaded thumbnail
 
+    int seek_target_seconds = -1;         // Requested seek position (-1 = none)
+
     // Thumbnail async download state (protected by lock)
     u64 playback_start_time = 0;          // osGetTime() when current track started
     bool thumbnail_loading = false;       // true while thread is running

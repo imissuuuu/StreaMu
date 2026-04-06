@@ -22,7 +22,7 @@ public:
     void init();
     void cleanup();
     void search(const std::string& query, const std::string& lang, SearchCallback callback);
-    void get_audio_stream_url(const std::string& video_id, StreamCallback callback);
+    void get_audio_stream_url(const std::string& video_id, int seek_seconds, std::function<void(const std::string&, bool)> callback);
     bool start_streaming(const std::string& url);
     std::string http_get(const std::string& url, long timeout_sec = 15L);
     bool check_connection();
@@ -31,10 +31,7 @@ public:
     void set_server_ip(const std::string& ip) { m_server_ip = ip; }
     std::string get_base_url() const { return "http://" + m_server_ip; }
 
-    // Declaration only to avoid duplicate definition errors
     bool download_thumbnail(const std::string& video_id, std::vector<uint8_t>& data);
-    std::string http_post(const std::string& url, const std::string& postData, const std::string& contentType);
-    std::string parse_stream_url(const std::string& json);
 
 private:
     std::string m_server_ip;

@@ -34,7 +34,6 @@ LightLock stream_lock;   // Mutex protecting stream_buffer access
 #include "ui/screens/playlists_screen.h"
 #include "ui/screens/playlist_detail_screen.h"
 #include "ui/screens/playing_screen.h"
-#include <memory>
 
 // Use smart pointers to ensure destructors run before socExit (prevents crash).
 std::unique_ptr<MP3Player> g_player_ptr;
@@ -723,6 +722,7 @@ int main(int argc, char *argv[]) {
         }
       } else {
         ctx.current_track_idx++;
+        bool do_play = true;
         if (ctx.current_track_idx >= (int)ctx.play_queue.size()) {
           if (ctx.loop_mode == LOOP_ALL) {
             ctx.current_track_idx = 0;
@@ -733,23 +733,24 @@ int main(int argc, char *argv[]) {
             ctx.playing_id = "";
             ctx.current_track_idx = -1;
             LightLock_Unlock(&ctx.lock);
-            goto auto_next_done;
+            do_play = false;
           }
         }
-        int next_idx = ctx.play_queue[ctx.current_track_idx];
-        if (next_idx < 0 || next_idx >= (int)ctx.playing_tracks.size()) {
-          ctx.play_queue.clear();
-          ctx.current_track_idx = -1;
-          MP3Player::is_playing = false;
-          LightLock_Unlock(&ctx.lock);
-        } else {
-          Track next_track = ctx.playing_tracks[next_idx];
-          ctx.selected_index = next_idx;
-          LightLock_Unlock(&ctx.lock);
-          start_playback(next_track);
+        if (do_play) {
+          int next_idx = ctx.play_queue[ctx.current_track_idx];
+          if (next_idx < 0 || next_idx >= (int)ctx.playing_tracks.size()) {
+            ctx.play_queue.clear();
+            ctx.current_track_idx = -1;
+            MP3Player::is_playing = false;
+            LightLock_Unlock(&ctx.lock);
+          } else {
+            Track next_track = ctx.playing_tracks[next_idx];
+            ctx.selected_index = next_idx;
+            LightLock_Unlock(&ctx.lock);
+            start_playback(next_track);
+          }
         }
       }
-      auto_next_done:;
     }
 
     hidScanInput();

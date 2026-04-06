@@ -133,5 +133,3 @@ bool YouTubeAPI::download_thumbnail(const std::string& video_id, std::vector<uin
     data.assign(raw.begin(), raw.end());
     return true;
 }
-std::string YouTubeAPI::http_post(const std::string&, const std::string&, const std::string&) { return ""; }
-std::string YouTubeAPI::parse_stream_url(const std::string&) { return ""; }

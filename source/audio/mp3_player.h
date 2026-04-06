@@ -14,6 +14,7 @@ public:
     void update(); 
     void stop();
     bool is_track_finished() const;
+    bool has_started_playing() const;
     void set_downloading_status(bool downloading);
 
     static bool is_playing;
