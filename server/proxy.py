@@ -29,7 +29,7 @@ app_logs: collections.deque[str] = collections.deque(maxlen=MAX_LOGS)
 # Cache for seek format info.
 # value: (direct_url, fragments, http_headers, timestamp)
 _url_cache: dict[str, tuple[str, list[dict], dict[str, str], float]] = {}
-URL_CACHE_TTL = 300  # 5 minutes
+URL_CACHE_TTL = 3600  # 1 hour
 
 
 def add_log(msg: str) -> None:
@@ -114,6 +114,7 @@ def search_youtube(query: str, lang: str = "en") -> str:
         'max_downloads': 10,
         'quiet': True,
         'default_search': 'ytsearch10',
+        'socket_timeout': 10,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
@@ -173,6 +174,7 @@ def _extract_seek_info(v_id: str) -> tuple[str, list[dict], dict[str, str]]:
         "format": "bestaudio[ext=m4a]/bestaudio/best",
         "quiet": True,
         "no_warnings": True,
+        "socket_timeout": 10,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -189,121 +191,118 @@ def _extract_seek_info(v_id: str) -> tuple[str, list[dict], dict[str, str]]:
         add_log(f"Seek info extraction failed: {e}")
     return "", [], {}
 
-async def stream_audio_generator(v_id: str, t: int = 0) -> AsyncGenerator[bytes, None]:
-    add_log(f"Stream requested: {v_id}" + (f" (seek {t}s)" if t > 0 else ""))
-
+async def _stream_seek(v_id: str, t: int) -> AsyncGenerator[bytes, None]:
+    """Seek stream: extract seek info then pipe DASH or progressive content through ffmpeg."""
     url = f"https://www.youtube.com/watch?v={v_id}"
-    ffmpeg_proc = None
+    direct_url, fragments, http_headers = await asyncio.to_thread(
+        _extract_seek_info, v_id
+    )
 
-    # --- Seek ---
-    if t > 0:
-        direct_url, fragments, http_headers = await asyncio.to_thread(
-            _extract_seek_info, v_id
-        )
+    r_fd, w_fd = os.pipe()
+    ffmpeg_proc: asyncio.subprocess.Process | None = None
+    ydl_proc_prog: asyncio.subprocess.Process | None = None
 
-        r_fd, w_fd = os.pipe()
-        ffmpeg_proc: asyncio.subprocess.Process | None = None
-        ydl_proc_prog: asyncio.subprocess.Process | None = None
+    if fragments:
+        # DASH fMP4: manually fetch init (sq=0) + media segments from t.
+        # YouTube CDN serves only ~37s per plain GET, so HTTP Range seek is
+        # impossible. Instead we reconstruct the fMP4 stream from the right
+        # segment and pipe it directly into ffmpeg.
+        cumulative = 0.0
+        start_idx = 0
+        for i, frag in enumerate(fragments):
+            dur = frag.get("duration", 0) or 0
+            if cumulative + dur > t:
+                start_idx = i
+                break
+            cumulative += dur
 
-        if fragments:
-            # DASH fMP4: manually fetch init (sq=0) + media segments from t.
-            # YouTube CDN serves only ~37s per plain GET, so HTTP Range seek is
-            # impossible. Instead we reconstruct the fMP4 stream from the right
-            # segment and pipe it directly into ffmpeg.
-            cumulative = 0.0
-            start_idx = 0
-            for i, frag in enumerate(fragments):
-                dur = frag.get("duration", 0) or 0
-                if cumulative + dur > t:
-                    start_idx = i
-                    break
-                cumulative += dur
+        first_url = fragments[0].get("url", direct_url)
+        init_url  = re.sub(r"&sq=\d+", "&sq=0", first_url)
 
-            first_url = fragments[0].get("url", direct_url)
-            init_url  = re.sub(r"&sq=\d+", "&sq=0", first_url)
+        add_log(f"Seek info: DASH {len(fragments)} frags, start_idx={start_idx} (~{cumulative:.0f}s)")
 
-            add_log(f"Seek info: DASH {len(fragments)} frags, start_idx={start_idx} (~{cumulative:.0f}s)")
+        def _fetch(fetch_url: str) -> bytes:
+            req = urllib.request.Request(fetch_url, headers=http_headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read()
 
-            def _fetch(fetch_url: str) -> bytes:
-                req = urllib.request.Request(fetch_url, headers=http_headers)
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    return resp.read()
+        async def _feed_dash() -> None:
+            try:
+                with os.fdopen(w_fd, "wb") as pipe_out:
+                    # init segment (ftyp + moov — codec metadata)
+                    pipe_out.write(await asyncio.to_thread(_fetch, init_url))
+                    # media segments from seek position
+                    for frag in fragments[start_idx:]:
+                        pipe_out.write(await asyncio.to_thread(_fetch, frag["url"]))
+            except (BrokenPipeError, OSError):
+                pass  # 3DS disconnected; pipe broken
 
-            async def _feed_dash() -> None:
-                try:
-                    with os.fdopen(w_fd, "wb") as pipe_out:
-                        # init segment (ftyp + moov — codec metadata)
-                        pipe_out.write(await asyncio.to_thread(_fetch, init_url))
-                        # media segments from seek position
-                        for frag in fragments[start_idx:]:
-                            pipe_out.write(await asyncio.to_thread(_fetch, frag["url"]))
-                except (BrokenPipeError, OSError):
-                    pass  # 3DS disconnected; pipe broken
-
-            asyncio.create_task(_feed_dash())
-        else:
-            # Progressive: yt-dlp → pipe → ffmpeg output-seek (-ss after -i)
-            ydl_cmd = [
-                sys.executable, "-m", "yt_dlp",
-                "-f", "bestaudio[ext=m4a]/bestaudio/best",
-                "--quiet", "--no-warnings", "-o", "-", url
-            ]
-            ydl_proc_prog = await asyncio.create_subprocess_exec(
-                *ydl_cmd, stdout=w_fd, stderr=subprocess.DEVNULL
-            )
-            os.close(w_fd)
-            w_fd = -1
-
-        ffmpeg_cmd = [
-            FFMPEG_PATH,
-            "-i", "pipe:0",
-            *([] if fragments else ["-ss", str(t)]),
-            "-f", "mp3", "-ar", "44100", "-ac", "2", "-b:a", "96k",
-            "pipe:1"
+        asyncio.create_task(_feed_dash())
+    else:
+        # Progressive: yt-dlp → pipe → ffmpeg output-seek (-ss after -i)
+        ydl_cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "-f", "bestaudio[ext=m4a]/bestaudio/best",
+            "--quiet", "--no-warnings", "-o", "-", url
         ]
-        label = "DASH-frags" if fragments else "progressive-pipe"
+        ydl_proc_prog = await asyncio.create_subprocess_exec(
+            *ydl_cmd, stdout=w_fd, stderr=subprocess.DEVNULL
+        )
+        os.close(w_fd)
+        w_fd = -1
 
-        try:
-            ffmpeg_proc = await asyncio.create_subprocess_exec(
-                *ffmpeg_cmd,
-                stdin=r_fd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL
-            )
-            os.close(r_fd)
-            r_fd = -1
+    ffmpeg_cmd = [
+        FFMPEG_PATH,
+        "-i", "pipe:0",
+        *([] if fragments else ["-ss", str(t)]),
+        "-f", "mp3", "-ar", "44100", "-ac", "2", "-b:a", "96k",
+        "pipe:1"
+    ]
+    label = "DASH-frags" if fragments else "progressive-pipe"
 
-            assert ffmpeg_proc.stdout is not None
-            add_log(f"Seek stream started: {v_id} t={t}s ({label})")
-            while True:
-                data = await ffmpeg_proc.stdout.read(8192)
-                if not data:
-                    break
-                yield data
-        except asyncio.CancelledError:
-            add_log(f"Seek stream disconnected: {v_id}")
-        except (BrokenPipeError, ConnectionResetError):
-            add_log(f"Seek stream socket closed: {v_id}")
-        except (OSError, RuntimeError) as e:
-            add_log(f"Seek stream error: {e}")
-        finally:
-            if w_fd >= 0:
-                try: os.close(w_fd)
-                except OSError: pass
-            if r_fd >= 0:
-                try: os.close(r_fd)
-                except OSError: pass
-            if ffmpeg_proc:
-                try: ffmpeg_proc.kill()
-                except OSError: pass
-                await ffmpeg_proc.wait()
-            if ydl_proc_prog:
-                try: ydl_proc_prog.kill()
-                except OSError: pass
-                await ydl_proc_prog.wait()
-        return
+    try:
+        ffmpeg_proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdin=r_fd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL
+        )
+        os.close(r_fd)
+        r_fd = -1
 
-    # --- Normal streaming: yt-dlp → pipe → ffmpeg ---
+        assert ffmpeg_proc.stdout is not None
+        add_log(f"Seek stream started: {v_id} t={t}s ({label})")
+        while True:
+            data = await ffmpeg_proc.stdout.read(32768)
+            if not data:
+                break
+            yield data
+    except asyncio.CancelledError:
+        add_log(f"Seek stream disconnected: {v_id}")
+    except (BrokenPipeError, ConnectionResetError):
+        add_log(f"Seek stream socket closed: {v_id}")
+    except (OSError, RuntimeError) as e:
+        add_log(f"Seek stream error: {e}")
+    finally:
+        if w_fd >= 0:
+            try: os.close(w_fd)
+            except OSError: pass
+        if r_fd >= 0:
+            try: os.close(r_fd)
+            except OSError: pass
+        if ffmpeg_proc:
+            try: ffmpeg_proc.kill()
+            except OSError: pass
+            await ffmpeg_proc.wait()
+        if ydl_proc_prog:
+            try: ydl_proc_prog.kill()
+            except OSError: pass
+            await ydl_proc_prog.wait()
+
+
+async def _stream_normal(v_id: str) -> AsyncGenerator[bytes, None]:
+    """Normal streaming: yt-dlp → pipe → ffmpeg."""
+    url = f"https://www.youtube.com/watch?v={v_id}"
     ydl_cmd = [
         sys.executable, "-m", "yt_dlp",
         "-f", "bestaudio/best",
@@ -342,7 +341,7 @@ async def stream_audio_generator(v_id: str, t: int = 0) -> AsyncGenerator[bytes,
         assert ffmpeg_proc.stdout is not None
         add_log(f"Pipe streaming started: {v_id}")
         while True:
-            data = await ffmpeg_proc.stdout.read(8192)
+            data = await ffmpeg_proc.stdout.read(32768)
             if not data:
                 break
             yield data
@@ -368,6 +367,16 @@ async def stream_audio_generator(v_id: str, t: int = 0) -> AsyncGenerator[bytes,
             await ffmpeg_proc.wait()
         if ydl_proc:
             await ydl_proc.wait()
+
+
+async def stream_audio_generator(v_id: str, t: int = 0) -> AsyncGenerator[bytes, None]:
+    add_log(f"Stream requested: {v_id}" + (f" (seek {t}s)" if t > 0 else ""))
+    if t > 0:
+        async for chunk in _stream_seek(v_id, t):
+            yield chunk
+    else:
+        async for chunk in _stream_normal(v_id):
+            yield chunk
 
 async def stream(request: Request) -> StreamingResponse | PlainTextResponse:
     i = request.query_params.get("i", "")

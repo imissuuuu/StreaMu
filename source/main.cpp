@@ -262,7 +262,7 @@ void download_thread(void *arg) {
       // Retry only if server is reachable (e.g. transient extract error)
       if (!success && !YouTubeAPI::should_cancel) {
         if (api->check_connection()) {
-          svcSleepThread(2000ULL * 1000 * 1000); // 2s wait
+          svcSleepThread(500ULL * 1000 * 1000); // 0.5s wait
           if (!YouTubeAPI::should_cancel) {
             success = api->start_streaming(stream_url);
           }

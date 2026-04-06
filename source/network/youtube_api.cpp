@@ -38,14 +38,14 @@ bool YouTubeAPI::start_streaming(const std::string& url) {
     if(curl) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-        curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamingWriteCallback);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L); 
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "3DS-YT");
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);   // TCP connect timeout
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 8L);    // TCP connect timeout
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);   // 1 byte/s threshold
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);   // No data for 60s → abort (seek needs extra time)
 
@@ -64,7 +64,6 @@ std::string YouTubeAPI::http_get(const std::string& url, long timeout_sec) {
     if(curl) {
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-        curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);

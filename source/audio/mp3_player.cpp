@@ -33,7 +33,7 @@ void MP3Player::update() {
 
     // If downloading and unread data < 30000 bytes, wait for buffering
     if (!is_playing) return;
-    if (m_is_downloading && (s_size > read_offset) && (s_size - read_offset < 30000)) return;
+    if (m_is_downloading && (s_size > read_offset) && (s_size - read_offset < 10000)) return;
 
     for (int i = 0; i < 8; i++) {
         if (waveBuf[i].status == NDSP_WBUF_DONE || waveBuf[i].status == NDSP_WBUF_FREE) {
@@ -123,4 +123,14 @@ MP3Player::~MP3Player() {
 
 void MP3Player::set_downloading_status(bool downloading) {
     m_is_downloading = downloading;
+}
+
+bool MP3Player::has_started_playing() const {
+    if (!is_playing) return false;
+    for (int i = 0; i < 8; i++) {
+        if (waveBuf[i].status == NDSP_WBUF_QUEUED ||
+            waveBuf[i].status == NDSP_WBUF_PLAYING)
+            return true;
+    }
+    return false;
 }
