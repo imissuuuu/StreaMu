@@ -29,8 +29,8 @@ public:
         out.mode = (ThemeMode)parse_int(json, "theme_mode", (int)THEME_LIGHT);
         out.accent_hue = parse_int(json, "accent_hue", 220);
         out.palette_index = parse_int(json, "palette_index", 0);
-        out.l_action = (LRAction)parse_int(json, "l_action", (int)LR_SKIP);
-        out.r_action = (LRAction)parse_int(json, "r_action", (int)LR_SKIP);
+        out.l_action = (LRAction)parse_int(json, "l_action", (int)LR_SKIP_BACK);
+        out.r_action = (LRAction)parse_int(json, "r_action", (int)LR_SKIP_FORWARD);
         out.dpad_speed = parse_int(json, "dpad_speed", 3);
         out.quick_access_ids = parse_string(json, "quick_access_ids", "");
         out.wallpaper_file = parse_string(json, "wallpaper_file", "");
@@ -42,8 +42,8 @@ public:
         // Validation
         if (out.accent_hue < 0 || out.accent_hue > 360) out.accent_hue = 220;
         if ((int)out.mode > 1) out.mode = THEME_LIGHT;
-        if ((int)out.l_action > 2) out.l_action = LR_SKIP;
-        if ((int)out.r_action > 2) out.r_action = LR_SKIP;
+        if ((int)out.l_action > 3) out.l_action = LR_SKIP_BACK;
+        if ((int)out.r_action > 3) out.r_action = LR_SKIP_FORWARD;
         if (out.dpad_speed < 1 || out.dpad_speed > 10) out.dpad_speed = 5;
         if (out.language != "ja") out.language = "en";
         if (out.accent_saturation < 0.0f || out.accent_saturation > 1.0f) out.accent_saturation = 0.75f;

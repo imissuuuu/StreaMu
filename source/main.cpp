@@ -776,24 +776,37 @@ int main(int argc, char *argv[]) {
     }
 
     // L/R button handling (customizable in settings)
-    // R button
-    if (kDown & KEY_R) {
-      if (ctx.config.r_action == LR_SKIP) {
+    // L/R button handling (customizable in settings)
+    auto handle_lr = [&](LRAction action) {
+      if (action == LR_SKIP_FORWARD) {
         LightLock_Lock(&ctx.lock);
         if (!ctx.play_queue.empty()) {
           ctx.current_track_idx++;
-          if (ctx.current_track_idx >= (int)ctx.play_queue.size()) {
+          if (ctx.current_track_idx >= (int)ctx.play_queue.size())
             ctx.current_track_idx = 0;
-          }
-          int next_idx = ctx.play_queue[ctx.current_track_idx];
-          Track next_track = ctx.playing_tracks[next_idx];
+          int idx = ctx.play_queue[ctx.current_track_idx];
+          Track t = ctx.playing_tracks[idx];
           LightLock_Unlock(&ctx.lock);
-          start_playback(next_track);
+          start_playback(t);
           svcSleepThread(500 * 1000 * 1000);
         } else {
           LightLock_Unlock(&ctx.lock);
         }
-      } else if (ctx.config.r_action == LR_PLAY_PAUSE) {
+      } else if (action == LR_SKIP_BACK) {
+        LightLock_Lock(&ctx.lock);
+        if (!ctx.play_queue.empty()) {
+          ctx.current_track_idx--;
+          if (ctx.current_track_idx < 0)
+            ctx.current_track_idx = (int)ctx.play_queue.size() - 1;
+          int idx = ctx.play_queue[ctx.current_track_idx];
+          Track t = ctx.playing_tracks[idx];
+          LightLock_Unlock(&ctx.lock);
+          start_playback(t);
+          svcSleepThread(500 * 1000 * 1000);
+        } else {
+          LightLock_Unlock(&ctx.lock);
+        }
+      } else if (action == LR_PLAY_PAUSE) {
         if (ctx.playing_id != "") {
           ctx.is_paused = !ctx.is_paused;
           ndspChnSetPaused(0, ctx.is_paused);
@@ -801,32 +814,9 @@ int main(int argc, char *argv[]) {
         }
       }
       // LR_DISABLED: do nothing
-    }
-    // L button
-    if (kDown & KEY_L) {
-      if (ctx.config.l_action == LR_SKIP) {
-        LightLock_Lock(&ctx.lock);
-        if (!ctx.play_queue.empty()) {
-          ctx.current_track_idx--;
-          if (ctx.current_track_idx < 0) {
-            ctx.current_track_idx = (int)ctx.play_queue.size() - 1;
-          }
-          int prev_idx = ctx.play_queue[ctx.current_track_idx];
-          Track prev_track = ctx.playing_tracks[prev_idx];
-          LightLock_Unlock(&ctx.lock);
-          start_playback(prev_track);
-          svcSleepThread(500 * 1000 * 1000);
-        } else {
-          LightLock_Unlock(&ctx.lock);
-        }
-      } else if (ctx.config.l_action == LR_PLAY_PAUSE) {
-        if (ctx.playing_id != "") {
-          ctx.is_paused = !ctx.is_paused;
-          ndspChnSetPaused(0, ctx.is_paused);
-          ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
-        }
-      }
-    }
+    };
+    if (kDown & KEY_R) handle_lr(ctx.config.r_action);
+    if (kDown & KEY_L) handle_lr(ctx.config.l_action);
 
     if (kDown & KEY_START) {
       LightLock_Lock(&ctx.lock);
