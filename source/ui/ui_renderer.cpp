@@ -294,6 +294,7 @@ void UIRenderer::draw_popup_overlay(const RenderContext& ctx) {
         popup_title = "Track Options";
         options.push_back("Show Details");
         if (ctx.previous_state == STATE_PLAYLIST_DETAIL || ctx.previous_state == STATE_PLAYING_UI) {
+            options.push_back("Rename");
             options.push_back("Remove from Playlist");
         }
         options.push_back("Add to Playlist");

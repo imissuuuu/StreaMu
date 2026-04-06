@@ -1265,7 +1265,7 @@ int main(int argc, char *argv[]) {
           else if (ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS)
             popup_item_count = 3;
           else if (ctx.current_state == STATE_POPUP_TRACK_OPTIONS)
-            popup_item_count = (ctx.previous_state == STATE_PLAYLIST_DETAIL || ctx.previous_state == STATE_PLAYING_UI) ? 3 : 2;
+            popup_item_count = (ctx.previous_state == STATE_PLAYLIST_DETAIL || ctx.previous_state == STATE_PLAYING_UI) ? 4 : 2;
           else if (ctx.current_state == STATE_POPUP_TRACK_DETAILS)
             popup_item_count = 5;
           else if (ctx.current_state == STATE_EXIT_CONFIRM)
@@ -1469,9 +1469,9 @@ int main(int argc, char *argv[]) {
         ctx.current_state = ctx.previous_state;
       }
     } else if (ctx.current_state == STATE_POPUP_TRACK_OPTIONS) {
-      // Search: [Details, Add] = 2 items / PL/Playing: [Details, Remove, Add] = 3 items
+      // Search: [Details, Add] = 2 items / PL/Playing: [Details, Rename, Remove, Add] = 4 items
       bool has_delete = (ctx.previous_state == STATE_PLAYLIST_DETAIL || ctx.previous_state == STATE_PLAYING_UI);
-      int item_count = has_delete ? 3 : 2;
+      int item_count = has_delete ? 4 : 2;
       if (kRepeat & KEY_DDOWN) {
         ctx.popup_selected_index++;
         if (ctx.popup_selected_index >= item_count)
@@ -1487,7 +1487,45 @@ int main(int argc, char *argv[]) {
         if (ctx.popup_selected_index == 0) { // Show details
           ctx.current_state = STATE_POPUP_TRACK_DETAILS;
           ctx.popup_selected_index = 4; // Cursor on "[ Close ]"
-        } else if (has_delete && ctx.popup_selected_index == 1) { // Remove
+        } else if (has_delete && ctx.popup_selected_index == 1) { // Rename
+          std::string current_title = "";
+          LightLock_Lock(&ctx.lock);
+          for (const auto& t : ctx.g_tracks) {
+            if (t.id == ctx.selected_track_id) { current_title = t.title; break; }
+          }
+          if (current_title.empty()) {
+            for (const auto& t : ctx.playing_tracks) {
+              if (t.id == ctx.selected_track_id) { current_title = t.title; break; }
+            }
+          }
+          LightLock_Unlock(&ctx.lock);
+          SwkbdState swkbd;
+          char mybuf[256] = "";
+          swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, -1);
+          swkbdSetFeatures(&swkbd, SWKBD_PREDICTIVE_INPUT);
+          swkbdSetHintText(&swkbd, "Track Name");
+          if (!current_title.empty())
+            swkbdSetInitialText(&swkbd, current_title.c_str());
+          if (swkbdInputText(&swkbd, mybuf, sizeof(mybuf)) == SWKBD_BUTTON_CONFIRM && strlen(mybuf) > 0) {
+            std::string new_title(mybuf);
+            std::string pl_id = (ctx.previous_state == STATE_PLAYING_UI)
+                ? ctx.active_playlist_id : ctx.selected_playlist_id;
+            playlist_manager.rename_track(pl_id, ctx.selected_track_id, new_title);
+            ctx.playlists = playlist_manager.get_playlists();
+            LightLock_Lock(&ctx.lock);
+            for (auto& t : ctx.g_tracks) {
+              if (t.id == ctx.selected_track_id) { t.title = new_title; break; }
+            }
+            for (auto& t : ctx.playing_tracks) {
+              if (t.id == ctx.selected_track_id) { t.title = new_title; break; }
+            }
+            bool need_title_update = (ctx.playing_id == ctx.selected_track_id);
+            if (need_title_update) ctx.playing_title = new_title;
+            LightLock_Unlock(&ctx.lock);
+            if (need_title_update) update_playing_title_lines(ui_mgr.get_text_buf());
+          }
+          ctx.current_state = ctx.previous_state;
+        } else if (has_delete && ctx.popup_selected_index == 2) { // Remove
           if (ctx.previous_state == STATE_PLAYING_UI) {
             // Remove from PlayingScreen: use active_playlist_id
             playlist_manager.remove_track(ctx.active_playlist_id,
@@ -1554,7 +1592,7 @@ int main(int argc, char *argv[]) {
               ctx.selected_index = 0;
           }
           ctx.current_state = ctx.previous_state;
-        } else { // Add to playlist (Search:idx1, PL/Playing:idx2)
+        } else { // Add to playlist (Search:idx1, PL/Playing:idx3)
           ctx.current_state = STATE_POPUP_PLAYLIST_ADD;
           ctx.popup_selected_index = 0;
         }

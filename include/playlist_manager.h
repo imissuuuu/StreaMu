@@ -32,6 +32,7 @@ public:
     // Track operations
     bool add_track(const std::string& playlist_id, const Track& track);
     bool remove_track(const std::string& playlist_id, const std::string& track_id);
+    bool rename_track(const std::string& playlist_id, const std::string& track_id, const std::string& new_title);
 
     // Utility
     bool is_track_in_playlist(const std::string& playlist_id, const std::string& track_id) const;
