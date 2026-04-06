@@ -11,7 +11,7 @@ extern LightLock stream_lock;
 bool MP3Player::is_playing = false;
 static size_t read_offset = 0;
 
-MP3Player::MP3Player() : audioBuffer(NULL) {}
+MP3Player::MP3Player() : audioBuffer(NULL) { mp3dec_init(&mp3d); }
 
 void MP3Player::init() {
     mp3dec_init(&this->mp3d);
