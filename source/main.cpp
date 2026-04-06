@@ -1762,7 +1762,7 @@ int main(int argc, char *argv[]) {
       char mybuf[256] = "";
       swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 2, -1);
       swkbdSetFeatures(&swkbd, SWKBD_PREDICTIVE_INPUT);
-      swkbdSetHintText(&swkbd, "Search YouTube");
+      swkbdSetHintText(&swkbd, "Search music...");
       SwkbdButton button = swkbdInputText(&swkbd, mybuf, sizeof(mybuf));
 
       if (button == SWKBD_BUTTON_CONFIRM && strlen(mybuf) > 0) {
