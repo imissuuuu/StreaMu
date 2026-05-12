@@ -2,10 +2,29 @@
 import os
 import sys
 import io
+import ssl
 import platform
 import zipfile
 import urllib.request
 from pathlib import Path
+
+try:
+    import certifi
+    _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    _SSL_CTX = ssl.create_default_context()
+
+
+def _urlopen(url: str, timeout: int = 120):
+    req = urllib.request.Request(url)
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX)
+    except ssl.SSLError:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        print("[WARNING] SSL verification failed, retrying without verification...")
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
 
 IS_WINDOWS: bool = platform.system() == "Windows"
 
@@ -45,8 +64,7 @@ def ensure_ffmpeg() -> str:
 
 def _download_ffmpeg(dest_dir: Path) -> None:
     try:
-        req = urllib.request.Request(FFMPEG_URL)
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with _urlopen(FFMPEG_URL) as resp:
             total = int(resp.headers.get('Content-Length', 0))
             downloaded = 0
             chunks: list[bytes] = []
@@ -85,8 +103,7 @@ def ensure_ytdlp() -> str:
 
     print("[INFO] yt-dlp.exe not found. Downloading...")
     try:
-        req = urllib.request.Request(YTDLP_URL)
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with _urlopen(YTDLP_URL) as resp:
             total = int(resp.headers.get('Content-Length', 0))
             downloaded = 0
             chunks: list[bytes] = []
