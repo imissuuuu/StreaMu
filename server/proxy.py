@@ -4,15 +4,17 @@ import collections
 import re
 import os
 import sys
-import platform
 import time
 import urllib.request
 from pathlib import Path
 from datetime import datetime
 from typing import AsyncGenerator
 
-BASE_DIR: Path = Path(__file__).parent.resolve()
-FFMPEG_PATH: str = str(BASE_DIR / ("ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"))
+from ffmpeg_bootstrap import get_app_dir, get_ffmpeg_path, ensure_ffmpeg, ensure_ytdlp
+
+BASE_DIR: Path = get_app_dir()
+FFMPEG_PATH: str = get_ffmpeg_path()
+YTDLP_EXE: str = ""
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -191,6 +193,35 @@ def _extract_seek_info(v_id: str) -> tuple[str, list[dict], dict[str, str]]:
         add_log(f"Seek info extraction failed: {e}")
     return "", [], {}
 
+def _yt_dlp_download_to_fd(url: str, w_fd: int, fmt: str = "bestaudio/best",
+                           resolved_url: str = "",
+                           resolved_headers: dict[str, str] | None = None) -> None:
+    """Download audio via yt-dlp Python API and write raw bytes to fd.
+    If resolved_url is provided, skip extract_info and use it directly."""
+    try:
+        with os.fdopen(w_fd, "wb") as pipe_out:
+            if not resolved_url:
+                ydl_opts = {
+                    "format": fmt,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "socket_timeout": 10,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                resolved_url = info.get("url", "")
+                resolved_headers = info.get("http_headers", {})
+            req = urllib.request.Request(resolved_url, headers=resolved_headers or {})
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    pipe_out.write(chunk)
+    except (BrokenPipeError, OSError):
+        pass
+
+
 async def _stream_seek(v_id: str, t: int) -> AsyncGenerator[bytes, None]:
     """Seek stream: extract seek info then pipe DASH or progressive content through ffmpeg."""
     url = f"https://www.youtube.com/watch?v={v_id}"
@@ -200,13 +231,9 @@ async def _stream_seek(v_id: str, t: int) -> AsyncGenerator[bytes, None]:
 
     r_fd, w_fd = os.pipe()
     ffmpeg_proc: asyncio.subprocess.Process | None = None
-    ydl_proc_prog: asyncio.subprocess.Process | None = None
+    ydl_proc_seek: asyncio.subprocess.Process | None = None
 
     if fragments:
-        # DASH fMP4: manually fetch init (sq=0) + media segments from t.
-        # YouTube CDN serves only ~37s per plain GET, so HTTP Range seek is
-        # impossible. Instead we reconstruct the fMP4 stream from the right
-        # segment and pipe it directly into ffmpeg.
         cumulative = 0.0
         start_idx = 0
         for i, frag in enumerate(fragments):
@@ -229,27 +256,30 @@ async def _stream_seek(v_id: str, t: int) -> AsyncGenerator[bytes, None]:
         async def _feed_dash() -> None:
             try:
                 with os.fdopen(w_fd, "wb") as pipe_out:
-                    # init segment (ftyp + moov — codec metadata)
                     pipe_out.write(await asyncio.to_thread(_fetch, init_url))
-                    # media segments from seek position
                     for frag in fragments[start_idx:]:
                         pipe_out.write(await asyncio.to_thread(_fetch, frag["url"]))
             except (BrokenPipeError, OSError):
-                pass  # 3DS disconnected; pipe broken
+                pass
 
         asyncio.create_task(_feed_dash())
     else:
-        # Progressive: yt-dlp → pipe → ffmpeg output-seek (-ss after -i)
-        ydl_cmd = [
-            sys.executable, "-m", "yt_dlp",
-            "-f", "bestaudio[ext=m4a]/bestaudio/best",
-            "--quiet", "--no-warnings", "-o", "-", url
-        ]
-        ydl_proc_prog = await asyncio.create_subprocess_exec(
-            *ydl_cmd, stdout=w_fd, stderr=subprocess.DEVNULL
-        )
-        os.close(w_fd)
-        w_fd = -1
+        if getattr(sys, 'frozen', False) and not YTDLP_EXE:
+            asyncio.get_event_loop().run_in_executor(
+                None, _yt_dlp_download_to_fd, url, w_fd,
+                "bestaudio[ext=m4a]/bestaudio/best", direct_url, http_headers
+            )
+        else:
+            ydl_bin = YTDLP_EXE if getattr(sys, 'frozen', False) else ""
+            ydl_cmd = ([ydl_bin] if ydl_bin else [sys.executable, "-m", "yt_dlp"]) + [
+                "-f", "bestaudio[ext=m4a]/bestaudio/best",
+                "--quiet", "--no-warnings", "-o", "-", url
+            ]
+            ydl_proc_seek = await asyncio.create_subprocess_exec(
+                *ydl_cmd, stdout=w_fd, stderr=subprocess.DEVNULL
+            )
+            os.close(w_fd)
+            w_fd = -1
 
     ffmpeg_cmd = [
         FFMPEG_PATH,
@@ -258,7 +288,8 @@ async def _stream_seek(v_id: str, t: int) -> AsyncGenerator[bytes, None]:
         "-f", "mp3", "-ar", "44100", "-ac", "2", "-b:a", "96k",
         "pipe:1"
     ]
-    label = "DASH-frags" if fragments else "progressive-pipe"
+    label = "DASH-frags" if fragments else "progressive"
+    ydl_proc_seek_ref = ydl_proc_seek
 
     try:
         ffmpeg_proc = await asyncio.create_subprocess_exec(
@@ -294,22 +325,15 @@ async def _stream_seek(v_id: str, t: int) -> AsyncGenerator[bytes, None]:
             try: ffmpeg_proc.kill()
             except OSError: pass
             await ffmpeg_proc.wait()
-        if ydl_proc_prog:
-            try: ydl_proc_prog.kill()
+        if ydl_proc_seek_ref:
+            try: ydl_proc_seek_ref.kill()
             except OSError: pass
-            await ydl_proc_prog.wait()
+            await ydl_proc_seek_ref.wait()
 
 
 async def _stream_normal(v_id: str) -> AsyncGenerator[bytes, None]:
     """Normal streaming: yt-dlp → pipe → ffmpeg."""
     url = f"https://www.youtube.com/watch?v={v_id}"
-    ydl_cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "-f", "bestaudio/best",
-        "--quiet", "--no-warnings",
-        "-o", "-",
-        url
-    ]
     ffmpeg_cmd = [
         FFMPEG_PATH,
         "-i", "pipe:0",
@@ -321,13 +345,25 @@ async def _stream_normal(v_id: str) -> AsyncGenerator[bytes, None]:
     ydl_proc = None
     ffmpeg_proc = None
     try:
-        ydl_proc = await asyncio.create_subprocess_exec(
-            *ydl_cmd,
-            stdout=w_fd,
-            stderr=subprocess.DEVNULL
-        )
-        os.close(w_fd)
-        w_fd = -1
+        if getattr(sys, 'frozen', False) and not YTDLP_EXE:
+            asyncio.get_event_loop().run_in_executor(
+                None, _yt_dlp_download_to_fd, url, w_fd, "bestaudio/best"
+            )
+        else:
+            ydl_bin = YTDLP_EXE if getattr(sys, 'frozen', False) else ""
+            ydl_cmd = ([ydl_bin] if ydl_bin else [sys.executable, "-m", "yt_dlp"]) + [
+                "-f", "bestaudio/best",
+                "--quiet", "--no-warnings",
+                "-o", "-",
+                url
+            ]
+            ydl_proc = await asyncio.create_subprocess_exec(
+                *ydl_cmd,
+                stdout=w_fd,
+                stderr=subprocess.DEVNULL
+            )
+            os.close(w_fd)
+            w_fd = -1
 
         ffmpeg_proc = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
@@ -359,10 +395,8 @@ async def _stream_normal(v_id: str) -> AsyncGenerator[bytes, None]:
             try: os.close(r_fd)
             except OSError: pass
         for proc in filter(None, [ffmpeg_proc, ydl_proc]):
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            try: proc.kill()
+            except OSError: pass
         if ffmpeg_proc:
             await ffmpeg_proc.wait()
         if ydl_proc:
@@ -525,7 +559,15 @@ routes = [
 app = Starlette(debug=False, routes=routes)
 
 if __name__ == "__main__":
-    ip = get_local_ip()
-    add_log(f"Starlette Server started on http://{ip}:{PORT}")
-    add_log(f"You can now open http://127.0.0.1:{PORT} in your browser to view the dashboard.")
-    uvicorn.run("proxy:app", host="0.0.0.0", port=PORT, log_level="warning")
+    try:
+        print("=== StreaMu Server ===")
+        FFMPEG_PATH = ensure_ffmpeg()
+        if getattr(sys, 'frozen', False):
+            YTDLP_EXE = ensure_ytdlp()
+        ip = get_local_ip()
+        add_log(f"Starlette Server started on http://{ip}:{PORT}")
+        add_log(f"You can now open http://127.0.0.1:{PORT} in your browser to view the dashboard.")
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")
+    except Exception as e:
+        print(f"\n[ERROR] {e}")
+        input("Press Enter to exit...")

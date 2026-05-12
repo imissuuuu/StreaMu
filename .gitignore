@@ -10,9 +10,15 @@ banner.bnr
 
 # Proxy server
 venv/
+venv_build/
 __pycache__/
 ffmpeg
 ffmpeg.exe
+
+# PyInstaller
+server/build/
+server/dist/
+server/*.spec
 
 # User config (contains server IP)
 config.json
