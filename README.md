@@ -26,9 +26,9 @@ A lightweight proxy server runs on your PC and handles YouTube data fetching and
 
 ### Quick Start
 
-1. Download `streamu.cia` (or `.3dsx`) and `StreaMu-Server.exe` from [Releases](../../releases)
+1. Download `streamu.cia` (or `.3dsx`) and `StreaMu-Server.zip` from [Releases](../../releases)
 2. Install the CIA on your 3DS with FBI
-3. Run `StreaMu-Server.exe` on your PC — it auto-downloads FFmpeg and yt-dlp on first launch
+3. Extract `StreaMu-Server.zip` and run the EXE inside — it auto-downloads FFmpeg and yt-dlp on first launch
 4. Launch StreaMu on your 3DS and enter the IP address shown on the server dashboard
 5. Search for music with the Y button and enjoy!
 
@@ -43,9 +43,9 @@ Download `streamu.cia` or `streamu.3dsx` from [Releases](../../releases).
 
 #### Option A: Standalone EXE (Recommended)
 
-Download `StreaMu-Server.exe` from [Releases](../../releases) and run it. That's it.
+Download `StreaMu-Server.zip` from [Releases](../../releases), extract it, and run `StreaMu-Server.exe`.
 
-On first launch, the server automatically downloads `ffmpeg.exe` and `yt-dlp.exe` to the same directory. No Python or manual setup needed.
+On first launch, the server automatically downloads `ffmpeg.exe` and `yt-dlp.exe` into the same folder. No Python or manual setup needed.
 
 #### Option B: Python Script
 
@@ -128,6 +128,8 @@ Settings are saved to `sdmc:/3ds/StreaMu/config.json`.
 | B | Back / Close popup |
 | D-Pad | Navigate lists and menus |
 | L/R | Switch tabs (configurable) |
+| Select | Open track options menu |
+| Start | Exit app |
 | Touch | Tap items, scroll lists, tap buttons |
 
 ### Troubleshooting
@@ -157,7 +159,7 @@ make cia                # produces streamu.cia
 To build the server EXE:
 ```bash
 cd server
-build_exe.bat           # produces dist/StreaMu-Server.exe
+build_exe.bat           # produces dist/StreaMu-Server.zip
 ```
 
 ### License
@@ -188,9 +190,9 @@ PC上で動作するプロキシサーバーがYouTubeからのデータ取得�
 
 ### クイックスタート
 
-1. [Releases](../../releases) から `streamu.cia`（または `.3dsx`）と `StreaMu-Server.exe` をダウンロード
+1. [Releases](../../releases) から `streamu.cia`（または `.3dsx`）と `StreaMu-Server.zip` をダウンロード
 2. 3DSにCIAをFBIでインストール
-3. PCで `StreaMu-Server.exe` を実行 — 初回起動時にFFmpegとyt-dlpを自動ダウンロード
+3. `StreaMu-Server.zip` を解凍してEXEを実行 — 初回起動時にFFmpegとyt-dlpを自動ダウンロード
 4. 3DSでStreaMuを起動し、サーバーダッシュボードに表示されるIPアドレスを入力
 5. Yボタンで音楽を検索して再生！
 
@@ -205,7 +207,7 @@ PC上で動作するプロキシサーバーがYouTubeからのデータ取得�
 
 #### 方法A: スタンドアロンEXE（推奨）
 
-[Releases](../../releases) から `StreaMu-Server.exe` をダウンロードして実行するだけです。
+[Releases](../../releases) から `StreaMu-Server.zip` をダウンロードして解凍し、`StreaMu-Server.exe` を実行するだけです。
 
 初回起動時に `ffmpeg.exe` と `yt-dlp.exe` を同じディレクトリに自動ダウンロードします。Pythonやセットアップは不要です。
 
@@ -290,6 +292,8 @@ venv/bin/python proxy.py
 | B | 戻る / ポップアップを閉じる |
 | 十字キー | リスト・メニューの移動 |
 | L/R | タブ切替（設定で変更可） |
+| Select | トラックオプションメニューを開く |
+| Start | アプリ終了 |
 | タッチ | 項目タップ、リストスクロール、ボタン操作 |
 
 ### トラブルシューティング
@@ -319,7 +323,7 @@ make cia                # streamu.cia を生成
 サーバーEXEのビルド:
 ```bash
 cd server
-build_exe.bat           # dist/StreaMu-Server.exe を生成
+build_exe.bat           # dist/StreaMu-Server.zip を生成
 ```
 
 ### ライセンス

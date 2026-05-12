@@ -36,6 +36,13 @@ pyinstaller --onefile --name StreaMu-Server ^
 echo.
 if exist dist\StreaMu-Server.exe (
     echo [OK] Built: dist\StreaMu-Server.exe
+    echo Packaging into zip...
+    powershell -Command "Compress-Archive -Path 'dist\StreaMu-Server.exe' -DestinationPath 'dist\StreaMu-Server.zip' -Force"
+    if exist dist\StreaMu-Server.zip (
+        echo [OK] Packaged: dist\StreaMu-Server.zip
+    ) else (
+        echo [WARNING] Zip packaging failed.
+    )
 ) else (
     echo [ERROR] Build failed.
 )
