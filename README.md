@@ -128,6 +128,8 @@ Settings are saved to `sdmc:/3ds/StreaMu/config.json`.
 | B | Back / Close popup |
 | D-Pad | Navigate lists and menus |
 | L/R | Switch tabs (configurable) |
+| Select | Open track options menu |
+| Start | Exit app |
 | Touch | Tap items, scroll lists, tap buttons |
 
 ### Troubleshooting
@@ -290,6 +292,8 @@ venv/bin/python proxy.py
 | B | 戻る / ポップアップを閉じる |
 | 十字キー | リスト・メニューの移動 |
 | L/R | タブ切替（設定で変更可） |
+| Select | トラックオプションメニューを開く |
+| Start | アプリ終了 |
 | タッチ | 項目タップ、リストスクロール、ボタン操作 |
 
 ### トラブルシューティング
