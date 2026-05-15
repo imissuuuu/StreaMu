@@ -7,7 +7,12 @@
 enum ThemeMode { THEME_LIGHT = 0, THEME_DARK = 1 };
 
 // === L/R Button Behavior ===
-enum LRAction { LR_DISABLED = 0, LR_SKIP_BACK = 1, LR_SKIP_FORWARD = 2, LR_PLAY_PAUSE = 3 };
+enum LRAction {
+  LR_DISABLED = 0,
+  LR_SKIP_BACK = 1,
+  LR_SKIP_FORWARD = 2,
+  LR_PLAY_PAUSE = 3
+};
 
 // === Hamburger Menu Button Position ===
 enum MenuButtonSide { MENU_BTN_LEFT = 0, MENU_BTN_RIGHT = 1 };
@@ -19,10 +24,11 @@ struct AppConfig {
   int palette_index = 0; // Palette index (-1 = custom hue)
   LRAction l_action = LR_SKIP_BACK;
   LRAction r_action = LR_SKIP_FORWARD;
-  MenuButtonSide menu_btn_side = MENU_BTN_LEFT; // For future settings (not yet implemented)
+  MenuButtonSide menu_btn_side =
+      MENU_BTN_LEFT;  // For future settings (not yet implemented)
   int dpad_speed = 5; // 1-10 (1=slowest, 5=normal, 10=fastest)
   std::string quick_access_ids = ""; // Comma-separated PL IDs (max 4)
-  std::string wallpaper_file = "";  // Wallpaper filename (in wallpaper/ folder)
+  std::string wallpaper_file = ""; // Wallpaper filename (in wallpaper/ folder)
   std::string server_ip = "";      // Server IP:Port (e.g. "192.168.1.100:8080")
   std::string language = "en";     // Metadata language ("en" or "ja")
   float accent_saturation = 0.75f; // 0.0-1.0 (custom mode saturation)
@@ -162,7 +168,8 @@ inline float palette_get_gray_v(int col) {
 // Get RGB color from palette index
 inline u32 palette_get_color(int row, int col) {
   int hue = palette_get_hue(row, col);
-  PaletteSV sv = PALETTE_ROW_SV[(row >= 0 && row < COLOR_PALETTE_ROWS) ? row : 0];
+  PaletteSV sv =
+      PALETTE_ROW_SV[(row >= 0 && row < COLOR_PALETTE_ROWS) ? row : 0];
   float s = sv.s;
   float v = sv.v;
   if (row == 4) {
@@ -194,10 +201,11 @@ inline void apply_theme(const AppConfig &cfg, ThemeColors &colors) {
 
   // Accent color (theme color)
   colors.accent = hsv_to_color32(hue, s, v);
-  
+
   // Text color defaults to black (UI text etc.)
   colors.accent_text = C2D_Color32(30, 30, 30, 255);
-  // Use white text for the two darkest palette colors (Row 4, Col 0/1) for readability
+  // Use white text for the two darkest palette colors (Row 4, Col 0/1) for
+  // readability
   if (cfg.palette_index >= 0) {
     int row = cfg.palette_index / COLOR_PALETTE_COLS;
     int col = cfg.palette_index % COLOR_PALETTE_COLS;
@@ -208,19 +216,24 @@ inline void apply_theme(const AppConfig &cfg, ThemeColors &colors) {
 
   float play_s = s * 0.9f;
   float play_v = v * 0.7f;
-  if(play_s > 1.0f) play_s = 1.0f;
-  if(play_v > 1.0f) play_v = 1.0f;
+  if (play_s > 1.0f)
+    play_s = 1.0f;
+  if (play_v > 1.0f)
+    play_v = 1.0f;
   colors.playing_bg = hsv_to_color32(hue, play_s, play_v);
-  
+
   float ptxt_s = s * 0.4f;
   float ptxt_v = v * 1.1f;
-  if(ptxt_v > 1.0f) ptxt_v = 1.0f;
-  if(ptxt_s > 1.0f) ptxt_s = 1.0f;
+  if (ptxt_v > 1.0f)
+    ptxt_v = 1.0f;
+  if (ptxt_s > 1.0f)
+    ptxt_s = 1.0f;
   colors.playing_text = hsv_to_color32(hue, ptxt_s, ptxt_v);
-  
+
   float cursor_s = s * 1.1f;
   float cursor_v = v * 0.6f;
-  if (cursor_s > 1.0f) cursor_s = 1.0f;
+  if (cursor_s > 1.0f)
+    cursor_s = 1.0f;
   colors.cursor_outline = hsv_to_color32(hue, cursor_s, cursor_v);
 
   colors.warn = C2D_Color32(255, 80, 80, 255);
