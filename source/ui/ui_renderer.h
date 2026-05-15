@@ -1,14 +1,13 @@
 #pragma once
 #include "playlist_manager.h"
 #include "theme.h"
+#include "touch_state.h"
 #include "ui_manager.h"
 #include "wallpaper.h"
-#include "touch_state.h"
 #include <3ds.h>
 #include <citro2d.h>
 #include <string>
 #include <vector>
-
 
 // Current app state (screen or popup)
 enum AppState {
@@ -21,11 +20,11 @@ enum AppState {
   STATE_POPUP_PLAYLIST_OPTIONS, // Playlist operations (rename/delete)
   STATE_POPUP_TRACK_OPTIONS,    // Track operations within playlist
   STATE_POPUP_TRACK_DETAILS,
-  STATE_EXIT_CONFIRM, // Exit confirmation on START press
-  STATE_SETTINGS,     // Settings screen
-  STATE_POPUP_NAV,    // Hamburger menu popup
-  STATE_PLAYING_UI,   // Playing screen
-  STATE_POPUP_QA_ADD, // Quick Access add popup
+  STATE_EXIT_CONFIRM,   // Exit confirmation on START press
+  STATE_SETTINGS,       // Settings screen
+  STATE_POPUP_NAV,      // Hamburger menu popup
+  STATE_PLAYING_UI,     // Playing screen
+  STATE_POPUP_QA_ADD,   // Quick Access add popup
   STATE_POPUP_QA_REMOVE // Quick Access remove confirmation popup
 };
 
@@ -47,8 +46,10 @@ struct RenderContext {
   int home_selected_index;
 
   std::vector<Track> g_tracks;
-  std::vector<Track> search_tracks;  // SearchScreen-exclusive; never touched by PlaylistDetailScreen
-  std::vector<Track> playing_tracks; // Copy of g_tracks at playback start; independent of browsing
+  std::vector<Track> search_tracks;  // SearchScreen-exclusive; never touched by
+                                     // PlaylistDetailScreen
+  std::vector<Track> playing_tracks; // Copy of g_tracks at playback start;
+                                     // independent of browsing
   int selected_index;
   int scroll_x;
 
@@ -57,9 +58,8 @@ struct RenderContext {
   int popup_selected_index; // Popup menu cursor
 
   // Currently selected target details
-  std::string
-      selected_playlist_id; // Target ID for PLAYLIST_DETAIL and popups
-  std::string selected_track_id; // Target track ID for TRACK_OPTIONS etc.
+  std::string selected_playlist_id; // Target ID for PLAYLIST_DETAIL and popups
+  std::string selected_track_id;    // Target track ID for TRACK_OPTIONS etc.
 
   std::string playing_id;
   std::string playing_duration; // Current track duration ("3:45")
@@ -73,19 +73,23 @@ struct RenderContext {
   std::vector<int> play_queue;      // Shuffled playback index sequence
   bool shuffle_mode = false;        // Shuffle playback mode
   LoopMode loop_mode = LOOP_OFF;    // Loop mode
-  int mode_btn_focus = 1;           // PlaylistDetail button row focus (0=SHUFFLE, 1=ORDER)
-  u64 playback_start_time = 0;      // osGetTime() when current track started (for seek bar)
-  u64 pause_accumulated_ms = 0;    // Total ms spent frozen (paused or buffering) in current track
-  u64 pause_started_at = 0;        // osGetTime() when current freeze started (0 = not frozen)
-  bool is_buffering = false;       // True while audio stream is loading
-  TouchState touch_state;          // Live touch state snapshot for seek bar drag preview
+  int mode_btn_focus =
+      1; // PlaylistDetail button row focus (0=SHUFFLE, 1=ORDER)
+  u64 playback_start_time =
+      0; // osGetTime() when current track started (for seek bar)
+  u64 pause_accumulated_ms =
+      0; // Total ms spent frozen (paused or buffering) in current track
+  u64 pause_started_at =
+      0; // osGetTime() when current freeze started (0 = not frozen)
+  bool is_buffering = false; // True while audio stream is loading
+  TouchState touch_state; // Live touch state snapshot for seek bar drag preview
 
   // Drag scroll
   float scroll_offset_y = 0.0f;
 
   // Theme config
   AppConfig config;
-  const ThemeColors* theme = nullptr;
+  const ThemeColors *theme = nullptr;
 };
 
 class UIRenderer {
@@ -95,12 +99,12 @@ public:
 
   void draw_top_screen(const RenderContext &ctx);
   void draw_popup_overlay(const RenderContext &ctx);
-  void set_wallpaper(Wallpaper* wp) { m_wallpaper = wp; }
-  void set_thumbnail(Wallpaper* th) { m_thumbnail = th; }
+  void set_wallpaper(Wallpaper *wp) { m_wallpaper = wp; }
+  void set_thumbnail(Wallpaper *th) { m_thumbnail = th; }
 
 private:
   UIManager &m_ui;
   const ThemeColors &m_colors;
-  Wallpaper* m_wallpaper = nullptr;
-  Wallpaper* m_thumbnail = nullptr;
+  Wallpaper *m_wallpaper = nullptr;
+  Wallpaper *m_thumbnail = nullptr;
 };

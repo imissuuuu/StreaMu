@@ -10,156 +10,170 @@
 
 // Round up to next power of 2
 static unsigned int next_pow2(unsigned int v) {
-    v--;
-    v |= v >> 1; v |= v >> 2; v |= v >> 4;
-    v |= v >> 8; v |= v >> 16;
-    return v + 1;
+  v--;
+  v |= v >> 1;
+  v |= v >> 2;
+  v |= v >> 4;
+  v |= v >> 8;
+  v |= v >> 16;
+  return v + 1;
 }
 
 // Morton (Z-order) index within 8x8 tile
 static u32 morton_interleave(u32 x, u32 y) {
-    static const u32 xlut[] = {0x00,0x01,0x04,0x05,0x10,0x11,0x14,0x15};
-    static const u32 ylut[] = {0x00,0x02,0x08,0x0a,0x20,0x22,0x28,0x2a};
-    return xlut[x & 7] | ylut[y & 7];
+  static const u32 xlut[] = {0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15};
+  static const u32 ylut[] = {0x00, 0x02, 0x08, 0x0a, 0x20, 0x22, 0x28, 0x2a};
+  return xlut[x & 7] | ylut[y & 7];
 }
 
 // Convert RGBA8 pixel array to 3DS GPU tile format
 // Output: ABGR8888, 8x8 Morton-order tiles, Y-flipped
-static void rgba8_to_tiled(u8* out, const u8* rgba, int w, int h, int tex_w, int tex_h) {
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            // No Y-flip needed (subtex top > bottom handles it at display time)
-            int flip_y = y;
+static void rgba8_to_tiled(u8 *out, const u8 *rgba, int w, int h, int tex_w,
+                           int tex_h) {
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      // No Y-flip needed (subtex top > bottom handles it at display time)
+      int flip_y = y;
 
-            // Tile coordinates
-            int tile_x = x / 8;
-            int tile_y = flip_y / 8;
-            int fine_x = x & 7;
-            int fine_y = flip_y & 7;
+      // Tile coordinates
+      int tile_x = x / 8;
+      int tile_y = flip_y / 8;
+      int fine_x = x & 7;
+      int fine_y = flip_y & 7;
 
-            // Output offset (4 bytes per pixel)
-            int tile_offset = (tile_y * (tex_w / 8) + tile_x) * (8 * 8 * 4);
-            int pixel_offset = morton_interleave(fine_x, fine_y) * 4;
-            int dst = tile_offset + pixel_offset;
+      // Output offset (4 bytes per pixel)
+      int tile_offset = (tile_y * (tex_w / 8) + tile_x) * (8 * 8 * 4);
+      int pixel_offset = morton_interleave(fine_x, fine_y) * 4;
+      int dst = tile_offset + pixel_offset;
 
-            // Source pixel (RGBA)
-            int src = (y * w + x) * 4;
+      // Source pixel (RGBA)
+      int src = (y * w + x) * 4;
 
-            // GPU format: ABGR8888
-            out[dst + 0] = rgba[src + 3]; // A
-            out[dst + 1] = rgba[src + 2]; // B
-            out[dst + 2] = rgba[src + 1]; // G
-            out[dst + 3] = rgba[src + 0]; // R
-        }
+      // GPU format: ABGR8888
+      out[dst + 0] = rgba[src + 3]; // A
+      out[dst + 1] = rgba[src + 2]; // B
+      out[dst + 2] = rgba[src + 1]; // G
+      out[dst + 3] = rgba[src + 0]; // R
     }
+  }
 }
 
 // Shared: build GPU texture from decoded RGBA8 pixels.
-// Returns true on success; on failure, caller must free rgba via stbi_image_free.
-bool Wallpaper::load_from_pixels(u8* rgba, int w, int h) {
-    m_orig_w = w;
-    m_orig_h = h;
+// Returns true on success; on failure, caller must free rgba via
+// stbi_image_free.
+bool Wallpaper::load_from_pixels(u8 *rgba, int w, int h) {
+  m_orig_w = w;
+  m_orig_h = h;
 
-    int tex_w = (int)next_pow2((unsigned)w);
-    int tex_h = (int)next_pow2((unsigned)h);
+  int tex_w = (int)next_pow2((unsigned)w);
+  int tex_h = (int)next_pow2((unsigned)h);
 
-    if (!C3D_TexInit(&m_tex, tex_w, tex_h, GPU_RGBA8)) return false;
+  if (!C3D_TexInit(&m_tex, tex_w, tex_h, GPU_RGBA8))
+    return false;
 
-    size_t tiled_size = tex_w * tex_h * 4;
-    u8* tiled = static_cast<u8*>(calloc(1, tiled_size));
-    if (!tiled) {
-        C3D_TexDelete(&m_tex);
-        return false;
-    }
+  size_t tiled_size = tex_w * tex_h * 4;
+  u8 *tiled = static_cast<u8 *>(calloc(1, tiled_size));
+  if (!tiled) {
+    C3D_TexDelete(&m_tex);
+    return false;
+  }
 
-    rgba8_to_tiled(tiled, rgba, w, h, tex_w, tex_h);
-    C3D_TexUpload(&m_tex, tiled);
-    C3D_TexSetFilter(&m_tex, GPU_LINEAR, GPU_LINEAR);
-    free(tiled);
+  rgba8_to_tiled(tiled, rgba, w, h, tex_w, tex_h);
+  C3D_TexUpload(&m_tex, tiled);
+  C3D_TexSetFilter(&m_tex, GPU_LINEAR, GPU_LINEAR);
+  free(tiled);
 
-    m_subtex.width  = (u16)w;
-    m_subtex.height = (u16)h;
-    m_subtex.left   = 0.0f;
-    m_subtex.top    = 1.0f;
-    m_subtex.right  = (float)w / (float)tex_w;
-    m_subtex.bottom = 1.0f - (float)h / (float)tex_h;
+  m_subtex.width = (u16)w;
+  m_subtex.height = (u16)h;
+  m_subtex.left = 0.0f;
+  m_subtex.top = 1.0f;
+  m_subtex.right = (float)w / (float)tex_w;
+  m_subtex.bottom = 1.0f - (float)h / (float)tex_h;
 
-    m_img.tex    = &m_tex;
-    m_img.subtex = &m_subtex;
+  m_img.tex = &m_tex;
+  m_img.subtex = &m_subtex;
 
-    m_loaded = true;
-    return true;
+  m_loaded = true;
+  return true;
 }
 
-Wallpaper::~Wallpaper() {
-    unload();
-}
+Wallpaper::~Wallpaper() { unload(); }
 
-bool Wallpaper::load(const std::string& path) {
-    unload();
+bool Wallpaper::load(const std::string &path) {
+  unload();
 
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) return false;
+  FILE *f = fopen(path.c_str(), "rb");
+  if (!f)
+    return false;
 
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
+  fseek(f, 0, SEEK_END);
+  long fsize = ftell(f);
+  fseek(f, 0, SEEK_SET);
 
-    if (fsize <= 0 || fsize > 4 * 1024 * 1024) {
-        fclose(f);
-        return false;
-    }
-
-    u8* file_data = static_cast<u8*>(malloc(fsize));
-    if (!file_data) { fclose(f); return false; }
-    size_t read_bytes = fread(file_data, 1, fsize, f);
+  if (fsize <= 0 || fsize > 4 * 1024 * 1024) {
     fclose(f);
-    if (static_cast<long>(read_bytes) != fsize) { free(file_data); return false; }
+    return false;
+  }
 
-    bool ok = load_from_memory(file_data, (size_t)fsize);
+  u8 *file_data = static_cast<u8 *>(malloc(fsize));
+  if (!file_data) {
+    fclose(f);
+    return false;
+  }
+  size_t read_bytes = fread(file_data, 1, fsize, f);
+  fclose(f);
+  if (static_cast<long>(read_bytes) != fsize) {
     free(file_data);
-    return ok;
+    return false;
+  }
+
+  bool ok = load_from_memory(file_data, (size_t)fsize);
+  free(file_data);
+  return ok;
 }
 
-bool Wallpaper::load_from_memory(const uint8_t* data, size_t size) {
-    unload();
+bool Wallpaper::load_from_memory(const uint8_t *data, size_t size) {
+  unload();
 
-    int w = 0, h = 0, channels = 0;
-    u8* rgba = stbi_load_from_memory(data, (int)size, &w, &h, &channels, 4);
-    if (!rgba) return false;
-    if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
-        stbi_image_free(rgba);
-        return false;
-    }
-
-    bool ok = load_from_pixels(rgba, w, h);
+  int w = 0, h = 0, channels = 0;
+  u8 *rgba = stbi_load_from_memory(data, (int)size, &w, &h, &channels, 4);
+  if (!rgba)
+    return false;
+  if (w <= 0 || h <= 0 || w > 1024 || h > 1024) {
     stbi_image_free(rgba);
-    return ok;
+    return false;
+  }
+
+  bool ok = load_from_pixels(rgba, w, h);
+  stbi_image_free(rgba);
+  return ok;
 }
 
 void Wallpaper::unload() {
-    if (m_loaded) {
-        C3D_TexDelete(&m_tex);
-        m_loaded = false;
-    }
-    m_orig_w = 0;
-    m_orig_h = 0;
+  if (m_loaded) {
+    C3D_TexDelete(&m_tex);
+    m_loaded = false;
+  }
+  m_orig_w = 0;
+  m_orig_h = 0;
 }
 
 void Wallpaper::draw_fullscreen() {
-    if (!m_loaded) return;
-    float sx = 400.0f / (float)m_orig_w;
-    float sy = 240.0f / (float)m_orig_h;
-    C2D_DrawImageAt(m_img, 0, 0, 0, nullptr, sx, sy);
+  if (!m_loaded)
+    return;
+  float sx = 400.0f / (float)m_orig_w;
+  float sy = 240.0f / (float)m_orig_h;
+  C2D_DrawImageAt(m_img, 0, 0, 0, nullptr, sx, sy);
 }
 
 void Wallpaper::draw_at(float x, float y, float size) {
-    if (!m_loaded) return;
-    // Fit image into square (letterbox)
-    float sx = size / (float)m_orig_w;
-    float sy = size / (float)m_orig_h;
-    float s  = sx < sy ? sx : sy;
-    float ox = x + (size - m_orig_w * s) * 0.5f;
-    float oy = y + (size - m_orig_h * s) * 0.5f;
-    C2D_DrawImageAt(m_img, ox, oy, 0, nullptr, s, s);
+  if (!m_loaded)
+    return;
+  // Fit image into square (letterbox)
+  float sx = size / (float)m_orig_w;
+  float sy = size / (float)m_orig_h;
+  float s = sx < sy ? sx : sy;
+  float ox = x + (size - m_orig_w * s) * 0.5f;
+  float oy = y + (size - m_orig_h * s) * 0.5f;
+  C2D_DrawImageAt(m_img, ox, oy, 0, nullptr, s, s);
 }
