@@ -18,6 +18,7 @@ jobs:
     container: devkitpro/devkitarm:latest
 
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       DEVKITPRO: /opt/devkitpro
       DEVKITARM: /opt/devkitpro/devkitARM
 
