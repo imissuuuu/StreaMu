@@ -102,6 +102,40 @@ std::unique_ptr<PlaylistManager> g_playlist_manager_ptr;
 
 C2D_TextBuf g_staticBuf; // Temporarily kept for compatibility
 
+struct StartupConnectionCheck {
+  LightLock lock;
+  YouTubeAPI api;
+  bool done = false;
+  bool result = false;
+};
+
+static void startup_connection_check_thread(void *arg) {
+  StartupConnectionCheck *check = static_cast<StartupConnectionCheck *>(arg);
+  bool result = check->api.check_connection();
+  LightLock_Lock(&check->lock);
+  check->result = result;
+  check->done = true;
+  LightLock_Unlock(&check->lock);
+}
+
+static void reset_startup_connection_check(StartupConnectionCheck &check,
+                                           const std::string &server_ip) {
+  LightLock_Lock(&check.lock);
+  check.done = false;
+  check.result = false;
+  LightLock_Unlock(&check.lock);
+  check.api.set_server_ip(server_ip);
+}
+
+static bool poll_startup_connection_check(StartupConnectionCheck &check,
+                                          bool &result) {
+  LightLock_Lock(&check.lock);
+  bool done = check.done;
+  result = check.result;
+  LightLock_Unlock(&check.lock);
+  return done;
+}
+
 void update_playing_title_lines(C2D_TextBuf buf) {
   ctx.playing_title_lines.clear();
   if (ctx.playing_title.empty())
@@ -299,11 +333,11 @@ void download_thread(void *arg) {
 // Draw a loading progress bar on the top screen.
 // step: current step (1-4), total: 4
 // label: text shown below the bar
-// pulse_frame: if >= 0, animates the bar tip for indeterminate progress (step
-// 4)
+// pulse_frame: if >= 0, animates an ASCII spinner next to the label (step 4)
 void draw_loading_screen(UIManager &ui_mgr, C2D_TextBuf buf,
                          const ThemeColors *theme, int step, int total,
-                         const char *label, int pulse_frame = -1) {
+                         const char *label, int pulse_frame = -1,
+                         const char *bottom_hint = nullptr) {
   ui_mgr.begin_top_screen(theme->bg_top);
   C2D_TextBufClear(buf);
 
@@ -331,15 +365,8 @@ void draw_loading_screen(UIManager &ui_mgr, C2D_TextBuf buf,
                       C2D_Color32(50, 120, 200, 255));
   }
 
-  // Pulse animation for indeterminate step (bar extends up to 50% of segment)
-  if (pulse_frame >= 0) {
-    float base_fill = bar_w * static_cast<float>(step - 1) / total;
-    float segment_w = bar_w / total;
-    float t = 0.5f + 0.5f * sinf(pulse_frame * 0.05f);
-    float pulse_w = segment_w * 0.5f * t; // max 50% of segment
-    C2D_DrawRectSolid(bar_x + base_fill, bar_y, 0, pulse_w, bar_h,
-                      C2D_Color32(50, 120, 200, 255));
-  }
+  // Step 4 waits on network I/O. Keep the bar fixed so it reads as waiting,
+  // not as progress that moves backward.
 
   // Bar border (outline)
   C2D_DrawRectSolid(bar_x, bar_y, 0, bar_w, 1, C2D_Color32(120, 120, 120, 255));
@@ -352,7 +379,15 @@ void draw_loading_screen(UIManager &ui_mgr, C2D_TextBuf buf,
   // Step text below bar (centered)
   C2D_Text text;
   char step_text[64];
-  snprintf(step_text, sizeof(step_text), "Step %d/%d: %s", step, total, label);
+  if (pulse_frame >= 0) {
+    static const char spinner[] = {'|', '/', '-', '\\'};
+    char spin = spinner[(pulse_frame / 8) % 4];
+    snprintf(step_text, sizeof(step_text), "Step %d/%d: %s %c", step, total,
+             label, spin);
+  } else {
+    snprintf(step_text, sizeof(step_text), "Step %d/%d: %s", step, total,
+             label);
+  }
   C2D_TextParse(&text, buf, step_text);
   C2D_TextOptimize(&text);
   float text_w = text.width * 0.5f;      // scale 0.5
@@ -362,6 +397,13 @@ void draw_loading_screen(UIManager &ui_mgr, C2D_TextBuf buf,
                C2D_Color32(180, 180, 180, 255));
 
   ui_mgr.begin_bottom_screen(theme->bg_bottom);
+  if (bottom_hint) {
+    C2D_TextParse(&text, buf, bottom_hint);
+    C2D_TextOptimize(&text);
+    float hint_x = 160.0f - (text.width * 0.6f) / 2.0f;
+    C2D_DrawText(&text, C2D_AtBaseline | C2D_WithColor, hint_x, 120.0f, 0, 0.6f,
+                 0.6f, C2D_Color32(120, 120, 120, 255));
+  }
   ui_mgr.end_frame();
 }
 
@@ -473,7 +515,7 @@ int main(int argc, char *argv[]) {
   }
 
   // --- Step 4/4: Server connection check ---
-  ctx.is_server_connected = api.check_connection();
+  ctx.is_server_connected = false;
   int anim_counter = 0;
   bool is_timeout = false;
   int timeout_selected_index = 0;
@@ -481,12 +523,38 @@ int main(int argc, char *argv[]) {
   int confirm_selected_index = 0;
   u64 connect_start_ms = osGetTime();
   u64 last_check_ms = connect_start_ms;
+  StartupConnectionCheck startup_check;
+  LightLock_Init(&startup_check.lock);
+  Thread startup_check_thread = nullptr;
+
+  auto cleanup_startup_check_thread = [&]() {
+    if (startup_check_thread) {
+      threadJoin(startup_check_thread, U64_MAX);
+      threadFree(startup_check_thread);
+      startup_check_thread = nullptr;
+    }
+  };
+
+  auto start_startup_check = [&]() {
+    cleanup_startup_check_thread();
+    reset_startup_connection_check(startup_check, ctx.config.server_ip);
+    startup_check_thread =
+        threadCreate(startup_connection_check_thread, &startup_check, 0x8000,
+                     0x3F, -2, false);
+  };
+
+  if (!ctx.config.server_ip.empty()) {
+    start_startup_check();
+  } else {
+    is_timeout = true;
+    timeout_selected_index = 1; // Change IP
+  }
 
   while (aptMainLoop() && !ctx.is_server_connected) {
     if (!is_timeout) {
-      // Progress bar with pulse animation
+      // Fixed progress bar with a small text spinner while checking the server.
       draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 4, 4,
-                          "Connecting to server...", anim_counter);
+                          "Connecting to server...", anim_counter, "B: Cancel");
     } else {
       // Timeout error menu (top screen)
       ui_mgr.begin_top_screen(ctx.theme->bg_top);
@@ -554,6 +622,7 @@ int main(int argc, char *argv[]) {
             is_timeout = false;
             connect_start_ms = osGetTime();
             last_check_ms = connect_start_ms;
+            start_startup_check();
           } else if (timeout_selected_index == 1) { // Change IP
             std::string ip = show_ip_keyboard(ctx.config.server_ip);
             if (!ip.empty()) {
@@ -564,6 +633,7 @@ int main(int argc, char *argv[]) {
             is_timeout = false;
             connect_start_ms = osGetTime();
             last_check_ms = connect_start_ms;
+            start_startup_check();
           } else { // Exit
             is_confirming_exit = true;
             confirm_selected_index = 0;
@@ -584,18 +654,33 @@ int main(int argc, char *argv[]) {
         }
       }
     } else {
-      anim_counter++;
-      u64 now_ms = osGetTime();
-      if (now_ms - connect_start_ms >= 15000) { // 15 seconds (real time)
+      if (kDown & KEY_B) {
         is_timeout = true;
-      } else if (now_ms - last_check_ms >=
-                 500) { // Check every 0.5s (real time)
-        last_check_ms = now_ms;
-        ctx.is_server_connected = api.check_connection();
+        timeout_selected_index = 1; // Change IP
+      } else {
+        anim_counter++;
+        u64 now_ms = osGetTime();
+        if (now_ms - connect_start_ms >= 15000) { // 15 seconds (real time)
+          is_timeout = true;
+        } else {
+          bool check_result = false;
+          if (startup_check_thread &&
+              poll_startup_connection_check(startup_check, check_result)) {
+            cleanup_startup_check_thread();
+            ctx.is_server_connected = check_result;
+          } else if (!startup_check_thread &&
+                     now_ms - last_check_ms >= 500) { // Check every 0.5s
+                                                      // (real time)
+            last_check_ms = now_ms;
+            start_startup_check();
+          }
+        }
       }
     }
     svcSleepThread(16666666); // ~60fps
   }
+
+  cleanup_startup_check_thread();
 
   Thread threadId = nullptr;
   if (ctx.is_running) {

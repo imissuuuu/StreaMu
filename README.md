@@ -49,33 +49,29 @@ On first launch, the server automatically downloads `ffmpeg.exe` and `yt-dlp.exe
 
 #### Option B: Python Script
 
+Mac / Linux:
 ```bash
 cd server
-python setup.py
+chmod +x start_server.sh
+./start_server.sh
 ```
 
 This will:
 1. Create a Python virtual environment
 2. Install required packages (starlette, yt-dlp, uvicorn)
 3. Check for FFmpeg
+4. Start the proxy server
 
-If FFmpeg is not found, download it from [ffmpeg.org](https://ffmpeg.org/download.html) and place the binary in the `server/` directory.
-
-**Start the Python server:**
+If FFmpeg is not found, the script prints install commands for macOS and common Linux distributions.
 
 Windows:
 ```bash
 cd server
+python setup.py
 venv\Scripts\python proxy.py
 ```
 
 Or double-click `start_server.bat` in the `server/` folder.
-
-Mac / Linux:
-```bash
-cd server
-venv/bin/python proxy.py
-```
 
 The server starts on port 8080. Open `http://localhost:8080` in your browser to view the dashboard.
 
@@ -142,10 +138,11 @@ Settings are saved to `sdmc:/3ds/StreaMu/config.json`.
 
 **Server won't start**
 - **EXE version:** Make sure Windows Defender or antivirus isn't blocking the EXE. You may need to add an exception.
-- **Python version:** Run `python setup.py` first to install dependencies.
+- **Windows Python version:** Run `python setup.py` first to install dependencies.
+- **Mac/Linux Python version:** Run `./start_server.sh` from the `server/` folder. It creates the virtual environment and installs dependencies automatically.
 
 **No audio / playback issues**
-- The server needs FFmpeg for audio transcoding. The EXE version handles this automatically. For the Python version, make sure `ffmpeg.exe` is in the `server/` directory or on your system PATH.
+- The server needs FFmpeg for audio transcoding. The EXE version handles this automatically. For Windows Python, make sure `ffmpeg.exe` is in the `server/` directory. For Mac/Linux, install `ffmpeg` on your system PATH or place an executable named `ffmpeg` in the `server/` directory.
 
 ### Build from Source
 
@@ -213,33 +210,29 @@ PC上で動作するプロキシサーバーがYouTubeからのデータ取得�
 
 #### 方法B: Pythonスクリプト
 
+Mac / Linux:
 ```bash
 cd server
-python setup.py
+chmod +x start_server.sh
+./start_server.sh
 ```
 
 以下が自動で行われます：
 1. Python仮想環境の作成
 2. 必要パッケージのインストール（starlette, yt-dlp, uvicorn）
 3. FFmpegの確認
+4. プロキシサーバーの起動
 
-FFmpegが見つからない場合は [ffmpeg.org](https://ffmpeg.org/download.html) からダウンロードし、`server/` ディレクトリに配置してください。
-
-**Pythonサーバーの起動：**
+FFmpegが見つからない場合、macOSや主なLinuxディストリビューション向けのインストールコマンド例が表示されます。
 
 Windows:
 ```bash
 cd server
+python setup.py
 venv\Scripts\python proxy.py
 ```
 
 または `server/` フォルダ内の `start_server.bat` をダブルクリック。
-
-Mac / Linux:
-```bash
-cd server
-venv/bin/python proxy.py
-```
 
 サーバーはポート8080で起動します。ブラウザで `http://localhost:8080` を開くとダッシュボードが表示されます。
 
@@ -306,10 +299,11 @@ venv/bin/python proxy.py
 
 **サーバーが起動しない**
 - **EXE版：** Windows Defenderやウイルス対策ソフトがブロックしていないか確認。例外に追加が必要な場合があります。
-- **Python版：** 先に `python setup.py` を実行して依存関係をインストールしてください。
+- **Windows Python版：** 先に `python setup.py` を実行して依存関係をインストールしてください。
+- **Mac/Linux Python版：** `server/` フォルダで `./start_server.sh` を実行してください。仮想環境の作成と依存関係のインストールは自動で行われます。
 
 **音声が出ない・再生できない**
-- サーバーは音声変換にFFmpegが必要です。EXE版は自動処理されます。Python版の場合は `server/` ディレクトリに `ffmpeg.exe` があるか、システムPATHに含まれているか確認してください。
+- サーバーは音声変換にFFmpegが必要です。EXE版は自動処理されます。Windows Python版の場合は `server/` ディレクトリに `ffmpeg.exe` があるか確認してください。Mac/Linuxの場合は `ffmpeg` がシステムPATHに含まれているか、`server/` ディレクトリに実行可能な `ffmpeg` があるか確認してください。
 
 ### ソースからビルド
 

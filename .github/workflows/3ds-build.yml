@@ -1,0 +1,59 @@
+name: 3DS Build
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build 3DS artifacts
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      DEVKITPRO: /opt/devkitpro
+      DEVKITARM: /opt/devkitpro/devkitARM
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install 3DS packaging tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl unzip
+          mkdir -p "$DEVKITPRO/tools/bin"
+
+          curl -fsSL \
+            https://github.com/Epicpkmn11/bannertool/releases/latest/download/bannertool.zip \
+            -o /tmp/bannertool.zip
+          unzip -j /tmp/bannertool.zip 'linux-x86_64/bannertool' -d "$DEVKITPRO/tools/bin"
+          chmod +x "$DEVKITPRO/tools/bin/bannertool"
+
+          curl -fsSL \
+            https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18/makerom-v0.18-ubuntu_x86_64.zip \
+            -o /tmp/makerom.zip
+          unzip -j /tmp/makerom.zip makerom -d "$DEVKITPRO/tools/bin"
+          chmod +x "$DEVKITPRO/tools/bin/makerom"
+
+      - name: Build
+        run: |
+          make clean
+          make -j"$(nproc)"
+
+      - name: Upload 3DS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamu-3ds-${{ github.sha }}
+          path: |
+            streamu.3dsx
+            streamu.cia
+          if-no-files-found: error
