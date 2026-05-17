@@ -9,6 +9,7 @@
 #include <time.h>
 #include <vector>
 
+#include "audio/aac_poc_player.h"
 #include "audio/mp3_player.h"
 #include "network/youtube_api.h"
 #include "playlist_manager.h"
@@ -36,6 +37,8 @@ LightLock stream_lock;   // Mutex protecting stream_buffer access
 // Use smart pointers to ensure destructors run before socExit (prevents crash).
 std::unique_ptr<MP3Player> g_player_ptr;
 #define player (*g_player_ptr)
+std::unique_ptr<AacPocPlayer> g_aac_player_ptr;
+#define aac_player (*g_aac_player_ptr)
 
 std::string url_encode(const std::string &value) {
   std::ostringstream escaped;
@@ -321,6 +324,7 @@ void download_thread(void *arg) {
           ctx.g_status_msg = is_online ? "Extract Error (Check Proxy)"
                                        : "Stream Error (Offline?)";
           MP3Player::is_playing = false;
+          AacPocPlayer::is_playing = false;
           ctx.playing_id = "";
         }
       }
@@ -412,6 +416,7 @@ int main(int argc, char *argv[]) {
   // etc.)
   g_ctx_ptr = std::make_unique<AppContext>();
   g_player_ptr = std::make_unique<MP3Player>();
+  g_aac_player_ptr = std::make_unique<AacPocPlayer>();
   g_playlist_manager_ptr = std::make_unique<PlaylistManager>();
   g_stream_buffer_ptr = std::make_unique<std::vector<uint8_t>>();
 
@@ -450,6 +455,10 @@ int main(int argc, char *argv[]) {
   ndmuInit();
   NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
   player.init();
+  if (!aac_player.init() &&
+      ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC) {
+    ctx.config.audio_path = AudioPathConfig::MP3_PROXY;
+  }
   ptmuInit();
   u32 *soc_buffer = (u32 *)memalign(0x1000, 0x100000);
   if (soc_buffer)
@@ -705,6 +714,7 @@ int main(int argc, char *argv[]) {
     ctx.is_paused = false;
     ndspChnSetPaused(0, false);
     player.stop(); // Stop audio playback and flush hardware buffers
+    aac_player.stop();
 
     LightLock_Lock(&stream_lock);
     if (g_stream_buffer_ptr)
@@ -745,12 +755,19 @@ int main(int argc, char *argv[]) {
     ctx.playing_meta = meta;
 
     update_playing_title_lines(ui_mgr.get_text_buf());
-    MP3Player::is_playing = true;
+    bool use_aac_path = ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC;
+    MP3Player::is_playing = !use_aac_path;
+    AacPocPlayer::is_playing = use_aac_path;
     ctx.g_status_msg = "Buffering...";
     LightLock_Unlock(&ctx.lock);
 
+    AudioPath audio_path =
+        ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC
+            ? AudioPath::AacAdtsPoc
+            : AudioPath::Mp3Proxy;
     api.get_audio_stream_url(
-        ctx.playing_id, seek_secs, [&](const std::string &url, bool ok) {
+        ctx.playing_id, seek_secs, audio_path,
+        [&, seek_secs](const std::string &url, bool ok) {
           LightLock_Lock(&ctx.lock);
           if (ok && !url.empty()) {
             ctx.current_stream_url = url;
@@ -758,14 +775,20 @@ int main(int argc, char *argv[]) {
           } else {
             ctx.g_status_msg = "Stream Error";
             MP3Player::is_playing = false;
+            AacPocPlayer::is_playing = false;
+            ctx.seek_target_seconds = -1;
 
             // On error during playlist playback, auto-skip to next track.
             // Keep is_playing=true so the track-finished detection triggers
             // auto-next.
-            if (!ctx.play_queue.empty() && ctx.current_track_idx >= 0 &&
+            if (seek_secs <= 0 && !ctx.play_queue.empty() &&
+                ctx.current_track_idx >= 0 &&
                 ctx.current_track_idx < (int)ctx.play_queue.size() - 1) {
-              MP3Player::is_playing =
-                  true; // Trick finish-detection into triggering auto-next
+              if (use_aac_path) {
+                AacPocPlayer::is_playing = true;
+              } else {
+                MP3Player::is_playing = true;
+              }
             } else {
               ctx.playing_id = "";
             }
@@ -782,16 +805,26 @@ int main(int argc, char *argv[]) {
     LightLock_Lock(&ctx.lock);
     bool should_auto_next = false;
 
-    player.set_downloading_status(ctx.is_downloading);
+    bool use_aac_path = ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC;
+    if (use_aac_path) {
+      aac_player.set_downloading_status(ctx.is_downloading);
+    } else {
+      player.set_downloading_status(ctx.is_downloading);
+    }
 
-    if (MP3Player::is_playing && !ctx.is_downloading &&
-        player.is_track_finished()) {
+    bool active_player_finished =
+        use_aac_path ? (AacPocPlayer::is_playing && !ctx.is_downloading &&
+                        aac_player.is_track_finished())
+                     : (MP3Player::is_playing && !ctx.is_downloading &&
+                        player.is_track_finished());
+    if (active_player_finished) {
       if (!ctx.play_queue.empty()) {
         // Auto-advance: loop when reaching the end (per user request)
         should_auto_next = true;
       } else {
         // End of playlist or single track
         MP3Player::is_playing = false;
+        AacPocPlayer::is_playing = false;
         ctx.g_status_msg = "";
         ctx.playing_id = "";
         ctx.current_track_idx = -1;
@@ -813,11 +846,13 @@ int main(int argc, char *argv[]) {
             start_playback(cur_track);
           } else {
             MP3Player::is_playing = false;
+            AacPocPlayer::is_playing = false;
             ctx.playing_id = "";
             LightLock_Unlock(&ctx.lock);
           }
         } else {
           MP3Player::is_playing = false;
+          AacPocPlayer::is_playing = false;
           ctx.playing_id = "";
           LightLock_Unlock(&ctx.lock);
         }
@@ -830,6 +865,7 @@ int main(int argc, char *argv[]) {
           } else {
             // LOOP_OFF: stop playback
             MP3Player::is_playing = false;
+            AacPocPlayer::is_playing = false;
             ctx.g_status_msg = "";
             ctx.playing_id = "";
             ctx.current_track_idx = -1;
@@ -843,6 +879,7 @@ int main(int argc, char *argv[]) {
             ctx.play_queue.clear();
             ctx.current_track_idx = -1;
             MP3Player::is_playing = false;
+            AacPocPlayer::is_playing = false;
             LightLock_Unlock(&ctx.lock);
           } else {
             Track next_track = ctx.playing_tracks[next_idx];
@@ -1772,6 +1809,7 @@ int main(int argc, char *argv[]) {
             if (ctx.playing_id == ctx.selected_track_id) {
               ctx.playing_id = "";
               MP3Player::is_playing = false;
+              AacPocPlayer::is_playing = false;
             }
           } else {
             // Remove from PlaylistDetailScreen (existing logic)
@@ -2006,6 +2044,7 @@ int main(int argc, char *argv[]) {
         }
 
         player.stop();
+        aac_player.stop();
         if (g_stream_buffer_ptr)
           g_stream_buffer_ptr->clear();
         YouTubeAPI::should_cancel = false;
@@ -2070,10 +2109,19 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    player.update();
+    bool use_aac_path_for_update =
+        ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC;
+    if (use_aac_path_for_update) {
+      aac_player.update();
+    } else {
+      player.update();
+    }
 
     // Clear buffering flag once audio actually starts playing
-    if (ctx.is_buffering && player.has_started_playing()) {
+    bool has_started_playing = use_aac_path_for_update
+                                   ? aac_player.has_started_playing()
+                                   : player.has_started_playing();
+    if (ctx.is_buffering && has_started_playing) {
       LightLock_Lock(&ctx.lock);
       ctx.is_buffering = false;
       if (!ctx.is_paused && ctx.pause_started_at > 0) {
@@ -2087,7 +2135,9 @@ int main(int argc, char *argv[]) {
     size_t sb_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
     LightLock_Unlock(&stream_lock);
 
-    if (MP3Player::is_playing && sb_size > 50000 && !ctx.is_paused) {
+    bool active_is_playing = use_aac_path_for_update ? AacPocPlayer::is_playing
+                                                     : MP3Player::is_playing;
+    if (active_is_playing && sb_size > 50000 && !ctx.is_paused) {
       LightLock_Lock(&ctx.lock);
       ctx.g_status_msg = "Playing";
       LightLock_Unlock(&ctx.lock);
@@ -2154,6 +2204,7 @@ int main(int argc, char *argv[]) {
 
   // 2. Safely stop player
   player.stop();
+  aac_player.stop();
 
   // 3. Clean up network library before socExit
   api.cleanup();
@@ -2166,6 +2217,7 @@ int main(int argc, char *argv[]) {
   }
 
   g_player_ptr.reset();
+  g_aac_player_ptr.reset();
   g_playlist_manager_ptr.reset();
   // Wait for thumbnail thread to finish (if running)
   {

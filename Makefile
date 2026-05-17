@@ -17,8 +17,8 @@ LD      := $(PREFIX)g++
 
 TARGET      := streamu
 VERSION     := 1.4.1
-SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens
-INCLUDES    := include include/network include/ui
+SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens third_party/helix-aac
+INCLUDES    := include include/network include/ui third_party/helix-aac
 
 DEVKITPRO_LIB := $(DEVKITPRO)/libctru/lib
 DEVKITPRO_INC := $(DEVKITPRO)/libctru/include
@@ -41,6 +41,7 @@ INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 # ソースファイルの探索
 CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))
 CFILES   := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.c))
+CFILES   := $(filter-out third_party/helix-aac/sbr%.c,$(CFILES))
 OFILES   := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o)
 
 # CIA build tools

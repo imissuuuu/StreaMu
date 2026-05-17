@@ -24,8 +24,9 @@ enum SettingsItem {
   ITEM_WALLPAPER = 8,
   ITEM_SERVER_IP = 9,
   ITEM_LANGUAGE = 10,
-  ITEM_SEPARATOR = 11,
-  ITEM_SAVE = 12
+  ITEM_AUDIO_PATH = 11,
+  ITEM_SEPARATOR = 12,
+  ITEM_SAVE = 13
 };
 
 SettingsScreen::SettingsScreen(ThemeColors &colors, Wallpaper *wallpaper)
@@ -96,6 +97,8 @@ std::string SettingsScreen::get_item_label(int index) const {
     return "Server IP";
   case ITEM_LANGUAGE:
     return "Language";
+  case ITEM_AUDIO_PATH:
+    return "Audio Path";
   case ITEM_SEPARATOR:
     return "";
   case ITEM_SAVE:
@@ -144,6 +147,10 @@ std::string SettingsScreen::get_item_value(int index) const {
                                              : editing_config_.server_ip;
   case ITEM_LANGUAGE:
     return editing_config_.language == "ja" ? "JA" : "EN";
+  case ITEM_AUDIO_PATH:
+    return editing_config_.audio_path == AudioPathConfig::AAC_ADTS_POC
+               ? "AAC PoC"
+               : "MP3 Proxy";
   default:
     return "";
   }
@@ -178,6 +185,9 @@ std::string SettingsScreen::get_item_description(int index) const {
     return "Server IP address and port.\nPress A to change.";
   case ITEM_LANGUAGE:
     return "Metadata language for search results.\nEN=English  JA=Japanese";
+  case ITEM_AUDIO_PATH:
+    return "Select audio delivery path.\nMP3 Proxy is stable; AAC PoC is "
+           "experimental.";
   case ITEM_SAVE:
     return "Save settings to SD card and return\nto the home screen.";
   default:
@@ -599,6 +609,11 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
               } else if (i == ITEM_LANGUAGE) {
                 editing_config_.language =
                     (editing_config_.language == "en") ? "ja" : "en";
+              } else if (i == ITEM_AUDIO_PATH) {
+                editing_config_.audio_path =
+                    editing_config_.audio_path == AudioPathConfig::MP3_PROXY
+                        ? AudioPathConfig::AAC_ADTS_POC
+                        : AudioPathConfig::MP3_PROXY;
               }
             } else {
               // 1st tap: select
@@ -684,6 +699,12 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
     case ITEM_LANGUAGE:
       editing_config_.language =
           (editing_config_.language == "en") ? "ja" : "en";
+      break;
+    case ITEM_AUDIO_PATH:
+      editing_config_.audio_path =
+          editing_config_.audio_path == AudioPathConfig::MP3_PROXY
+              ? AudioPathConfig::AAC_ADTS_POC
+              : AudioPathConfig::MP3_PROXY;
       break;
     case ITEM_SERVER_IP: {
       std::string current = editing_config_.server_ip;
