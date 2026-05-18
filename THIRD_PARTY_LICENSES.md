@@ -31,3 +31,12 @@ This project uses the following third-party libraries and tools.
 - **Description**: ASGI server for running the proxy
 - **License**: BSD 3-Clause
 - **URL**: https://github.com/encode/uvicorn
+
+## Helix AAC decoder core
+- **Description**: AAC decoder core used by AAC Direct playback on the 3DS
+- **License**: RealNetworks Public Source License 1.0 (RPSL-1.0)
+- **Source in this repository**: `third_party/helix-aac/`
+- **License text**: `third_party/helix-aac/RPSL.txt`
+- **Upstream note**: https://github.com/pschatzmann/arduino-libhelix
+- **Object code notice**: Helix DNA Client technology included. Copyright (c) RealNetworks, Inc., 1995-2002. All rights reserved.
+- **Patent note**: RPSL does not resolve AAC codec patent licensing. See `docs/LEGAL/aac-direct-license-review.md` before distributing AAC Direct binary builds.

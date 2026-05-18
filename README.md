@@ -161,7 +161,8 @@ build_exe.bat           # produces dist/StreaMu-Server.zip
 
 ### License
 
-MIT License. See [LICENSE](LICENSE) for details.
+StreaMu project code is MIT licensed. See [LICENSE](LICENSE) for details.
+Bundled third-party components are governed by their own licenses.
 
 Third-party licenses: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
 
@@ -322,6 +323,7 @@ build_exe.bat           # dist/StreaMu-Server.zip を生成
 
 ### ライセンス
 
-MIT License。詳細は [LICENSE](LICENSE) を参照。
+StreaMu 本体コードは MIT License です。詳細は [LICENSE](LICENSE) を参照。
+同梱しているサードパーティコンポーネントには、それぞれ別のライセンスが適用されます。
 
 サードパーティライセンス: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
