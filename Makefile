@@ -26,7 +26,10 @@ PORTLIBS      := $(DEVKITPRO)/portlibs/3ds
 
 # --- 修正: libcurl の背後で動く mbedtls と zlib を追加 ---
 # 順番が非常に重要です (依存される側を後ろに置く)
-LIBS    := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
+PKG_CONFIG := $(PORTLIBS)/bin/arm-none-eabi-pkg-config
+VORBIS_CFLAGS := $(shell $(PKG_CONFIG) vorbisidec --cflags 2>/dev/null)
+VORBIS_LIBS   := $(shell $(PKG_CONFIG) vorbisidec --libs 2>/dev/null)
+LIBS    := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz $(VORBIS_LIBS) -lctru -lm
 
 ARCH    := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CFLAGS  := -g -Wall -O2 -mword-relocations -fomit-frame-pointer -ffunction-sections $(ARCH) -DARM11 -D__3DS__ -DAPP_VERSION='"v$(VERSION)"'
@@ -36,7 +39,8 @@ LDFLAGS := -specs=3dsx.specs -g $(ARCH)
 LIBDIRS := -L$(DEVKITPRO_LIB) -L$(PORTLIBS)/lib
 INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
            -I$(DEVKITPRO_INC) \
-           -I$(PORTLIBS)/include
+           -I$(PORTLIBS)/include \
+           $(VORBIS_CFLAGS)
 
 # ソースファイルの探索
 CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))
