@@ -148,8 +148,8 @@ std::string SettingsScreen::get_item_value(int index) const {
   case ITEM_LANGUAGE:
     return editing_config_.language == "ja" ? "JA" : "EN";
   case ITEM_AUDIO_PATH:
-    return editing_config_.audio_path == AudioPathConfig::AAC_ADTS_POC
-               ? "AAC PoC"
+    return editing_config_.audio_path == AudioPathConfig::AAC_DIRECT
+               ? "AAC Direct"
                : "MP3 Proxy";
   default:
     return "";
@@ -186,8 +186,8 @@ std::string SettingsScreen::get_item_description(int index) const {
   case ITEM_LANGUAGE:
     return "Metadata language for search results.\nEN=English  JA=Japanese";
   case ITEM_AUDIO_PATH:
-    return "Select audio delivery path.\nMP3 Proxy is stable; AAC PoC is "
-           "experimental.";
+    return "Select audio delivery path.\nAAC Direct is default; MP3 Proxy is "
+           "fallback.";
   case ITEM_SAVE:
     return "Save settings to SD card and return\nto the home screen.";
   default:
@@ -612,7 +612,7 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
               } else if (i == ITEM_AUDIO_PATH) {
                 editing_config_.audio_path =
                     editing_config_.audio_path == AudioPathConfig::MP3_PROXY
-                        ? AudioPathConfig::AAC_ADTS_POC
+                        ? AudioPathConfig::AAC_DIRECT
                         : AudioPathConfig::MP3_PROXY;
               }
             } else {
@@ -703,7 +703,7 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
     case ITEM_AUDIO_PATH:
       editing_config_.audio_path =
           editing_config_.audio_path == AudioPathConfig::MP3_PROXY
-              ? AudioPathConfig::AAC_ADTS_POC
+              ? AudioPathConfig::AAC_DIRECT
               : AudioPathConfig::MP3_PROXY;
       break;
     case ITEM_SERVER_IP: {

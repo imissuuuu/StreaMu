@@ -18,7 +18,7 @@ enum LRAction {
 enum MenuButtonSide { MENU_BTN_LEFT = 0, MENU_BTN_RIGHT = 1 };
 
 // === Audio Path ===
-enum class AudioPathConfig { MP3_PROXY = 0, AAC_ADTS_POC = 1 };
+enum class AudioPathConfig { MP3_PROXY = 0, AAC_DIRECT = 1 };
 
 // === Application Config ===
 struct AppConfig {
@@ -34,7 +34,7 @@ struct AppConfig {
   std::string wallpaper_file = ""; // Wallpaper filename (in wallpaper/ folder)
   std::string server_ip = "";      // Server IP:Port (e.g. "192.168.1.100:8080")
   std::string language = "en";     // Metadata language ("en" or "ja")
-  AudioPathConfig audio_path = AudioPathConfig::MP3_PROXY;
+  AudioPathConfig audio_path = AudioPathConfig::AAC_DIRECT;
   float accent_saturation = 0.75f; // 0.0-1.0 (custom mode saturation)
   float accent_brightness = 0.78f; // 0.0-1.0 (custom mode brightness/value)
 };

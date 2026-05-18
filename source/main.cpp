@@ -456,7 +456,7 @@ int main(int argc, char *argv[]) {
   NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
   player.init();
   if (!aac_player.init() &&
-      ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC) {
+      ctx.config.audio_path == AudioPathConfig::AAC_DIRECT) {
     ctx.config.audio_path = AudioPathConfig::MP3_PROXY;
   }
   ptmuInit();
@@ -755,15 +755,15 @@ int main(int argc, char *argv[]) {
     ctx.playing_meta = meta;
 
     update_playing_title_lines(ui_mgr.get_text_buf());
-    bool use_aac_path = ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC;
+    bool use_aac_path = ctx.config.audio_path == AudioPathConfig::AAC_DIRECT;
     MP3Player::is_playing = !use_aac_path;
     AacPocPlayer::is_playing = use_aac_path;
     ctx.g_status_msg = "Buffering...";
     LightLock_Unlock(&ctx.lock);
 
     AudioPath audio_path =
-        ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC
-            ? AudioPath::AacAdtsPoc
+        ctx.config.audio_path == AudioPathConfig::AAC_DIRECT
+            ? AudioPath::AacDirect
             : AudioPath::Mp3Proxy;
     api.get_audio_stream_url(
         ctx.playing_id, seek_secs, audio_path,
@@ -805,7 +805,7 @@ int main(int argc, char *argv[]) {
     LightLock_Lock(&ctx.lock);
     bool should_auto_next = false;
 
-    bool use_aac_path = ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC;
+    bool use_aac_path = ctx.config.audio_path == AudioPathConfig::AAC_DIRECT;
     if (use_aac_path) {
       aac_player.set_downloading_status(ctx.is_downloading);
     } else {
@@ -2110,7 +2110,7 @@ int main(int argc, char *argv[]) {
     }
 
     bool use_aac_path_for_update =
-        ctx.config.audio_path == AudioPathConfig::AAC_ADTS_POC;
+        ctx.config.audio_path == AudioPathConfig::AAC_DIRECT;
     if (use_aac_path_for_update) {
       aac_player.update();
     } else {

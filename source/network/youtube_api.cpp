@@ -111,7 +111,7 @@ void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
                                       StreamCallback callback) {
   // Delegate heavy work to PC; 3DS receives a ready-to-decode stream.
   std::string url = get_base_url();
-  if (path == AudioPath::AacAdtsPoc) {
+  if (path == AudioPath::AacDirect) {
     url += "/stream_aac_adts?i=" + video_id;
     if (seek_seconds > 0)
       url += "&t=" + std::to_string(seek_seconds);
