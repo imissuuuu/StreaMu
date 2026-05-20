@@ -787,10 +787,18 @@ async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator
         add_log(f"Opus Ogg fragmented stream unsupported: {v_id}")
         return
 
+    perf_start = time.monotonic()
+    upstream_first_byte_logged = False
+
+    def perf_ms() -> int:
+        return int((time.monotonic() - perf_start) * 1000)
+
     def webm_chunks() -> Iterator[bytes]:
+        nonlocal upstream_first_byte_logged
         total = 0
 
         def read_url(fetch_url: str) -> Iterator[bytes]:
+            nonlocal upstream_first_byte_logged
             nonlocal total
             req = urllib.request.Request(fetch_url, headers=info.http_headers)
             with urllib.request.urlopen(req, timeout=300) as resp:
@@ -801,6 +809,12 @@ async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator
                     total += len(chunk)
                     if total > MAX_OPUS_WEBM_BYTES:
                         raise ValueError("response too large")
+                    if not upstream_first_byte_logged:
+                        upstream_first_byte_logged = True
+                        add_log(
+                            f"Opus perf: upstream first byte +{perf_ms()}ms "
+                            f"bytes={total}"
+                        )
                     yield chunk
 
         if info.fragments:
@@ -848,6 +862,12 @@ async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator
                         total += len(chunk)
                         if total > MAX_OPUS_WEBM_BYTES:
                             raise ValueError("response too large")
+                        if not upstream_first_byte_logged:
+                            upstream_first_byte_logged = True
+                            add_log(
+                                f"Opus perf: upstream first byte +{perf_ms()}ms "
+                                f"bytes={total}"
+                            )
                         pending.extend(chunk)
                         cluster_offset = pending.find(WEBM_CLUSTER_ID)
                         if cluster_offset >= 0:
@@ -863,6 +883,12 @@ async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator
                         total += len(chunk)
                         if total > MAX_OPUS_WEBM_BYTES:
                             raise ValueError("response too large")
+                        if not upstream_first_byte_logged:
+                            upstream_first_byte_logged = True
+                            add_log(
+                                f"Opus perf: upstream first byte +{perf_ms()}ms "
+                                f"bytes={total}"
+                            )
                         yield chunk
                     return
             except (OSError, ValueError) as e:
@@ -877,6 +903,9 @@ async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator
     )
     _opus_prebuffer_videos.add(v_id)
     sent_bytes = 0
+    page_count = 0
+    first_page_logged = False
+    sixteen_k_logged = False
     page_iterator = iter_ogg_opus_pages_from_webm_chunks(
         webm_chunks(), seek_start_ms=seek_seconds * 1000
     )
@@ -885,8 +914,21 @@ async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator
             page = await asyncio.to_thread(_next_bytes_or_none, page_iterator)
             if page is None:
                 break
+            page_count += 1
+            if not first_page_logged:
+                first_page_logged = True
+                add_log(
+                    f"Opus perf: first ogg page +{perf_ms()}ms "
+                    f"bytes={len(page)}"
+                )
             sent_bytes += len(page)
             yield page
+            if not sixteen_k_logged and sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES:
+                sixteen_k_logged = True
+                add_log(
+                    f"Opus perf: sent 16KB +{perf_ms()}ms "
+                    f"pages={page_count}"
+                )
             if sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES:
                 _opus_prebuffer_videos.discard(v_id)
     except asyncio.CancelledError:
@@ -897,7 +939,13 @@ async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator
     except (OSError, WebmOpusRemuxError) as e:
         add_log(f"Opus Ogg stream failed: {e}")
     else:
-        add_log(f"Opus Ogg stream finished: {v_id}")
+        add_log(
+            f"Opus Ogg stream finished: {v_id}"
+        )
+        add_log(
+            f"Opus perf: finished +{perf_ms()}ms sent={sent_bytes} "
+            f"pages={page_count}"
+        )
     finally:
         _opus_prebuffer_videos.discard(v_id)
 

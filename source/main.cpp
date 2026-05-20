@@ -24,6 +24,26 @@ std::unique_ptr<std::vector<uint8_t>>
     g_stream_buffer_ptr; // Dynamic buffer for MP3Player
 LightLock stream_lock;   // Mutex protecting stream_buffer access
 bool g_stream_download_complete = true;
+static u64 g_opus_playback_perf_start_ms = 0;
+static bool g_opus_audio_started_logged = false;
+
+static void append_opus_playback_perf_log(const char *event, size_t bytes) {
+  if (!event || g_opus_playback_perf_start_ms == 0) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/opus_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms = now_ms >= g_opus_playback_perf_start_ms
+                             ? now_ms - g_opus_playback_perf_start_ms
+                             : 0;
+  fprintf(f, "[opus-perf] +%llums %s bytes=%lu\n",
+          static_cast<unsigned long long>(elapsed_ms), event,
+          static_cast<unsigned long>(bytes));
+  fclose(f);
+}
 
 #include "app_context.h"
 #include "config_manager.h"
@@ -872,6 +892,14 @@ int main(int argc, char *argv[]) {
     int seek_secs = ctx.seek_target_seconds;
     ctx.seek_target_seconds = -1;
     AudioPathConfig selected_path = ctx.config.audio_path;
+    if (selected_path == AudioPathConfig::OPUS_DIRECT) {
+      g_opus_playback_perf_start_ms = osGetTime();
+      g_opus_audio_started_logged = false;
+      append_opus_playback_perf_log("playback-request", 0);
+    } else {
+      g_opus_playback_perf_start_ms = 0;
+      g_opus_audio_started_logged = false;
+    }
 
     LightLock_Lock(&ctx.lock);
     ctx.pause_accumulated_ms = 0;
@@ -1032,6 +1060,8 @@ int main(int argc, char *argv[]) {
   };
 
   auto start_opus_poc_playback = [&](std::string &status_msg) {
+    g_opus_playback_perf_start_ms = 0;
+    g_opus_audio_started_logged = false;
     if (!opus_ready) {
       status_msg = "Opus init failed";
       return false;
@@ -2501,6 +2531,7 @@ int main(int argc, char *argv[]) {
 
     if (should_start_opus_decoder) {
       bool started = false;
+      append_opus_playback_perf_log("decoder-open-start", opus_buffer_size);
       if (g_stream_buffer_ptr) {
         if (opus_download_complete) {
           LightLock_Lock(&stream_lock);
@@ -2513,6 +2544,9 @@ int main(int argc, char *argv[]) {
                                                 &g_stream_download_complete);
         }
       }
+      append_opus_playback_perf_log(started ? "decoder-open-ok"
+                                            : "decoder-open-failed",
+                                    opus_buffer_size);
 
       LightLock_Lock(&ctx.lock);
       ctx.opus_pending_decode_start = false;
@@ -2605,6 +2639,16 @@ int main(int argc, char *argv[]) {
                    ? vorbis_player.has_started_playing()
                    : (use_aac_path_for_update ? aac_player.has_started_playing()
                                               : player.has_started_playing()));
+    if (use_opus_poc_for_update && has_started_playing &&
+        !g_opus_audio_started_logged) {
+      size_t logged_opus_buffer_size = 0;
+      LightLock_Lock(&stream_lock);
+      logged_opus_buffer_size =
+          g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
+      LightLock_Unlock(&stream_lock);
+      append_opus_playback_perf_log("audio-started", logged_opus_buffer_size);
+      g_opus_audio_started_logged = true;
+    }
     if (ctx.is_buffering && has_started_playing) {
       LightLock_Lock(&ctx.lock);
       ctx.is_buffering = false;
