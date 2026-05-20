@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import struct
-from typing import Iterator
+from typing import Iterable, Iterator
 
 
 ID_EBML = 0x1A45DFA3
@@ -60,6 +60,14 @@ class EbmlElement:
     data_end: int
 
 
+@dataclass(frozen=True)
+class _EbmlElementHeader:
+    element_id: int
+    header_start: int
+    data_start: int
+    data_end: int
+
+
 @dataclass
 class _TrackCandidate:
     track_number: int = 0
@@ -95,6 +103,45 @@ def _read_vint(data: bytes, offset: int, max_bytes: int,
     for index in range(1, width):
         value = (value << 8) | data[offset + index]
     return value, width
+
+
+def _try_read_vint(data: bytes, offset: int, max_bytes: int,
+                   mask_marker: bool) -> tuple[int, int] | None:
+    if offset >= len(data):
+        return None
+    first = data[offset]
+    mask = 0x80
+    width = 1
+    while width <= max_bytes and (first & mask) == 0:
+        mask >>= 1
+        width += 1
+    if width > max_bytes or mask == 0:
+        raise WebmOpusRemuxError("invalid EBML vint")
+    if offset + width > len(data):
+        return None
+
+    value = first if not mask_marker else first & (mask - 1)
+    for index in range(1, width):
+        value = (value << 8) | data[offset + index]
+    return value, width
+
+
+def _try_read_element_header(data: bytes,
+                             offset: int) -> _EbmlElementHeader | None:
+    element_id_with_len = _try_read_vint(
+        data, offset, MAX_EBML_ID_BYTES, False
+    )
+    if element_id_with_len is None:
+        return None
+    element_id, id_len = element_id_with_len
+    size_with_len = _try_read_vint(
+        data, offset + id_len, MAX_EBML_SIZE_BYTES, True
+    )
+    if size_with_len is None:
+        return None
+    size, size_len = size_with_len
+    data_start = offset + id_len + size_len
+    return _EbmlElementHeader(element_id, offset, data_start, data_start + size)
 
 
 def _iter_elements(data: bytes, start: int, end: int) -> Iterator[EbmlElement]:
@@ -413,3 +460,144 @@ def build_ogg_opus(track: WebmOpusTrack,
 
 def remux_webm_opus_to_ogg(data: bytes) -> bytes:
     return build_ogg_opus(extract_webm_opus(data))
+
+
+def iter_ogg_opus_pages_from_webm_chunks(
+    chunks: Iterable[bytes],
+    vendor: bytes = b"StreaMu",
+) -> Iterator[bytes]:
+    buffer = bytearray()
+    scan_offset = 0
+    segment_offset: int | None = None
+    cluster_child_offset: int | None = None
+    cluster_end: int | None = None
+    cluster_time_ms = 0
+    timecode_scale_ns = DEFAULT_TIMECODE_SCALE_NS
+    opus_track: _TrackCandidate | None = None
+    headers_emitted = False
+    granule_position = 0
+    sequence = 0
+    pending_packet: tuple[bytes, int] | None = None
+
+    def emit_headers() -> Iterator[bytes]:
+        nonlocal headers_emitted, sequence
+        if opus_track is None or headers_emitted:
+            return
+        yield _ogg_page(opus_track.codec_private, 0x02, 0, sequence)
+        sequence += 1
+        yield _ogg_page(_opus_tags(vendor), 0x00, 0, sequence)
+        sequence += 1
+        headers_emitted = True
+
+    def emit_packet(packet_data: bytes) -> Iterator[bytes]:
+        nonlocal granule_position, pending_packet, sequence
+        granule_position += opus_packet_duration_samples(packet_data)
+        if pending_packet is not None:
+            pending_data, pending_granule = pending_packet
+            yield _ogg_page(pending_data, 0x00, pending_granule, sequence)
+            sequence += 1
+        pending_packet = (packet_data, granule_position)
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buffer.extend(chunk)
+
+        while segment_offset is None:
+            header = _try_read_element_header(buffer, scan_offset)
+            if header is None:
+                break
+            if header.element_id == ID_SEGMENT:
+                segment_offset = header.data_start
+                break
+            if header.data_end > len(buffer):
+                break
+            scan_offset = header.data_end
+
+        while segment_offset is not None:
+            if cluster_child_offset is not None and cluster_end is not None:
+                child = _try_read_element_header(buffer, cluster_child_offset)
+                if child is None:
+                    break
+                if child.data_end > len(buffer):
+                    break
+
+                payload = buffer[child.data_start:child.data_end]
+                if child.element_id == ID_TIMESTAMP:
+                    cluster_time_ms = _read_uint(bytes(payload))
+                elif child.element_id == ID_SIMPLE_BLOCK:
+                    if opus_track is None:
+                        raise WebmOpusRemuxError("Cluster before Tracks")
+                    _rel_time, packet = _parse_simple_block(
+                        bytes(payload), opus_track.track_number
+                    )
+                    if not headers_emitted:
+                        for page in emit_headers():
+                            yield page
+                    for page in emit_packet(packet):
+                        yield page
+                elif child.element_id == ID_BLOCK_GROUP:
+                    if opus_track is None:
+                        raise WebmOpusRemuxError("Cluster before Tracks")
+                    _rel_time, packet, _discard_padding_ns = _parse_block_group(
+                        bytes(buffer),
+                        child.data_start,
+                        child.data_end,
+                        opus_track.track_number,
+                    )
+                    if not headers_emitted:
+                        for page in emit_headers():
+                            yield page
+                    for page in emit_packet(packet):
+                        yield page
+
+                cluster_child_offset = child.data_end
+                if cluster_child_offset >= cluster_end:
+                    segment_offset = cluster_end
+                    cluster_child_offset = None
+                    cluster_end = None
+                    cluster_time_ms = 0
+                continue
+
+            header = _try_read_element_header(buffer, segment_offset)
+            if header is None:
+                break
+
+            if header.element_id == ID_INFO:
+                if header.data_end > len(buffer):
+                    break
+                for child in _iter_elements(
+                    bytes(buffer), header.data_start, header.data_end
+                ):
+                    if child.element_id == ID_TIMECODE_SCALE:
+                        payload = buffer[child.data_start:child.data_end]
+                        timecode_scale_ns = _read_uint(bytes(payload))
+                segment_offset = header.data_end
+            elif header.element_id == ID_TRACKS:
+                if header.data_end > len(buffer):
+                    break
+                opus_track = _find_opus_track(
+                    bytes(buffer), header.data_start, header.data_end
+                )
+                for page in emit_headers():
+                    yield page
+                segment_offset = header.data_end
+            elif header.element_id == ID_CLUSTER:
+                cluster_child_offset = header.data_start
+                cluster_end = header.data_end
+            else:
+                if header.data_end > len(buffer):
+                    break
+                segment_offset = header.data_end
+
+    if segment_offset is None:
+        raise WebmOpusRemuxError("Segment not found")
+    if opus_track is None:
+        raise WebmOpusRemuxError("Opus track not found")
+    if not headers_emitted:
+        for page in emit_headers():
+            yield page
+    if pending_packet is not None:
+        pending_data, pending_granule = pending_packet
+        yield _ogg_page(pending_data, 0x04, pending_granule, sequence)
+    _ = timecode_scale_ns

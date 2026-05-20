@@ -54,8 +54,7 @@ public:
       out.dpad_speed = 5;
     if (out.language != "ja")
       out.language = "en";
-    out.audio_path = (audio_path == "mp3") ? AudioPathConfig::MP3_PROXY
-                                           : AudioPathConfig::AAC_DIRECT;
+    out.audio_path = parse_audio_path(audio_path);
     if (out.accent_saturation < 0.0f || out.accent_saturation > 1.0f)
       out.accent_saturation = 0.75f;
     if (out.accent_brightness < 0.0f || out.accent_brightness > 1.0f)
@@ -88,8 +87,7 @@ public:
     fprintf(f, "  \"server_ip\": \"%s\",\n", cfg.server_ip.c_str());
     fprintf(f, "  \"language\": \"%s\",\n", cfg.language.c_str());
     fprintf(f, "  \"audio_path\": \"%s\",\n",
-            cfg.audio_path == AudioPathConfig::AAC_DIRECT ? "aac_direct"
-                                                          : "mp3");
+            audio_path_to_string(cfg.audio_path));
     fprintf(f, "  \"accent_saturation\": %.2f,\n", cfg.accent_saturation);
     fprintf(f, "  \"accent_brightness\": %.2f\n", cfg.accent_brightness);
     fprintf(f, "}\n");
@@ -99,6 +97,26 @@ public:
   }
 
 private:
+  static AudioPathConfig parse_audio_path(const std::string &audio_path) {
+    if (audio_path == "mp3")
+      return AudioPathConfig::MP3_PROXY;
+    if (audio_path == "opus_direct")
+      return AudioPathConfig::OPUS_DIRECT;
+    return AudioPathConfig::AAC_DIRECT;
+  }
+
+  static const char *audio_path_to_string(AudioPathConfig audio_path) {
+    switch (audio_path) {
+    case AudioPathConfig::MP3_PROXY:
+      return "mp3";
+    case AudioPathConfig::OPUS_DIRECT:
+      return "opus_direct";
+    case AudioPathConfig::AAC_DIRECT:
+    default:
+      return "aac_direct";
+    }
+  }
+
   // Simple JSON string parser
   // Finds "key": "value" and returns the value
   static std::string parse_string(const std::string &json, const char *key,

@@ -1,4 +1,5 @@
 #pragma once
+#include "ui/theme.h"
 #include "ui/touch_state.h"
 #include "ui/ui_renderer.h"
 #include "ui/wallpaper.h"
@@ -17,6 +18,9 @@ struct AppContext : public RenderContext {
   std::string playing_title = "";
   // is_paused inherited from RenderContext (no shadowing)
   std::string current_stream_url = "";
+  AudioPathConfig active_audio_path = AudioPathConfig::AAC_DIRECT;
+  bool opus_pending_decode_start = false;
+  bool opus_fallback_attempted = false;
   LightLock lock; // Mutex for thread synchronization
   // touch_state inherited from RenderContext (no shadowing)
 

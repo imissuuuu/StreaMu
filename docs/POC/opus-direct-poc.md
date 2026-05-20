@@ -71,3 +71,10 @@ Expected preparation:
 1. Run the server.
 2. Save `/stream_opus_ogg?i=dQw4w9WgXcQ` as `sdmc:/3ds/StreaMu/opus_poc.opus`.
 3. Launch the app and press `L + R + X` on Home.
+
+## Promotion Notes
+
+- `Opus Direct` is being promoted from hidden PoC to a formal selectable Audio Path candidate.
+- Default audio path remains unchanged during the promotion step.
+- Initial promoted playback uses full Ogg Opus download before decoder open.
+- Seek is not supported for Opus in this phase; MP3 Proxy remains fallback.

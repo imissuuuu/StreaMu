@@ -29,6 +29,30 @@ enum SettingsItem {
   ITEM_SAVE = 13
 };
 
+static const char *audio_path_label(AudioPathConfig path) {
+  switch (path) {
+  case AudioPathConfig::MP3_PROXY:
+    return "MP3 Proxy";
+  case AudioPathConfig::OPUS_DIRECT:
+    return "Opus Direct";
+  case AudioPathConfig::AAC_DIRECT:
+  default:
+    return "AAC Direct";
+  }
+}
+
+static AudioPathConfig next_audio_path(AudioPathConfig path) {
+  switch (path) {
+  case AudioPathConfig::AAC_DIRECT:
+    return AudioPathConfig::OPUS_DIRECT;
+  case AudioPathConfig::OPUS_DIRECT:
+    return AudioPathConfig::MP3_PROXY;
+  case AudioPathConfig::MP3_PROXY:
+  default:
+    return AudioPathConfig::AAC_DIRECT;
+  }
+}
+
 SettingsScreen::SettingsScreen(ThemeColors &colors, Wallpaper *wallpaper)
     : m_colors(colors), m_wallpaper(wallpaper) {}
 
@@ -148,9 +172,7 @@ std::string SettingsScreen::get_item_value(int index) const {
   case ITEM_LANGUAGE:
     return editing_config_.language == "ja" ? "JA" : "EN";
   case ITEM_AUDIO_PATH:
-    return editing_config_.audio_path == AudioPathConfig::AAC_DIRECT
-               ? "AAC Direct"
-               : "MP3 Proxy";
+    return audio_path_label(editing_config_.audio_path);
   default:
     return "";
   }
@@ -186,8 +208,7 @@ std::string SettingsScreen::get_item_description(int index) const {
   case ITEM_LANGUAGE:
     return "Metadata language for search results.\nEN=English  JA=Japanese";
   case ITEM_AUDIO_PATH:
-    return "Select audio delivery path.\nAAC Direct is default; MP3 Proxy is "
-           "fallback.";
+    return "Select audio delivery path.\nOpus is FFmpegless; MP3 is fallback.";
   case ITEM_SAVE:
     return "Save settings to SD card and return\nto the home screen.";
   default:
@@ -611,9 +632,7 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
                     (editing_config_.language == "en") ? "ja" : "en";
               } else if (i == ITEM_AUDIO_PATH) {
                 editing_config_.audio_path =
-                    editing_config_.audio_path == AudioPathConfig::MP3_PROXY
-                        ? AudioPathConfig::AAC_DIRECT
-                        : AudioPathConfig::MP3_PROXY;
+                    next_audio_path(editing_config_.audio_path);
               }
             } else {
               // 1st tap: select
@@ -701,10 +720,7 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
           (editing_config_.language == "en") ? "ja" : "en";
       break;
     case ITEM_AUDIO_PATH:
-      editing_config_.audio_path =
-          editing_config_.audio_path == AudioPathConfig::MP3_PROXY
-              ? AudioPathConfig::AAC_DIRECT
-              : AudioPathConfig::MP3_PROXY;
+      editing_config_.audio_path = next_audio_path(editing_config_.audio_path);
       break;
     case ITEM_SERVER_IP: {
       std::string current = editing_config_.server_ip;

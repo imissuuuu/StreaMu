@@ -8,13 +8,16 @@ import time
 import urllib.request
 from pathlib import Path
 from datetime import datetime
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Iterator
 
 from aac_probe import AacFormatInfo, extract_aac_format
 from aac_transmux import Mp4AacTransmuxer, Mp4SidxReference, split_mp4_init_and_sidx
 from ffmpeg_bootstrap import get_app_dir, get_ffmpeg_path, ensure_ffmpeg, ensure_ytdlp
 from opus_probe import OpusFormatInfo, extract_opus_format
-from webm_opus_remux import WebmOpusRemuxError, remux_webm_opus_to_ogg
+from webm_opus_remux import (
+    WebmOpusRemuxError,
+    iter_ogg_opus_pages_from_webm_chunks,
+)
 
 BASE_DIR: Path = get_app_dir()
 FFMPEG_PATH: str = get_ffmpeg_path()
@@ -39,6 +42,9 @@ _aac_info_cache: dict[str, tuple[AacFormatInfo, float]] = {}
 _opus_info_cache: dict[str, tuple[OpusFormatInfo, float]] = {}
 URL_CACHE_TTL = 3600  # 1 hour
 MAX_OPUS_WEBM_BYTES = 64 * 1024 * 1024
+OPUS_THUMBNAIL_DELAY_BYTES = 16 * 1024
+OPUS_THUMBNAIL_DELAY_TIMEOUT_SEC = 3.0
+_opus_prebuffer_videos: set[str] = set()
 
 
 def add_log(msg: str) -> None:
@@ -726,7 +732,64 @@ async def stream_opus(request: Request) -> StreamingResponse | PlainTextResponse
     _opus_info_cache[v_id] = (info, time.time())
     return StreamingResponse(opus_webm_generator(v_id), media_type="audio/webm")
 
-async def stream_opus_ogg(request: Request) -> Response | PlainTextResponse:
+
+def _next_bytes_or_none(iterator: Iterator[bytes]) -> bytes | None:
+    try:
+        return next(iterator)
+    except StopIteration:
+        return None
+
+
+async def opus_ogg_generator(v_id: str) -> AsyncGenerator[bytes, None]:
+    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
+    if info is None:
+        add_log(f"Opus Ogg extraction failed: {v_id}")
+        return
+    if not info.direct_url:
+        add_log(f"Opus Ogg fragmented stream unsupported: {v_id}")
+        return
+
+    def webm_chunks() -> Iterator[bytes]:
+        req = urllib.request.Request(info.direct_url, headers=info.http_headers)
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            total = 0
+            while True:
+                chunk = resp.read(16384)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_OPUS_WEBM_BYTES:
+                    raise ValueError("response too large")
+                yield chunk
+
+    _opus_info_cache[v_id] = (info, time.time())
+    add_log(f"Opus Ogg stream started: {v_id} ({info.ext}/{info.acodec})")
+    _opus_prebuffer_videos.add(v_id)
+    sent_bytes = 0
+    page_iterator = iter_ogg_opus_pages_from_webm_chunks(webm_chunks())
+    try:
+        while True:
+            page = await asyncio.to_thread(_next_bytes_or_none, page_iterator)
+            if page is None:
+                break
+            sent_bytes += len(page)
+            yield page
+            if sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES:
+                _opus_prebuffer_videos.discard(v_id)
+    except asyncio.CancelledError:
+        add_log(f"Opus Ogg stream disconnected: {v_id}")
+        raise
+    except ValueError as e:
+        add_log(f"Opus Ogg stream rejected: {e}")
+    except (OSError, WebmOpusRemuxError) as e:
+        add_log(f"Opus Ogg stream failed: {e}")
+    else:
+        add_log(f"Opus Ogg stream finished: {v_id}")
+    finally:
+        _opus_prebuffer_videos.discard(v_id)
+
+
+async def stream_opus_ogg(request: Request) -> StreamingResponse | PlainTextResponse:
     v_id = request.query_params.get("i", "")
     if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
         add_log(f"Blocked invalid Opus Ogg stream ID: {v_id}")
@@ -738,26 +801,8 @@ async def stream_opus_ogg(request: Request) -> Response | PlainTextResponse:
     if not info.direct_url:
         return PlainTextResponse("Opus fragmented remux unsupported", status_code=501)
 
-    try:
-        webm_data = await asyncio.to_thread(
-            _fetch_url_bytes_limited,
-            info.direct_url,
-            info.http_headers,
-            MAX_OPUS_WEBM_BYTES,
-            120,
-        )
-        ogg_data = await asyncio.to_thread(remux_webm_opus_to_ogg, webm_data)
-    except ValueError as e:
-        add_log(f"Opus Ogg remux rejected: {e}")
-        status = 413 if "too large" in str(e) else 501
-        return PlainTextResponse("Opus remux unsupported", status_code=status)
-    except (OSError, WebmOpusRemuxError) as e:
-        add_log(f"Opus Ogg remux failed: {e}")
-        return PlainTextResponse("Opus remux failed", status_code=501)
-
     _opus_info_cache[v_id] = (info, time.time())
-    add_log(f"Opus Ogg remux served: {v_id} ({len(ogg_data)} bytes)")
-    return Response(content=ogg_data, media_type="audio/ogg")
+    return StreamingResponse(opus_ogg_generator(v_id), media_type="audio/ogg")
 
 async def thumbnail(request: Request) -> Response | PlainTextResponse:
     vid = request.query_params.get("id", "")
@@ -766,6 +811,10 @@ async def thumbnail(request: Request) -> Response | PlainTextResponse:
         return PlainTextResponse("Invalid video ID format", status_code=400)
 
     url = f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
+    if vid in _opus_prebuffer_videos:
+        deadline = time.monotonic() + OPUS_THUMBNAIL_DELAY_TIMEOUT_SEC
+        while vid in _opus_prebuffer_videos and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
 
     def fetch_image() -> bytes:
         with urllib.request.urlopen(url, timeout=8) as resp:

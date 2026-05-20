@@ -7,6 +7,7 @@
 
 extern std::unique_ptr<std::vector<uint8_t>> g_stream_buffer_ptr;
 extern LightLock stream_lock;
+extern bool g_stream_download_complete;
 bool YouTubeAPI::should_cancel = false;
 
 static int progress_callback(void *p, curl_off_t dltotal, curl_off_t dlnow,
@@ -42,27 +43,38 @@ void YouTubeAPI::cleanup() { curl_global_cleanup(); }
 bool YouTubeAPI::start_streaming(const std::string &url) {
   CURL *curl = curl_easy_init();
   bool success = false;
-  if (curl) {
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamingWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "3DS-YT");
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 8L);  // TCP connect timeout
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L); // 1 byte/s threshold
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME,
-                     60L); // No data for 60s → abort (seek needs extra time)
-
-    CURLcode res = curl_easy_perform(curl);
-    if (res == CURLE_OK && !should_cancel) {
-      success = true;
-    }
-    curl_easy_cleanup(curl);
+  if (!curl) {
+    LightLock_Lock(&stream_lock);
+    g_stream_download_complete = true;
+    LightLock_Unlock(&stream_lock);
+    return false;
   }
+  LightLock_Lock(&stream_lock);
+  g_stream_download_complete = false;
+  LightLock_Unlock(&stream_lock);
+
+  const bool is_opus_ogg = url.find("/stream_opus_ogg?") != std::string::npos;
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamingWriteCallback);
+  curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "3DS-YT");
+  curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 8L);  // TCP connect timeout
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L); // 1 byte/s threshold
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, is_opus_ogg ? 180L : 60L);
+
+  CURLcode res = curl_easy_perform(curl);
+  if (res == CURLE_OK && !should_cancel) {
+    success = true;
+  }
+  LightLock_Lock(&stream_lock);
+  g_stream_download_complete = true;
+  LightLock_Unlock(&stream_lock);
+  curl_easy_cleanup(curl);
   return success;
 }
 
@@ -115,6 +127,8 @@ void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
     url += "/stream_aac_adts?i=" + video_id;
     if (seek_seconds > 0)
       url += "&t=" + std::to_string(seek_seconds);
+  } else if (path == AudioPath::OpusDirect) {
+    url += "/stream_opus_ogg?i=" + video_id;
   } else {
     url += "/stream?i=" + video_id;
     if (seek_seconds > 0)
