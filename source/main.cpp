@@ -11,6 +11,7 @@
 
 #include "audio/aac_poc_player.h"
 #include "audio/mp3_player.h"
+#include "audio/opus_poc_player.h"
 #include "audio/vorbis_poc_player.h"
 #include "network/youtube_api.h"
 #include "playlist_manager.h"
@@ -42,6 +43,8 @@ std::unique_ptr<AacPocPlayer> g_aac_player_ptr;
 #define aac_player (*g_aac_player_ptr)
 std::unique_ptr<VorbisPocPlayer> g_vorbis_player_ptr;
 #define vorbis_player (*g_vorbis_player_ptr)
+std::unique_ptr<OpusPocPlayer> g_opus_player_ptr;
+#define opus_player (*g_opus_player_ptr)
 
 std::string url_encode(const std::string &value) {
   std::ostringstream escaped;
@@ -103,7 +106,12 @@ static constexpr const char *VORBIS_POC_PATHS[] = {
     "sdmc:/3ds/streamu/vorbis_poc.ogg",
     "sdmc:/vorbis_poc.ogg",
 };
-static constexpr long VORBIS_POC_MAX_BYTES = 64L * 1024L * 1024L;
+static constexpr const char *OPUS_POC_PATHS[] = {
+    "sdmc:/3ds/StreaMu/opus_poc.opus",
+    "sdmc:/3ds/streamu/opus_poc.opus",
+    "sdmc:/opus_poc.opus",
+};
+static constexpr long AUDIO_POC_MAX_BYTES = 64L * 1024L * 1024L;
 
 enum class FileLoadStatus {
   Ok,
@@ -125,7 +133,7 @@ static FileLoadStatus load_file_to_stream_buffer(const char *path) {
   FileLoadStatus status = FileLoadStatus::ReadError;
   if (fseek(f, 0, SEEK_END) == 0) {
     const long file_size = ftell(f);
-    if (file_size <= 0 || file_size > VORBIS_POC_MAX_BYTES) {
+    if (file_size <= 0 || file_size > AUDIO_POC_MAX_BYTES) {
       status = FileLoadStatus::BadSize;
     } else if (fseek(f, 0, SEEK_SET) == 0) {
       std::vector<uint8_t> data(static_cast<size_t>(file_size));
@@ -152,6 +160,24 @@ static FileLoadStatus load_vorbis_poc_to_stream_buffer(const char **used_path) {
     if (status == FileLoadStatus::Ok) {
       if (used_path) {
         *used_path = VORBIS_POC_PATHS[i];
+      }
+      return status;
+    }
+    if (status != FileLoadStatus::NotFound) {
+      last_status = status;
+    }
+  }
+  return last_status;
+}
+
+static FileLoadStatus load_opus_poc_to_stream_buffer(const char **used_path) {
+  FileLoadStatus last_status = FileLoadStatus::NotFound;
+  for (size_t i = 0; i < sizeof(OPUS_POC_PATHS) / sizeof(OPUS_POC_PATHS[0]);
+       i++) {
+    const FileLoadStatus status = load_file_to_stream_buffer(OPUS_POC_PATHS[i]);
+    if (status == FileLoadStatus::Ok) {
+      if (used_path) {
+        *used_path = OPUS_POC_PATHS[i];
       }
       return status;
     }
@@ -393,6 +419,7 @@ void download_thread(void *arg) {
           MP3Player::is_playing = false;
           AacPocPlayer::is_playing = false;
           VorbisPocPlayer::is_playing = false;
+          OpusPocPlayer::is_playing = false;
           ctx.playing_id = "";
         }
       }
@@ -486,6 +513,7 @@ int main(int argc, char *argv[]) {
   g_player_ptr = std::make_unique<MP3Player>();
   g_aac_player_ptr = std::make_unique<AacPocPlayer>();
   g_vorbis_player_ptr = std::make_unique<VorbisPocPlayer>();
+  g_opus_player_ptr = std::make_unique<OpusPocPlayer>();
   g_playlist_manager_ptr = std::make_unique<PlaylistManager>();
   g_stream_buffer_ptr = std::make_unique<std::vector<uint8_t>>();
 
@@ -529,6 +557,7 @@ int main(int argc, char *argv[]) {
     ctx.config.audio_path = AudioPathConfig::MP3_PROXY;
   }
   bool vorbis_ready = vorbis_player.init();
+  bool opus_ready = opus_player.init();
   ptmuInit();
   u32 *soc_buffer = (u32 *)memalign(0x1000, 0x100000);
   if (soc_buffer)
@@ -786,6 +815,7 @@ int main(int argc, char *argv[]) {
     player.stop(); // Stop audio playback and flush hardware buffers
     aac_player.stop();
     vorbis_player.stop();
+    opus_player.stop();
 
     LightLock_Lock(&stream_lock);
     if (g_stream_buffer_ptr)
@@ -830,6 +860,7 @@ int main(int argc, char *argv[]) {
     MP3Player::is_playing = !use_aac_path;
     AacPocPlayer::is_playing = use_aac_path;
     VorbisPocPlayer::is_playing = false;
+    OpusPocPlayer::is_playing = false;
     ctx.g_status_msg = "Buffering...";
     LightLock_Unlock(&ctx.lock);
 
@@ -848,6 +879,7 @@ int main(int argc, char *argv[]) {
             MP3Player::is_playing = false;
             AacPocPlayer::is_playing = false;
             VorbisPocPlayer::is_playing = false;
+            OpusPocPlayer::is_playing = false;
             ctx.seek_target_seconds = -1;
 
             // On error during playlist playback, auto-skip to next track.
@@ -891,6 +923,7 @@ int main(int argc, char *argv[]) {
     player.stop();
     aac_player.stop();
     vorbis_player.stop();
+    opus_player.stop();
 
     const char *used_path = NULL;
     const FileLoadStatus load_status =
@@ -925,9 +958,87 @@ int main(int argc, char *argv[]) {
     update_playing_title_lines(ui_mgr.get_text_buf());
     MP3Player::is_playing = false;
     AacPocPlayer::is_playing = false;
+    OpusPocPlayer::is_playing = false;
     VorbisPocPlayer::is_playing = true;
     LightLock_Unlock(&ctx.lock);
     status_msg = "Vorbis PoC";
+    return true;
+  };
+
+  auto start_opus_poc_playback = [&](std::string &status_msg) {
+    if (!opus_ready) {
+      status_msg = "Opus init failed";
+      return false;
+    }
+
+    YouTubeAPI::should_cancel = true;
+    bool still_dl;
+    do {
+      LightLock_Lock(&ctx.lock);
+      still_dl = ctx.is_downloading;
+      LightLock_Unlock(&ctx.lock);
+      if (still_dl) {
+        svcSleepThread(10 * 1000 * 1000);
+      }
+    } while (still_dl);
+
+    ctx.is_paused = false;
+    ndspChnSetPaused(0, false);
+    player.stop();
+    aac_player.stop();
+    vorbis_player.stop();
+    opus_player.stop();
+
+    const char *used_path = NULL;
+    const FileLoadStatus load_status =
+        load_opus_poc_to_stream_buffer(&used_path);
+    if (load_status != FileLoadStatus::Ok) {
+      YouTubeAPI::should_cancel = false;
+      if (load_status == FileLoadStatus::BadSize) {
+        status_msg = "Opus PoC file too large";
+      } else if (load_status == FileLoadStatus::ReadError) {
+        status_msg = "Opus PoC file read error";
+      } else {
+        status_msg = "Opus PoC file missing";
+      }
+      return false;
+    }
+
+    bool started = false;
+    LightLock_Lock(&stream_lock);
+    if (g_stream_buffer_ptr && !g_stream_buffer_ptr->empty()) {
+      started = opus_player.start(g_stream_buffer_ptr->data(),
+                                  g_stream_buffer_ptr->size());
+    }
+    LightLock_Unlock(&stream_lock);
+    if (!started) {
+      YouTubeAPI::should_cancel = false;
+      status_msg = "Opus decode failed";
+      return false;
+    }
+
+    YouTubeAPI::should_cancel = false;
+
+    LightLock_Lock(&ctx.lock);
+    ctx.pause_accumulated_ms = 0;
+    ctx.pause_started_at = 0;
+    ctx.is_buffering = false;
+    ctx.is_downloading = false;
+    ctx.playback_start_time = osGetTime();
+    ctx.playing_id = "opus_poc";
+    ctx.playing_title = "Opus PoC";
+    ctx.playing_duration = "?";
+    ctx.playing_meta = used_path ? used_path : "opus_poc.opus";
+    ctx.active_playlist_id = "";
+    ctx.current_track_idx = -1;
+    ctx.play_queue.clear();
+    update_playing_title_lines(ui_mgr.get_text_buf());
+    MP3Player::is_playing = false;
+    AacPocPlayer::is_playing = false;
+    VorbisPocPlayer::is_playing = false;
+    OpusPocPlayer::is_playing = true;
+    LightLock_Unlock(&ctx.lock);
+    status_msg = "Opus PoC";
     return true;
   };
 
@@ -940,8 +1051,11 @@ int main(int argc, char *argv[]) {
     bool should_auto_next = false;
 
     bool use_aac_path = ctx.config.audio_path == AudioPathConfig::AAC_DIRECT;
+    bool use_opus_poc = OpusPocPlayer::is_playing;
     bool use_vorbis_poc = VorbisPocPlayer::is_playing;
-    if (use_vorbis_poc) {
+    if (use_opus_poc) {
+      // Local Opus PoC has no network download phase.
+    } else if (use_vorbis_poc) {
       vorbis_player.set_downloading_status(false);
     } else if (use_aac_path) {
       aac_player.set_downloading_status(ctx.is_downloading);
@@ -950,15 +1064,17 @@ int main(int argc, char *argv[]) {
     }
 
     bool active_player_finished =
-        use_vorbis_poc
-            ? vorbis_player.is_track_finished()
-            : (use_aac_path
-                   ? (AacPocPlayer::is_playing && !ctx.is_downloading &&
-                      aac_player.is_track_finished())
-                   : (MP3Player::is_playing && !ctx.is_downloading &&
-                      player.is_track_finished()));
+        use_opus_poc
+            ? opus_player.is_track_finished()
+            : (use_vorbis_poc
+                   ? vorbis_player.is_track_finished()
+                   : (use_aac_path
+                          ? (AacPocPlayer::is_playing && !ctx.is_downloading &&
+                             aac_player.is_track_finished())
+                          : (MP3Player::is_playing && !ctx.is_downloading &&
+                             player.is_track_finished())));
     if (active_player_finished) {
-      if (!ctx.play_queue.empty()) {
+      if (!use_opus_poc && !ctx.play_queue.empty()) {
         // Auto-advance: loop when reaching the end (per user request)
         should_auto_next = true;
       } else {
@@ -966,6 +1082,7 @@ int main(int argc, char *argv[]) {
         MP3Player::is_playing = false;
         AacPocPlayer::is_playing = false;
         VorbisPocPlayer::is_playing = false;
+        OpusPocPlayer::is_playing = false;
         ctx.g_status_msg = "";
         ctx.playing_id = "";
         ctx.current_track_idx = -1;
@@ -989,6 +1106,7 @@ int main(int argc, char *argv[]) {
             MP3Player::is_playing = false;
             AacPocPlayer::is_playing = false;
             VorbisPocPlayer::is_playing = false;
+            OpusPocPlayer::is_playing = false;
             ctx.playing_id = "";
             LightLock_Unlock(&ctx.lock);
           }
@@ -996,6 +1114,7 @@ int main(int argc, char *argv[]) {
           MP3Player::is_playing = false;
           AacPocPlayer::is_playing = false;
           VorbisPocPlayer::is_playing = false;
+          OpusPocPlayer::is_playing = false;
           ctx.playing_id = "";
           LightLock_Unlock(&ctx.lock);
         }
@@ -1010,6 +1129,7 @@ int main(int argc, char *argv[]) {
             MP3Player::is_playing = false;
             AacPocPlayer::is_playing = false;
             VorbisPocPlayer::is_playing = false;
+            OpusPocPlayer::is_playing = false;
             ctx.g_status_msg = "";
             ctx.playing_id = "";
             ctx.current_track_idx = -1;
@@ -1025,6 +1145,7 @@ int main(int argc, char *argv[]) {
             MP3Player::is_playing = false;
             AacPocPlayer::is_playing = false;
             VorbisPocPlayer::is_playing = false;
+            OpusPocPlayer::is_playing = false;
             LightLock_Unlock(&ctx.lock);
           } else {
             Track next_track = ctx.playing_tracks[next_idx];
@@ -1049,6 +1170,16 @@ int main(int argc, char *argv[]) {
       ctx.g_status_msg = status_msg;
       LightLock_Unlock(&ctx.lock);
       kDown &= ~KEY_Y;
+    }
+
+    if (ctx.current_state == STATE_HOME && (kDown & KEY_X) && (kHeld & KEY_L) &&
+        (kHeld & KEY_R)) {
+      std::string status_msg;
+      start_opus_poc_playback(status_msg);
+      LightLock_Lock(&ctx.lock);
+      ctx.g_status_msg = status_msg;
+      LightLock_Unlock(&ctx.lock);
+      kDown &= ~KEY_X;
     }
 
     // D-pad held repeat (respects sensitivity setting)
@@ -1966,6 +2097,7 @@ int main(int argc, char *argv[]) {
               MP3Player::is_playing = false;
               AacPocPlayer::is_playing = false;
               VorbisPocPlayer::is_playing = false;
+              OpusPocPlayer::is_playing = false;
             }
           } else {
             // Remove from PlaylistDetailScreen (existing logic)
@@ -2202,6 +2334,7 @@ int main(int argc, char *argv[]) {
         player.stop();
         aac_player.stop();
         vorbis_player.stop();
+        opus_player.stop();
         if (g_stream_buffer_ptr)
           g_stream_buffer_ptr->clear();
         YouTubeAPI::should_cancel = false;
@@ -2269,7 +2402,10 @@ int main(int argc, char *argv[]) {
     bool use_aac_path_for_update =
         ctx.config.audio_path == AudioPathConfig::AAC_DIRECT;
     const bool use_vorbis_poc_for_update = VorbisPocPlayer::is_playing;
-    if (use_vorbis_poc_for_update) {
+    const bool use_opus_poc_for_update = OpusPocPlayer::is_playing;
+    if (use_opus_poc_for_update) {
+      opus_player.update();
+    } else if (use_vorbis_poc_for_update) {
       vorbis_player.update();
     } else if (use_aac_path_for_update) {
       aac_player.update();
@@ -2279,10 +2415,12 @@ int main(int argc, char *argv[]) {
 
     // Clear buffering flag once audio actually starts playing
     bool has_started_playing =
-        use_vorbis_poc_for_update
-            ? vorbis_player.has_started_playing()
-            : (use_aac_path_for_update ? aac_player.has_started_playing()
-                                       : player.has_started_playing());
+        use_opus_poc_for_update
+            ? opus_player.has_started_playing()
+            : (use_vorbis_poc_for_update
+                   ? vorbis_player.has_started_playing()
+                   : (use_aac_path_for_update ? aac_player.has_started_playing()
+                                              : player.has_started_playing()));
     if (ctx.is_buffering && has_started_playing) {
       LightLock_Lock(&ctx.lock);
       ctx.is_buffering = false;
@@ -2298,10 +2436,12 @@ int main(int argc, char *argv[]) {
     LightLock_Unlock(&stream_lock);
 
     bool active_is_playing =
-        use_vorbis_poc_for_update
-            ? VorbisPocPlayer::is_playing
-            : (use_aac_path_for_update ? AacPocPlayer::is_playing
-                                       : MP3Player::is_playing);
+        use_opus_poc_for_update
+            ? OpusPocPlayer::is_playing
+            : (use_vorbis_poc_for_update
+                   ? VorbisPocPlayer::is_playing
+                   : (use_aac_path_for_update ? AacPocPlayer::is_playing
+                                              : MP3Player::is_playing));
     if (active_is_playing && sb_size > 50000 && !ctx.is_paused) {
       LightLock_Lock(&ctx.lock);
       ctx.g_status_msg = "Playing";
@@ -2371,6 +2511,7 @@ int main(int argc, char *argv[]) {
   player.stop();
   aac_player.stop();
   vorbis_player.stop();
+  opus_player.stop();
 
   // 3. Clean up network library before socExit
   api.cleanup();
@@ -2385,6 +2526,7 @@ int main(int argc, char *argv[]) {
   g_player_ptr.reset();
   g_aac_player_ptr.reset();
   g_vorbis_player_ptr.reset();
+  g_opus_player_ptr.reset();
   g_playlist_manager_ptr.reset();
   // Wait for thumbnail thread to finish (if running)
   {

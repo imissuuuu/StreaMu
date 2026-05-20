@@ -13,6 +13,8 @@ from typing import Any, AsyncGenerator
 from aac_probe import AacFormatInfo, extract_aac_format
 from aac_transmux import Mp4AacTransmuxer, Mp4SidxReference, split_mp4_init_and_sidx
 from ffmpeg_bootstrap import get_app_dir, get_ffmpeg_path, ensure_ffmpeg, ensure_ytdlp
+from opus_probe import OpusFormatInfo, extract_opus_format
+from webm_opus_remux import WebmOpusRemuxError, remux_webm_opus_to_ogg
 
 BASE_DIR: Path = get_app_dir()
 FFMPEG_PATH: str = get_ffmpeg_path()
@@ -34,7 +36,9 @@ app_logs: collections.deque[str] = collections.deque(maxlen=MAX_LOGS)
 # value: (direct_url, fragments, http_headers, timestamp)
 _url_cache: dict[str, tuple[str, list[dict], dict[str, str], float]] = {}
 _aac_info_cache: dict[str, tuple[AacFormatInfo, float]] = {}
+_opus_info_cache: dict[str, tuple[OpusFormatInfo, float]] = {}
 URL_CACHE_TTL = 3600  # 1 hour
+MAX_OPUS_WEBM_BYTES = 64 * 1024 * 1024
 
 
 def add_log(msg: str) -> None:
@@ -453,6 +457,26 @@ async def aac_info(request: Request) -> JSONResponse | PlainTextResponse:
     add_log(f"AAC info cached: {v_id} (ext={info.ext} acodec={info.acodec})")
     return JSONResponse(info.to_json_dict())
 
+async def opus_info(request: Request) -> JSONResponse | PlainTextResponse:
+    v_id = request.query_params.get("i", "")
+    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+        add_log(f"Blocked invalid Opus info ID: {v_id}")
+        return PlainTextResponse("Invalid video ID format", status_code=400)
+
+    cached = _opus_info_cache.get(v_id)
+    if cached and time.time() - cached[1] < URL_CACHE_TTL:
+        add_log(f"Opus info cache hit: {v_id}")
+        return JSONResponse(cached[0].to_json_dict())
+
+    info = await asyncio.to_thread(extract_opus_format, v_id)
+    if info is None:
+        add_log(f"Opus extraction failed: {v_id}")
+        return PlainTextResponse("Opus extraction failed", status_code=502)
+
+    _opus_info_cache[v_id] = (info, time.time())
+    add_log(f"Opus info cached: {v_id} (ext={info.ext} acodec={info.acodec})")
+    return JSONResponse(info.to_json_dict())
+
 def _get_cached_or_extract_aac_info(v_id: str) -> AacFormatInfo | None:
     cached = _aac_info_cache.get(v_id)
     if cached and time.time() - cached[1] < URL_CACHE_TTL:
@@ -461,6 +485,17 @@ def _get_cached_or_extract_aac_info(v_id: str) -> AacFormatInfo | None:
     if info is None:
         return None
     _aac_info_cache[v_id] = (info, time.time())
+    return info
+
+
+def _get_cached_or_extract_opus_info(v_id: str) -> OpusFormatInfo | None:
+    cached = _opus_info_cache.get(v_id)
+    if cached and time.time() - cached[1] < URL_CACHE_TTL:
+        return cached[0]
+    info = extract_opus_format(v_id)
+    if info is None:
+        return None
+    _opus_info_cache[v_id] = (info, time.time())
     return info
 
 
@@ -506,6 +541,24 @@ def _fetch_url_bytes(fetch_url: str, headers: dict[str, str],
     req = urllib.request.Request(fetch_url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+def _fetch_url_bytes_limited(fetch_url: str, headers: dict[str, str],
+                             max_bytes: int,
+                             timeout: int = 60) -> bytes:
+    req = urllib.request.Request(fetch_url, headers=headers)
+    chunks: list[bytes] = []
+    total = 0
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("response too large")
+            chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _fetch_url_range(fetch_url: str, headers: dict[str, str], start: int,
@@ -636,6 +689,76 @@ async def stream_aac_adts(request: Request) -> StreamingResponse | PlainTextResp
     _aac_info_cache[v_id] = (info, time.time())
     return StreamingResponse(aac_adts_generator(v_id, t), media_type="audio/aac")
 
+async def opus_webm_generator(v_id: str) -> AsyncGenerator[bytes, None]:
+    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
+    if info is None:
+        add_log(f"Opus WebM extraction failed: {v_id}")
+        return
+    if not info.direct_url:
+        add_log(f"Opus WebM fragmented stream unsupported: {v_id}")
+        return
+
+    add_log(f"Opus WebM stream started: {v_id} ({info.ext}/{info.acodec})")
+    try:
+        req = urllib.request.Request(info.direct_url, headers=info.http_headers)
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            while True:
+                chunk = resp.read(32768)
+                if not chunk:
+                    break
+                yield chunk
+    except asyncio.CancelledError:
+        add_log(f"Opus WebM stream disconnected: {v_id}")
+    except OSError as e:
+        add_log(f"Opus WebM stream error: {e}")
+
+async def stream_opus(request: Request) -> StreamingResponse | PlainTextResponse:
+    v_id = request.query_params.get("i", "")
+    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+        add_log(f"Blocked invalid Opus stream ID: {v_id}")
+        return PlainTextResponse("Invalid video ID format", status_code=400)
+
+    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
+    if info is None:
+        return PlainTextResponse("Opus extraction failed", status_code=502)
+    if not info.direct_url:
+        return PlainTextResponse("Opus fragmented stream unsupported", status_code=501)
+    _opus_info_cache[v_id] = (info, time.time())
+    return StreamingResponse(opus_webm_generator(v_id), media_type="audio/webm")
+
+async def stream_opus_ogg(request: Request) -> Response | PlainTextResponse:
+    v_id = request.query_params.get("i", "")
+    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+        add_log(f"Blocked invalid Opus Ogg stream ID: {v_id}")
+        return PlainTextResponse("Invalid video ID format", status_code=400)
+
+    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
+    if info is None:
+        return PlainTextResponse("Opus extraction failed", status_code=502)
+    if not info.direct_url:
+        return PlainTextResponse("Opus fragmented remux unsupported", status_code=501)
+
+    try:
+        webm_data = await asyncio.to_thread(
+            _fetch_url_bytes_limited,
+            info.direct_url,
+            info.http_headers,
+            MAX_OPUS_WEBM_BYTES,
+            120,
+        )
+        ogg_data = await asyncio.to_thread(remux_webm_opus_to_ogg, webm_data)
+    except ValueError as e:
+        add_log(f"Opus Ogg remux rejected: {e}")
+        status = 413 if "too large" in str(e) else 501
+        return PlainTextResponse("Opus remux unsupported", status_code=status)
+    except (OSError, WebmOpusRemuxError) as e:
+        add_log(f"Opus Ogg remux failed: {e}")
+        return PlainTextResponse("Opus remux failed", status_code=501)
+
+    _opus_info_cache[v_id] = (info, time.time())
+    add_log(f"Opus Ogg remux served: {v_id} ({len(ogg_data)} bytes)")
+    return Response(content=ogg_data, media_type="audio/ogg")
+
 async def thumbnail(request: Request) -> Response | PlainTextResponse:
     vid = request.query_params.get("id", "")
     if not vid or not re.match(r'^[a-zA-Z0-9_\-]{11}$', vid):
@@ -759,6 +882,9 @@ routes = [
     Route("/stream", stream),
     Route("/stream_aac_adts", stream_aac_adts),
     Route("/api/aac-info", aac_info),
+    Route("/api/opus-info", opus_info),
+    Route("/stream_opus", stream_opus),
+    Route("/stream_opus_ogg", stream_opus_ogg),
     Route("/thumbnail", thumbnail),
     Route("/api/logs", get_logs),
     Route("/", dashboard)

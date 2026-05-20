@@ -29,7 +29,9 @@ PORTLIBS      := $(DEVKITPRO)/portlibs/3ds
 PKG_CONFIG := $(PORTLIBS)/bin/arm-none-eabi-pkg-config
 VORBIS_CFLAGS := $(shell $(PKG_CONFIG) vorbisidec --cflags 2>/dev/null)
 VORBIS_LIBS   := $(shell $(PKG_CONFIG) vorbisidec --libs 2>/dev/null)
-LIBS    := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz $(VORBIS_LIBS) -lctru -lm
+OPUS_CFLAGS   := $(shell $(PKG_CONFIG) opusfile --cflags 2>/dev/null)
+OPUS_LIBS     := $(shell $(PKG_CONFIG) opusfile --libs 2>/dev/null)
+LIBS    := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz $(VORBIS_LIBS) $(OPUS_LIBS) -lctru -lm
 
 ARCH    := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CFLAGS  := -g -Wall -O2 -mword-relocations -fomit-frame-pointer -ffunction-sections $(ARCH) -DARM11 -D__3DS__ -DAPP_VERSION='"v$(VERSION)"'
@@ -40,7 +42,8 @@ LIBDIRS := -L$(DEVKITPRO_LIB) -L$(PORTLIBS)/lib
 INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
            -I$(DEVKITPRO_INC) \
            -I$(PORTLIBS)/include \
-           $(VORBIS_CFLAGS)
+           $(VORBIS_CFLAGS) \
+           $(OPUS_CFLAGS)
 
 # ソースファイルの探索
 CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))

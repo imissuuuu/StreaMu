@@ -1,0 +1,139 @@
+#include "opus_poc_player.h"
+
+#include <3ds.h>
+#include <malloc.h>
+#include <string.h>
+
+bool OpusPocPlayer::is_playing = false;
+
+static constexpr size_t OPUS_PCM_CAPACITY_SAMPLES = 8192;
+static constexpr int OPUS_WAVE_BUF_COUNT = 8;
+
+OpusPocPlayer::OpusPocPlayer()
+    : audioBuffer(NULL), decode_failed_(false) {
+  memset(waveBuf, 0, sizeof(waveBuf));
+}
+
+bool OpusPocPlayer::init() {
+  decoder_.reset();
+  decode_failed_ = false;
+  audioBuffer =
+      (int16_t *)linearAlloc(OPUS_PCM_CAPACITY_SAMPLES *
+                             OPUS_WAVE_BUF_COUNT * sizeof(int16_t));
+  if (!audioBuffer) {
+    return false;
+  }
+
+  ndspChnReset(0);
+  ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+  ndspChnSetInterp(0, NDSP_INTERP_POLYPHASE);
+  memset(waveBuf, 0, sizeof(waveBuf));
+  for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
+    waveBuf[i].data_vaddr = audioBuffer + (OPUS_PCM_CAPACITY_SAMPLES * i);
+    waveBuf[i].status = NDSP_WBUF_FREE;
+  }
+  return true;
+}
+
+bool OpusPocPlayer::start(const uint8_t *data, size_t size) {
+  stop();
+  decode_failed_ = false;
+  if (!audioBuffer || !decoder_.open(data, size)) {
+    decode_failed_ = true;
+    return false;
+  }
+  is_playing = true;
+  return true;
+}
+
+void OpusPocPlayer::update() {
+  if (!is_playing || !audioBuffer || !decoder_.is_open()) {
+    return;
+  }
+
+  for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
+    if (waveBuf[i].status == NDSP_WBUF_DONE ||
+        waveBuf[i].status == NDSP_WBUF_FREE) {
+      OpusDecodeResult decoded =
+          decoder_.decode((int16_t *)waveBuf[i].data_vaddr,
+                          OPUS_PCM_CAPACITY_SAMPLES);
+      if (decoded.ok) {
+        u16 format = (decoded.channels == 2) ? NDSP_FORMAT_STEREO_PCM16
+                                             : NDSP_FORMAT_MONO_PCM16;
+        ndspChnSetFormat(0, format);
+        ndspChnSetRate(0, decoded.sample_rate);
+        waveBuf[i].nsamples = decoded.samples_per_channel;
+        DSP_FlushDataCache(waveBuf[i].data_vaddr,
+                           decoded.samples_per_channel * decoded.channels *
+                               sizeof(int16_t));
+        ndspChnWaveBufAdd(0, &waveBuf[i]);
+      } else if (decoded.eof) {
+        break;
+      } else {
+        decode_failed_ = true;
+        break;
+      }
+    }
+  }
+}
+
+bool OpusPocPlayer::is_track_finished() const {
+  if (!is_playing) {
+    return false;
+  }
+  if (!decoder_.is_eof() && !decode_failed_) {
+    return false;
+  }
+
+  int finished_count = 0;
+  for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
+    if (waveBuf[i].status == NDSP_WBUF_FREE ||
+        waveBuf[i].status == NDSP_WBUF_DONE) {
+      finished_count++;
+    }
+  }
+  return finished_count == OPUS_WAVE_BUF_COUNT;
+}
+
+void OpusPocPlayer::stop() {
+  is_playing = false;
+  ndspChnReset(0);
+  ndspChnWaveBufClear(0);
+
+  memset(waveBuf, 0, sizeof(waveBuf));
+  if (audioBuffer) {
+    for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
+      waveBuf[i].data_vaddr = audioBuffer + (OPUS_PCM_CAPACITY_SAMPLES * i);
+      waveBuf[i].status = NDSP_WBUF_FREE;
+    }
+    DSP_FlushDataCache(audioBuffer, OPUS_PCM_CAPACITY_SAMPLES *
+                                        OPUS_WAVE_BUF_COUNT * sizeof(int16_t));
+  }
+
+  decoder_.reset();
+}
+
+OpusPocPlayer::~OpusPocPlayer() {
+  stop();
+  if (audioBuffer) {
+    linearFree(audioBuffer);
+    audioBuffer = NULL;
+  }
+}
+
+bool OpusPocPlayer::has_started_playing() const {
+  if (!is_playing) {
+    return false;
+  }
+  for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
+    if (waveBuf[i].status == NDSP_WBUF_QUEUED ||
+        waveBuf[i].status == NDSP_WBUF_PLAYING) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool OpusPocPlayer::has_decode_failed() const {
+  return decode_failed_ || decoder_.has_failed();
+}
