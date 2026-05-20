@@ -104,16 +104,25 @@ StreamDecodeResult VorbisStreamDecoder::decode(const uint8_t *data, size_t size,
                                 ? static_cast<size_t>(0x7fffffff)
                                 : max_bytes;
   int bitstream = 0;
-  const int decoded_bytes = ov_read(&file_, reinterpret_cast<char *>(pcm_out),
-                                    static_cast<int>(read_bytes), &bitstream);
+  size_t total_decoded_bytes = 0;
+  while (total_decoded_bytes < read_bytes) {
+    const size_t remaining_bytes = read_bytes - total_decoded_bytes;
+    const int decoded_bytes =
+        ov_read(&file_, reinterpret_cast<char *>(pcm_out) + total_decoded_bytes,
+                static_cast<int>(remaining_bytes), &bitstream);
+    if (decoded_bytes <= 0) {
+      break;
+    }
+    total_decoded_bytes += static_cast<size_t>(decoded_bytes);
+  }
 
   result.bytes_consumed = stream_.offset;
-  if (decoded_bytes <= 0) {
+  if (total_decoded_bytes == 0) {
     return result;
   }
 
   const int channels = info->channels;
-  const int samples = decoded_bytes / static_cast<int>(sizeof(int16_t));
+  const int samples = static_cast<int>(total_decoded_bytes / sizeof(int16_t));
   if (samples <= 0 || (samples % channels) != 0) {
     return result;
   }
