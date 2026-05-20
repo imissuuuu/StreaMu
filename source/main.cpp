@@ -872,11 +872,6 @@ int main(int argc, char *argv[]) {
     int seek_secs = ctx.seek_target_seconds;
     ctx.seek_target_seconds = -1;
     AudioPathConfig selected_path = ctx.config.audio_path;
-    bool opus_seek_unsupported = false;
-    if (selected_path == AudioPathConfig::OPUS_DIRECT && seek_secs > 0) {
-      seek_secs = 0;
-      opus_seek_unsupported = true;
-    }
 
     LightLock_Lock(&ctx.lock);
     ctx.pause_accumulated_ms = 0;
@@ -914,8 +909,7 @@ int main(int argc, char *argv[]) {
     AacPocPlayer::is_playing = selected_path == AudioPathConfig::AAC_DIRECT;
     VorbisPocPlayer::is_playing = false;
     OpusPocPlayer::is_playing = selected_path == AudioPathConfig::OPUS_DIRECT;
-    ctx.g_status_msg =
-        opus_seek_unsupported ? "Opus seek unsupported" : "Buffering...";
+    ctx.g_status_msg = "Buffering...";
     LightLock_Unlock(&ctx.lock);
 
     AudioPath audio_path = to_network_audio_path(selected_path);

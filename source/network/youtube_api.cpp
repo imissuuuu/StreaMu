@@ -129,6 +129,8 @@ void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
       url += "&t=" + std::to_string(seek_seconds);
   } else if (path == AudioPath::OpusDirect) {
     url += "/stream_opus_ogg?i=" + video_id;
+    if (seek_seconds > 0)
+      url += "&t=" + std::to_string(seek_seconds);
   } else {
     url += "/stream?i=" + video_id;
     if (seek_seconds > 0)

@@ -465,6 +465,7 @@ def remux_webm_opus_to_ogg(data: bytes) -> bytes:
 def iter_ogg_opus_pages_from_webm_chunks(
     chunks: Iterable[bytes],
     vendor: bytes = b"StreaMu",
+    seek_start_ms: int = 0,
 ) -> Iterator[bytes]:
     buffer = bytearray()
     scan_offset = 0
@@ -498,6 +499,14 @@ def iter_ogg_opus_pages_from_webm_chunks(
             sequence += 1
         pending_packet = (packet_data, granule_position)
 
+    def should_emit_packet(packet_time_ms: int) -> bool:
+        if seek_start_ms <= 0:
+            return True
+        if opus_track is None:
+            return False
+        pre_roll_ms = max(0, opus_track.seek_pre_roll_ns // 1_000_000)
+        return packet_time_ms >= max(0, seek_start_ms - pre_roll_ms)
+
     for chunk in chunks:
         if not chunk:
             continue
@@ -528,9 +537,18 @@ def iter_ogg_opus_pages_from_webm_chunks(
                 elif child.element_id == ID_SIMPLE_BLOCK:
                     if opus_track is None:
                         raise WebmOpusRemuxError("Cluster before Tracks")
-                    _rel_time, packet = _parse_simple_block(
+                    rel_time, packet = _parse_simple_block(
                         bytes(payload), opus_track.track_number
                     )
+                    packet_time_ms = cluster_time_ms + rel_time
+                    if not should_emit_packet(packet_time_ms):
+                        cluster_child_offset = child.data_end
+                        if cluster_child_offset >= cluster_end:
+                            segment_offset = cluster_end
+                            cluster_child_offset = None
+                            cluster_end = None
+                            cluster_time_ms = 0
+                        continue
                     if not headers_emitted:
                         for page in emit_headers():
                             yield page
@@ -539,12 +557,21 @@ def iter_ogg_opus_pages_from_webm_chunks(
                 elif child.element_id == ID_BLOCK_GROUP:
                     if opus_track is None:
                         raise WebmOpusRemuxError("Cluster before Tracks")
-                    _rel_time, packet, _discard_padding_ns = _parse_block_group(
+                    rel_time, packet, _discard_padding_ns = _parse_block_group(
                         bytes(buffer),
                         child.data_start,
                         child.data_end,
                         opus_track.track_number,
                     )
+                    packet_time_ms = cluster_time_ms + rel_time
+                    if not should_emit_packet(packet_time_ms):
+                        cluster_child_offset = child.data_end
+                        if cluster_child_offset >= cluster_end:
+                            segment_offset = cluster_end
+                            cluster_child_offset = None
+                            cluster_end = None
+                            cluster_time_ms = 0
+                        continue
                     if not headers_emitted:
                         for page in emit_headers():
                             yield page

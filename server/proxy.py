@@ -5,6 +5,7 @@ import re
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from datetime import datetime
@@ -44,6 +45,10 @@ URL_CACHE_TTL = 3600  # 1 hour
 MAX_OPUS_WEBM_BYTES = 64 * 1024 * 1024
 OPUS_THUMBNAIL_DELAY_BYTES = 16 * 1024
 OPUS_THUMBNAIL_DELAY_TIMEOUT_SEC = 3.0
+OPUS_SEEK_PREROLL_SECONDS = 15
+OPUS_SEEK_RANGE_BACKTRACK_BYTES = 1024 * 1024
+OPUS_SEEK_CLUSTER_SCAN_BYTES = 1024 * 1024
+WEBM_CLUSTER_ID = b"\x1f\x43\xb6\x75"
 _opus_prebuffer_videos: set[str] = set()
 
 
@@ -536,6 +541,39 @@ def _fragment_start_index(fragments: list[dict[str, Any]],
     return max(0, len(fragments) - 1), cumulative
 
 
+def _fragment_duration_seconds(fragment: dict[str, Any]) -> float:
+    duration = fragment.get("duration", 0) or 0
+    try:
+        return float(duration)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fragment_url(base_url: str, fragment: dict[str, Any]) -> str:
+    fragment_url = str(fragment.get("url") or "")
+    if fragment_url.startswith("http://") or fragment_url.startswith("https://"):
+        return fragment_url
+    return urllib.parse.urljoin(base_url, fragment_url)
+
+
+def _webm_header_prefix(data: bytes) -> bytes:
+    cluster_offset = data.find(WEBM_CLUSTER_ID)
+    if cluster_offset <= 0:
+        return data
+    return data[:cluster_offset]
+
+
+def _opus_seek_range_start(info: OpusFormatInfo,
+                           seek_seconds: int) -> int | None:
+    if seek_seconds <= 0 or not info.filesize or not info.duration:
+        return None
+    if info.filesize <= 0 or info.duration <= 0:
+        return None
+    start_seconds = max(0.0, float(seek_seconds - OPUS_SEEK_PREROLL_SECONDS))
+    estimated = int((start_seconds / info.duration) * info.filesize)
+    return max(0, estimated - OPUS_SEEK_RANGE_BACKTRACK_BYTES)
+
+
 def _aac_init_fragment_url(first_fragment_url: str) -> str:
     init_url = re.sub(r"([?&])sq=\d+", r"\1sq=0", first_fragment_url)
     init_url = re.sub(r"/sq/\d+", "/sq/0", init_url)
@@ -740,7 +778,7 @@ def _next_bytes_or_none(iterator: Iterator[bytes]) -> bytes | None:
         return None
 
 
-async def opus_ogg_generator(v_id: str) -> AsyncGenerator[bytes, None]:
+async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator[bytes, None]:
     info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
     if info is None:
         add_log(f"Opus Ogg extraction failed: {v_id}")
@@ -750,23 +788,98 @@ async def opus_ogg_generator(v_id: str) -> AsyncGenerator[bytes, None]:
         return
 
     def webm_chunks() -> Iterator[bytes]:
-        req = urllib.request.Request(info.direct_url, headers=info.http_headers)
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            total = 0
-            while True:
-                chunk = resp.read(16384)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_OPUS_WEBM_BYTES:
-                    raise ValueError("response too large")
-                yield chunk
+        total = 0
+
+        def read_url(fetch_url: str) -> Iterator[bytes]:
+            nonlocal total
+            req = urllib.request.Request(fetch_url, headers=info.http_headers)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                while True:
+                    chunk = resp.read(16384)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_OPUS_WEBM_BYTES:
+                        raise ValueError("response too large")
+                    yield chunk
+
+        if info.fragments:
+            init_fragments = [
+                fragment for fragment in info.fragments
+                if _fragment_duration_seconds(fragment) <= 0.0
+            ]
+            media_fragments = [
+                fragment for fragment in info.fragments
+                if _fragment_duration_seconds(fragment) > 0.0
+            ]
+            if seek_seconds > 0 and not init_fragments:
+                start_idx, fragment_seconds = 0, 0.0
+                add_log("Opus Ogg seek: no init fragment; streaming from first fragment")
+            else:
+                start_idx, fragment_seconds = _fragment_start_index(
+                    media_fragments, seek_seconds
+                )
+            add_log(
+                f"Opus Ogg seek info: start_idx={start_idx} "
+                f"fragment_time={fragment_seconds:.1f}s"
+            )
+            for fragment in init_fragments:
+                yield from read_url(_fragment_url(info.direct_url, fragment))
+            for fragment in media_fragments[start_idx:]:
+                yield from read_url(_fragment_url(info.direct_url, fragment))
+            return
+
+        range_start = _opus_seek_range_start(info, seek_seconds)
+        if range_start is not None:
+            try:
+                header = _fetch_url_range(
+                    info.direct_url, info.http_headers, 0, (512 * 1024) - 1
+                )
+                header_prefix = _webm_header_prefix(header)
+                range_headers = dict(info.http_headers)
+                range_headers["Range"] = f"bytes={range_start}-"
+                req = urllib.request.Request(info.direct_url, headers=range_headers)
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    pending = bytearray()
+                    while True:
+                        chunk = resp.read(16384)
+                        if not chunk:
+                            raise ValueError("Opus seek cluster not found")
+                        total += len(chunk)
+                        if total > MAX_OPUS_WEBM_BYTES:
+                            raise ValueError("response too large")
+                        pending.extend(chunk)
+                        cluster_offset = pending.find(WEBM_CLUSTER_ID)
+                        if cluster_offset >= 0:
+                            yield header_prefix
+                            yield bytes(pending[cluster_offset:])
+                            break
+                        if len(pending) > OPUS_SEEK_CLUSTER_SCAN_BYTES:
+                            raise ValueError("Opus seek cluster not found")
+                    while True:
+                        chunk = resp.read(16384)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_OPUS_WEBM_BYTES:
+                            raise ValueError("response too large")
+                        yield chunk
+                    return
+            except (OSError, ValueError) as e:
+                add_log(f"Opus Ogg seek range fallback: {e}")
+
+        yield from read_url(info.direct_url)
 
     _opus_info_cache[v_id] = (info, time.time())
-    add_log(f"Opus Ogg stream started: {v_id} ({info.ext}/{info.acodec})")
+    add_log(
+        f"Opus Ogg stream started: {v_id} ({info.ext}/{info.acodec}) "
+        f"seek={seek_seconds}s fragments={len(info.fragments)}"
+    )
     _opus_prebuffer_videos.add(v_id)
     sent_bytes = 0
-    page_iterator = iter_ogg_opus_pages_from_webm_chunks(webm_chunks())
+    page_iterator = iter_ogg_opus_pages_from_webm_chunks(
+        webm_chunks(), seek_start_ms=seek_seconds * 1000
+    )
     try:
         while True:
             page = await asyncio.to_thread(_next_bytes_or_none, page_iterator)
@@ -794,6 +907,7 @@ async def stream_opus_ogg(request: Request) -> StreamingResponse | PlainTextResp
     if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
         add_log(f"Blocked invalid Opus Ogg stream ID: {v_id}")
         return PlainTextResponse("Invalid video ID format", status_code=400)
+    t = _clamp_seek_seconds(request.query_params.get("t", "0"))
 
     info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
     if info is None:
@@ -802,7 +916,7 @@ async def stream_opus_ogg(request: Request) -> StreamingResponse | PlainTextResp
         return PlainTextResponse("Opus fragmented remux unsupported", status_code=501)
 
     _opus_info_cache[v_id] = (info, time.time())
-    return StreamingResponse(opus_ogg_generator(v_id), media_type="audio/ogg")
+    return StreamingResponse(opus_ogg_generator(v_id, t), media_type="audio/ogg")
 
 async def thumbnail(request: Request) -> Response | PlainTextResponse:
     vid = request.query_params.get("id", "")
