@@ -19,8 +19,7 @@ typedef std::function<void(const std::string &, bool)> StreamCallback;
 
 enum class AudioPath {
   Mp3Proxy = 0,
-  AacDirect = 1,
-  OpusDirect = 2,
+  OpusDirect = 1,
 };
 
 class YouTubeAPI {

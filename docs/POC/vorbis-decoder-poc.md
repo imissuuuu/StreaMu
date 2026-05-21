@@ -17,7 +17,6 @@ The Makefile asks `arm-none-eabi-pkg-config vorbisidec` for include and link fla
 ## Current Scope
 - Adds `VorbisStreamDecoder` under `source/audio`.
 - Does not expose a new Settings option.
-- Does not remove AAC Direct.
 - Does not implement server-side YouTube to Ogg Vorbis conversion.
 
 ## Notes
@@ -26,4 +25,3 @@ The Makefile asks `arm-none-eabi-pkg-config vorbisidec` for include and link fla
 ## Next Questions
 - Can `3ds-libvorbisidec` decode common 44.1 kHz stereo Ogg Vorbis on real hardware without underruns?
 - Should StreaMu's server transcode remote audio to Ogg Vorbis, or should Vorbis remain a local-file-only target?
-- If Vorbis becomes the official path, should AAC Direct be compile-time disabled for release builds?

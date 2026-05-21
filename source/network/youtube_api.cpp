@@ -10,6 +10,7 @@ extern LightLock stream_lock;
 extern bool g_stream_download_complete;
 bool YouTubeAPI::should_cancel = false;
 
+#if STREAMU_ENABLE_OPUS_PERF_LOG
 static bool g_opus_perf_active = false;
 static bool g_opus_perf_first_byte_logged = false;
 static bool g_opus_perf_start_bytes_logged = false;
@@ -34,6 +35,7 @@ static void append_opus_perf_log(const char *event, size_t bytes) {
           static_cast<unsigned long>(bytes));
   fclose(f);
 }
+#endif
 
 static int progress_callback(void *p, curl_off_t dltotal, curl_off_t dlnow,
                              curl_off_t ultotal, curl_off_t ulnow) {
@@ -43,6 +45,7 @@ static int progress_callback(void *p, curl_off_t dltotal, curl_off_t dlnow,
 static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
                                      void *userp) {
   size_t total_size = size * nmemb;
+#if STREAMU_ENABLE_OPUS_PERF_LOG
   if (g_opus_perf_active && total_size > 0) {
     g_opus_perf_bytes += total_size;
     if (!g_opus_perf_first_byte_logged) {
@@ -54,6 +57,7 @@ static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
       append_opus_perf_log("received-16kb", g_opus_perf_bytes);
     }
   }
+#endif
   if (!YouTubeAPI::should_cancel && g_stream_buffer_ptr) {
     uint8_t *data = (uint8_t *)contents;
     LightLock_Lock(&stream_lock);
@@ -90,6 +94,7 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   LightLock_Unlock(&stream_lock);
 
   const bool is_opus_ogg = url.find("/stream_opus_ogg?") != std::string::npos;
+#if STREAMU_ENABLE_OPUS_PERF_LOG
   g_opus_perf_active = is_opus_ogg;
   g_opus_perf_first_byte_logged = false;
   g_opus_perf_start_bytes_logged = false;
@@ -98,6 +103,9 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   if (is_opus_ogg) {
     append_opus_perf_log("stream-request-start", 0);
   }
+#else
+  (void)is_opus_ogg;
+#endif
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamingWriteCallback);
@@ -118,11 +126,13 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   LightLock_Lock(&stream_lock);
   g_stream_download_complete = true;
   LightLock_Unlock(&stream_lock);
+#if STREAMU_ENABLE_OPUS_PERF_LOG
   if (is_opus_ogg) {
     append_opus_perf_log(success ? "stream-complete" : "stream-failed",
                          g_opus_perf_bytes);
   }
   g_opus_perf_active = false;
+#endif
   curl_easy_cleanup(curl);
   return success;
 }
@@ -172,11 +182,7 @@ void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
                                       StreamCallback callback) {
   // Delegate heavy work to PC; 3DS receives a ready-to-decode stream.
   std::string url = get_base_url();
-  if (path == AudioPath::AacDirect) {
-    url += "/stream_aac_adts?i=" + video_id;
-    if (seek_seconds > 0)
-      url += "&t=" + std::to_string(seek_seconds);
-  } else if (path == AudioPath::OpusDirect) {
+  if (path == AudioPath::OpusDirect) {
     url += "/stream_opus_ogg?i=" + video_id;
     if (seek_seconds > 0)
       url += "&t=" + std::to_string(seek_seconds);

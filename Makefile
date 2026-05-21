@@ -17,8 +17,9 @@ LD      := $(PREFIX)g++
 
 TARGET      := streamu
 VERSION     := 1.4.1
-SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens third_party/helix-aac
-INCLUDES    := include include/network include/ui third_party/helix-aac
+SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens
+INCLUDES    := include include/network include/ui
+ENABLE_OPUS_PERF_LOG ?= 0
 
 DEVKITPRO_LIB := $(DEVKITPRO)/libctru/lib
 DEVKITPRO_INC := $(DEVKITPRO)/libctru/include
@@ -34,7 +35,7 @@ OPUS_LIBS     := $(shell $(PKG_CONFIG) opusfile --libs 2>/dev/null)
 LIBS    := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz $(VORBIS_LIBS) $(OPUS_LIBS) -lctru -lm
 
 ARCH    := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
-CFLAGS  := -g -Wall -O2 -mword-relocations -fomit-frame-pointer -ffunction-sections $(ARCH) -DARM11 -D__3DS__ -DAPP_VERSION='"v$(VERSION)"'
+CFLAGS  := -g -Wall -O2 -mword-relocations -fomit-frame-pointer -ffunction-sections $(ARCH) -DARM11 -D__3DS__ -DAPP_VERSION='"v$(VERSION)"' -DSTREAMU_ENABLE_OPUS_PERF_LOG=$(ENABLE_OPUS_PERF_LOG)
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 LDFLAGS := -specs=3dsx.specs -g $(ARCH)
 
@@ -48,7 +49,6 @@ INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 # ソースファイルの探索
 CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))
 CFILES   := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.c))
-CFILES   := $(filter-out third_party/helix-aac/sbr%.c,$(CFILES))
 OFILES   := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o)
 
 # CIA build tools

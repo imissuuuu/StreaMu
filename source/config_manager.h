@@ -37,7 +37,7 @@ public:
     out.wallpaper_file = parse_string(json, "wallpaper_file", "");
     out.server_ip = parse_string(json, "server_ip", "");
     out.language = parse_string(json, "language", "en");
-    std::string audio_path = parse_string(json, "audio_path", "aac_direct");
+    std::string audio_path = parse_string(json, "audio_path", "opus_direct");
     out.accent_saturation = parse_float(json, "accent_saturation", 0.75f);
     out.accent_brightness = parse_float(json, "accent_brightness", 0.78f);
 
@@ -100,9 +100,7 @@ private:
   static AudioPathConfig parse_audio_path(const std::string &audio_path) {
     if (audio_path == "mp3")
       return AudioPathConfig::MP3_PROXY;
-    if (audio_path == "opus_direct")
-      return AudioPathConfig::OPUS_DIRECT;
-    return AudioPathConfig::AAC_DIRECT;
+    return AudioPathConfig::OPUS_DIRECT;
   }
 
   static const char *audio_path_to_string(AudioPathConfig audio_path) {
@@ -111,9 +109,8 @@ private:
       return "mp3";
     case AudioPathConfig::OPUS_DIRECT:
       return "opus_direct";
-    case AudioPathConfig::AAC_DIRECT:
     default:
-      return "aac_direct";
+      return "opus_direct";
     }
   }
 

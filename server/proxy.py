@@ -11,8 +11,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, AsyncGenerator, Iterator
 
-from aac_probe import AacFormatInfo, extract_aac_format
-from aac_transmux import Mp4AacTransmuxer, Mp4SidxReference, split_mp4_init_and_sidx
 from ffmpeg_bootstrap import get_app_dir, get_ffmpeg_path, ensure_ffmpeg, ensure_ytdlp
 from opus_probe import OpusFormatInfo, extract_opus_format
 from webm_opus_remux import (
@@ -39,7 +37,6 @@ app_logs: collections.deque[str] = collections.deque(maxlen=MAX_LOGS)
 # Cache for seek format info.
 # value: (direct_url, fragments, http_headers, timestamp)
 _url_cache: dict[str, tuple[str, list[dict], dict[str, str], float]] = {}
-_aac_info_cache: dict[str, tuple[AacFormatInfo, float]] = {}
 _opus_info_cache: dict[str, tuple[OpusFormatInfo, float]] = {}
 URL_CACHE_TTL = 3600  # 1 hour
 MAX_OPUS_WEBM_BYTES = 64 * 1024 * 1024
@@ -450,26 +447,6 @@ async def stream(request: Request) -> StreamingResponse | PlainTextResponse:
 
     return StreamingResponse(stream_audio_generator(i, t), media_type="audio/mpeg")
 
-async def aac_info(request: Request) -> JSONResponse | PlainTextResponse:
-    v_id = request.query_params.get("i", "")
-    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
-        add_log(f"Blocked invalid AAC info ID: {v_id}")
-        return PlainTextResponse("Invalid video ID format", status_code=400)
-
-    cached = _aac_info_cache.get(v_id)
-    if cached and time.time() - cached[1] < URL_CACHE_TTL:
-        add_log(f"AAC info cache hit: {v_id}")
-        return JSONResponse(cached[0].to_json_dict())
-
-    info = await asyncio.to_thread(extract_aac_format, v_id)
-    if info is None:
-        add_log(f"AAC extraction failed: {v_id}")
-        return PlainTextResponse("AAC extraction failed", status_code=502)
-
-    _aac_info_cache[v_id] = (info, time.time())
-    add_log(f"AAC info cached: {v_id} (ext={info.ext} acodec={info.acodec})")
-    return JSONResponse(info.to_json_dict())
-
 async def opus_info(request: Request) -> JSONResponse | PlainTextResponse:
     v_id = request.query_params.get("i", "")
     if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
@@ -489,17 +466,6 @@ async def opus_info(request: Request) -> JSONResponse | PlainTextResponse:
     _opus_info_cache[v_id] = (info, time.time())
     add_log(f"Opus info cached: {v_id} (ext={info.ext} acodec={info.acodec})")
     return JSONResponse(info.to_json_dict())
-
-def _get_cached_or_extract_aac_info(v_id: str) -> AacFormatInfo | None:
-    cached = _aac_info_cache.get(v_id)
-    if cached and time.time() - cached[1] < URL_CACHE_TTL:
-        return cached[0]
-    info = extract_aac_format(v_id)
-    if info is None:
-        return None
-    _aac_info_cache[v_id] = (info, time.time())
-    return info
-
 
 def _get_cached_or_extract_opus_info(v_id: str) -> OpusFormatInfo | None:
     cached = _opus_info_cache.get(v_id)
@@ -576,12 +542,6 @@ def _opus_seek_range_start(info: OpusFormatInfo,
     return max(0, estimated - OPUS_SEEK_RANGE_BACKTRACK_BYTES)
 
 
-def _aac_init_fragment_url(first_fragment_url: str) -> str:
-    init_url = re.sub(r"([?&])sq=\d+", r"\1sq=0", first_fragment_url)
-    init_url = re.sub(r"/sq/\d+", "/sq/0", init_url)
-    return init_url
-
-
 def _fetch_url_bytes(fetch_url: str, headers: dict[str, str],
                      timeout: int = 30) -> bytes:
     req = urllib.request.Request(fetch_url, headers=headers)
@@ -622,118 +582,6 @@ def _fetch_url_range(fetch_url: str, headers: dict[str, str], start: int,
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
-
-def _sidx_start_index(references: list[Mp4SidxReference],
-                      seek_seconds: int) -> int:
-    if seek_seconds <= 0:
-        return 0
-    for index, reference in enumerate(references):
-        target_time = seek_seconds * reference.timescale
-        if reference.start_time + reference.duration > target_time:
-            return index
-    return max(0, len(references) - 1)
-
-
-async def _feed_direct_aac_range(
-    transmuxer: Mp4AacTransmuxer,
-    info: AacFormatInfo,
-    seek_seconds: int,
-) -> AsyncGenerator[bytes, None]:
-    initial_chunk = await asyncio.to_thread(
-        _fetch_url_range, info.direct_url, info.http_headers, 0, 1024 * 1024 - 1, 30
-    )
-    init_data, references = split_mp4_init_and_sidx(initial_chunk)
-    for frame in transmuxer.feed(init_data):
-        yield frame
-
-    start_idx = _sidx_start_index(references, seek_seconds)
-    add_log(
-        f"AAC ADTS sidx seek: start_idx={start_idx} "
-        f"segments={len(references)}"
-    )
-    for reference in references[start_idx:]:
-        chunk = await asyncio.to_thread(
-            _fetch_url_range,
-            info.direct_url,
-            info.http_headers,
-            reference.offset,
-            reference.offset + reference.size - 1,
-            30,
-        )
-        for frame in transmuxer.feed(chunk):
-            yield frame
-
-
-async def aac_adts_generator(v_id: str,
-                             seek_seconds: int = 0) -> AsyncGenerator[bytes, None]:
-    info = await asyncio.to_thread(_get_cached_or_extract_aac_info, v_id)
-    if info is None:
-        add_log(f"AAC ADTS extraction failed: {v_id}")
-        return
-    if not info.direct_url and not info.fragments:
-        add_log(f"AAC ADTS unsupported without URL/fragments: {v_id}")
-        return
-
-    transmuxer = Mp4AacTransmuxer(seek_seconds)
-    add_log(
-        f"AAC ADTS stream started: {v_id} ({info.ext}/{info.acodec}) "
-        f"seek={seek_seconds}s fragments={len(info.fragments)}"
-    )
-    try:
-        if info.fragments:
-            start_idx, fragment_seconds = _fragment_start_index(
-                info.fragments, seek_seconds
-            )
-            first_url = str(info.fragments[0].get("url", info.direct_url))
-            init_url = _aac_init_fragment_url(first_url)
-            add_log(
-                f"AAC ADTS seek info: start_idx={start_idx} "
-                f"fragment_time={fragment_seconds:.1f}s"
-            )
-
-            init_chunk = await asyncio.to_thread(
-                _fetch_url_bytes, init_url, info.http_headers, 30
-            )
-            for frame in transmuxer.feed(init_chunk):
-                yield frame
-
-            for fragment in info.fragments[start_idx:]:
-                fragment_url = str(fragment.get("url", ""))
-                if not fragment_url:
-                    continue
-                chunk = await asyncio.to_thread(
-                    _fetch_url_bytes, fragment_url, info.http_headers, 30
-                )
-                for frame in transmuxer.feed(chunk):
-                    yield frame
-        else:
-            async for frame in _feed_direct_aac_range(
-                transmuxer, info, seek_seconds
-            ):
-                yield frame
-
-        for frame in transmuxer.flush():
-            yield frame
-    except asyncio.CancelledError:
-        add_log(f"AAC ADTS stream disconnected: {v_id}")
-    except (OSError, ValueError) as e:
-        add_log(f"AAC ADTS stream error: {e}")
-
-async def stream_aac_adts(request: Request) -> StreamingResponse | PlainTextResponse:
-    v_id = request.query_params.get("i", "")
-    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
-        add_log(f"Blocked invalid AAC stream ID: {v_id}")
-        return PlainTextResponse("Invalid video ID format", status_code=400)
-
-    t = _clamp_seek_seconds(request.query_params.get("t", "0"))
-
-    info = await asyncio.to_thread(_get_cached_or_extract_aac_info, v_id)
-    if info is None:
-        return PlainTextResponse("AAC extraction failed", status_code=502)
-    if not info.direct_url and not info.fragments:
-        return PlainTextResponse("AAC transmux unsupported", status_code=501)
-    _aac_info_cache[v_id] = (info, time.time())
-    return StreamingResponse(aac_adts_generator(v_id, t), media_type="audio/aac")
 
 async def opus_webm_generator(v_id: str) -> AsyncGenerator[bytes, None]:
     info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
@@ -1104,8 +952,6 @@ async def dashboard(request: Request) -> HTMLResponse:
 routes = [
     Route("/search", search),
     Route("/stream", stream),
-    Route("/stream_aac_adts", stream_aac_adts),
-    Route("/api/aac-info", aac_info),
     Route("/api/opus-info", opus_info),
     Route("/stream_opus", stream_opus),
     Route("/stream_opus_ogg", stream_opus_ogg),

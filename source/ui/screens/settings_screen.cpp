@@ -34,23 +34,14 @@ static const char *audio_path_label(AudioPathConfig path) {
   case AudioPathConfig::MP3_PROXY:
     return "MP3 Proxy";
   case AudioPathConfig::OPUS_DIRECT:
-    return "Opus Direct";
-  case AudioPathConfig::AAC_DIRECT:
   default:
-    return "AAC Direct";
+    return "Opus Direct";
   }
 }
 
 static AudioPathConfig next_audio_path(AudioPathConfig path) {
-  switch (path) {
-  case AudioPathConfig::AAC_DIRECT:
-    return AudioPathConfig::OPUS_DIRECT;
-  case AudioPathConfig::OPUS_DIRECT:
-    return AudioPathConfig::MP3_PROXY;
-  case AudioPathConfig::MP3_PROXY:
-  default:
-    return AudioPathConfig::AAC_DIRECT;
-  }
+  return path == AudioPathConfig::OPUS_DIRECT ? AudioPathConfig::MP3_PROXY
+                                              : AudioPathConfig::OPUS_DIRECT;
 }
 
 SettingsScreen::SettingsScreen(ThemeColors &colors, Wallpaper *wallpaper)
