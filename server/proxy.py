@@ -44,6 +44,8 @@ _opus_info_cache: dict[str, tuple[OpusFormatInfo, float]] = {}
 URL_CACHE_TTL = 3600  # 1 hour
 MAX_OPUS_WEBM_BYTES = 64 * 1024 * 1024
 OPUS_THUMBNAIL_DELAY_BYTES = 16 * 1024
+OPUS_OGG_PAGE_BATCH_BYTES = 16 * 1024
+OPUS_OGG_PAGE_BATCH_MAX = 64
 OPUS_THUMBNAIL_DELAY_TIMEOUT_SEC = 3.0
 OPUS_SEEK_PREROLL_SECONDS = 15
 OPUS_SEEK_RANGE_BACKTRACK_BYTES = 1024 * 1024
@@ -771,21 +773,26 @@ async def stream_opus(request: Request) -> StreamingResponse | PlainTextResponse
     return StreamingResponse(opus_webm_generator(v_id), media_type="audio/webm")
 
 
-def _next_bytes_or_none(iterator: Iterator[bytes]) -> bytes | None:
-    try:
-        return next(iterator)
-    except StopIteration:
+def _next_ogg_page_batch_or_none(iterator: Iterator[bytes]) -> list[bytes] | None:
+    pages: list[bytes] = []
+    total = 0
+    while len(pages) < OPUS_OGG_PAGE_BATCH_MAX and total < OPUS_OGG_PAGE_BATCH_BYTES:
+        try:
+            page = next(iterator)
+        except StopIteration:
+            break
+        pages.append(page)
+        total += len(page)
+    if not pages:
         return None
+    return pages
 
 
-async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator[bytes, None]:
-    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
-    if info is None:
-        add_log(f"Opus Ogg extraction failed: {v_id}")
-        return
-    if not info.direct_url:
-        add_log(f"Opus Ogg fragmented stream unsupported: {v_id}")
-        return
+async def opus_ogg_generator(
+    v_id: str,
+    info: OpusFormatInfo,
+    seek_seconds: int = 0,
+) -> AsyncGenerator[bytes, None]:
 
     perf_start = time.monotonic()
     upstream_first_byte_logged = False
@@ -911,26 +918,32 @@ async def opus_ogg_generator(v_id: str, seek_seconds: int = 0) -> AsyncGenerator
     )
     try:
         while True:
-            page = await asyncio.to_thread(_next_bytes_or_none, page_iterator)
-            if page is None:
+            page_batch = await asyncio.to_thread(
+                _next_ogg_page_batch_or_none, page_iterator
+            )
+            if page_batch is None:
                 break
-            page_count += 1
-            if not first_page_logged:
-                first_page_logged = True
-                add_log(
-                    f"Opus perf: first ogg page +{perf_ms()}ms "
-                    f"bytes={len(page)}"
-                )
-            sent_bytes += len(page)
-            yield page
-            if not sixteen_k_logged and sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES:
-                sixteen_k_logged = True
-                add_log(
-                    f"Opus perf: sent 16KB +{perf_ms()}ms "
-                    f"pages={page_count}"
-                )
-            if sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES:
-                _opus_prebuffer_videos.discard(v_id)
+            for page in page_batch:
+                page_count += 1
+                if not first_page_logged:
+                    first_page_logged = True
+                    add_log(
+                        f"Opus perf: first ogg page +{perf_ms()}ms "
+                        f"bytes={len(page)}"
+                    )
+                sent_bytes += len(page)
+                yield page
+                if (
+                    not sixteen_k_logged
+                    and sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES
+                ):
+                    sixteen_k_logged = True
+                    add_log(
+                        f"Opus perf: sent 16KB +{perf_ms()}ms "
+                        f"pages={page_count}"
+                    )
+                if sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES:
+                    _opus_prebuffer_videos.discard(v_id)
     except asyncio.CancelledError:
         add_log(f"Opus Ogg stream disconnected: {v_id}")
         raise
@@ -964,7 +977,7 @@ async def stream_opus_ogg(request: Request) -> StreamingResponse | PlainTextResp
         return PlainTextResponse("Opus fragmented remux unsupported", status_code=501)
 
     _opus_info_cache[v_id] = (info, time.time())
-    return StreamingResponse(opus_ogg_generator(v_id, t), media_type="audio/ogg")
+    return StreamingResponse(opus_ogg_generator(v_id, info, t), media_type="audio/ogg")
 
 async def thumbnail(request: Request) -> Response | PlainTextResponse:
     vid = request.query_params.get("id", "")

@@ -5,6 +5,9 @@ import struct
 from typing import Iterable, Iterator
 
 
+BytesLike = bytes | bytearray | memoryview
+
+
 ID_EBML = 0x1A45DFA3
 ID_SEGMENT = 0x18538067
 ID_INFO = 0x1549A966
@@ -84,7 +87,7 @@ class WebmOpusRemuxError(ValueError):
     pass
 
 
-def _read_vint(data: bytes, offset: int, max_bytes: int,
+def _read_vint(data: BytesLike, offset: int, max_bytes: int,
                mask_marker: bool) -> tuple[int, int]:
     if offset >= len(data):
         raise WebmOpusRemuxError("truncated EBML vint")
@@ -105,7 +108,7 @@ def _read_vint(data: bytes, offset: int, max_bytes: int,
     return value, width
 
 
-def _try_read_vint(data: bytes, offset: int, max_bytes: int,
+def _try_read_vint(data: BytesLike, offset: int, max_bytes: int,
                    mask_marker: bool) -> tuple[int, int] | None:
     if offset >= len(data):
         return None
@@ -126,7 +129,7 @@ def _try_read_vint(data: bytes, offset: int, max_bytes: int,
     return value, width
 
 
-def _try_read_element_header(data: bytes,
+def _try_read_element_header(data: BytesLike,
                              offset: int) -> _EbmlElementHeader | None:
     element_id_with_len = _try_read_vint(
         data, offset, MAX_EBML_ID_BYTES, False
@@ -144,7 +147,7 @@ def _try_read_element_header(data: bytes,
     return _EbmlElementHeader(element_id, offset, data_start, data_start + size)
 
 
-def _iter_elements(data: bytes, start: int, end: int) -> Iterator[EbmlElement]:
+def _iter_elements(data: BytesLike, start: int, end: int) -> Iterator[EbmlElement]:
     offset = start
     while offset < end:
         element_id, id_len = _read_vint(data, offset, MAX_EBML_ID_BYTES, False)
@@ -159,7 +162,7 @@ def _iter_elements(data: bytes, start: int, end: int) -> Iterator[EbmlElement]:
         offset = data_end
 
 
-def _read_uint(payload: bytes) -> int:
+def _read_uint(payload: BytesLike) -> int:
     if not payload:
         return 0
     if len(payload) > 8:
@@ -167,7 +170,7 @@ def _read_uint(payload: bytes) -> int:
     return int.from_bytes(payload, "big")
 
 
-def _read_sint(payload: bytes) -> int:
+def _read_sint(payload: BytesLike) -> int:
     if not payload:
         return 0
     if len(payload) > 8:
@@ -175,7 +178,7 @@ def _read_sint(payload: bytes) -> int:
     return int.from_bytes(payload, "big", signed=True)
 
 
-def _read_float(payload: bytes) -> float:
+def _read_float(payload: BytesLike) -> float:
     if len(payload) == 4:
         return float(struct.unpack(">f", payload)[0])
     if len(payload) == 8:
@@ -183,14 +186,14 @@ def _read_float(payload: bytes) -> float:
     raise WebmOpusRemuxError("unsupported float width")
 
 
-def _read_ascii(payload: bytes) -> str:
+def _read_ascii(payload: BytesLike) -> str:
     try:
-        return payload.decode("ascii")
+        return bytes(payload).decode("ascii")
     except UnicodeDecodeError as exc:
         raise WebmOpusRemuxError("invalid ASCII string") from exc
 
 
-def _parse_audio(data: bytes, start: int, end: int,
+def _parse_audio(data: BytesLike, start: int, end: int,
                  track: _TrackCandidate) -> None:
     for element in _iter_elements(data, start, end):
         payload = data[element.data_start:element.data_end]
@@ -200,7 +203,7 @@ def _parse_audio(data: bytes, start: int, end: int,
             track.channels = _read_uint(payload)
 
 
-def _parse_track_entry(data: bytes, start: int, end: int) -> _TrackCandidate:
+def _parse_track_entry(data: BytesLike, start: int, end: int) -> _TrackCandidate:
     track = _TrackCandidate()
     for element in _iter_elements(data, start, end):
         payload = data[element.data_start:element.data_end]
@@ -211,7 +214,7 @@ def _parse_track_entry(data: bytes, start: int, end: int) -> _TrackCandidate:
         elif element.element_id == ID_CODEC_ID:
             track.codec_id = _read_ascii(payload)
         elif element.element_id == ID_CODEC_PRIVATE:
-            track.codec_private = payload
+            track.codec_private = bytes(payload)
         elif element.element_id == ID_CODEC_DELAY:
             track.codec_delay_ns = _read_uint(payload)
         elif element.element_id == ID_SEEK_PRE_ROLL:
@@ -221,7 +224,7 @@ def _parse_track_entry(data: bytes, start: int, end: int) -> _TrackCandidate:
     return track
 
 
-def _find_opus_track(data: bytes, start: int,
+def _find_opus_track(data: BytesLike, start: int,
                      end: int) -> _TrackCandidate:
     candidates: list[_TrackCandidate] = []
     for element in _iter_elements(data, start, end):
@@ -243,7 +246,7 @@ def _find_opus_track(data: bytes, start: int,
     return track
 
 
-def _parse_simple_block(payload: bytes,
+def _parse_simple_block(payload: BytesLike,
                         expected_track: int) -> tuple[int, bytes]:
     track_number, track_len = _read_vint(payload, 0, MAX_EBML_SIZE_BYTES, True)
     if track_number != expected_track:
@@ -256,10 +259,10 @@ def _parse_simple_block(payload: bytes,
     flags = payload[track_len + 2]
     if flags & 0x06:
         raise WebmOpusRemuxError("laced SimpleBlock is unsupported")
-    return rel_time, payload[track_len + 3:]
+    return rel_time, bytes(payload[track_len + 3:])
 
 
-def _parse_block_group(data: bytes, start: int, end: int,
+def _parse_block_group(data: BytesLike, start: int, end: int,
                        expected_track: int) -> tuple[int, bytes, int]:
     block_time = 0
     block_data = b""
@@ -277,7 +280,7 @@ def _parse_block_group(data: bytes, start: int, end: int,
     return block_time, block_data, discard_padding_ns
 
 
-def _parse_cluster(data: bytes, start: int, end: int,
+def _parse_cluster(data: BytesLike, start: int, end: int,
                    expected_track: int) -> list[WebmOpusPacket]:
     cluster_time_ms = 0
     packets: list[WebmOpusPacket] = []
@@ -302,7 +305,7 @@ def _parse_cluster(data: bytes, start: int, end: int,
     return packets
 
 
-def _find_segment(data: bytes) -> EbmlElement:
+def _find_segment(data: BytesLike) -> EbmlElement:
     for element in _iter_elements(data, 0, len(data)):
         if element.element_id == ID_SEGMENT:
             return element
@@ -533,12 +536,12 @@ def iter_ogg_opus_pages_from_webm_chunks(
 
                 payload = buffer[child.data_start:child.data_end]
                 if child.element_id == ID_TIMESTAMP:
-                    cluster_time_ms = _read_uint(bytes(payload))
+                    cluster_time_ms = _read_uint(payload)
                 elif child.element_id == ID_SIMPLE_BLOCK:
                     if opus_track is None:
                         raise WebmOpusRemuxError("Cluster before Tracks")
                     rel_time, packet = _parse_simple_block(
-                        bytes(payload), opus_track.track_number
+                        payload, opus_track.track_number
                     )
                     packet_time_ms = cluster_time_ms + rel_time
                     if not should_emit_packet(packet_time_ms):
@@ -558,7 +561,7 @@ def iter_ogg_opus_pages_from_webm_chunks(
                     if opus_track is None:
                         raise WebmOpusRemuxError("Cluster before Tracks")
                     rel_time, packet, _discard_padding_ns = _parse_block_group(
-                        bytes(buffer),
+                        buffer,
                         child.data_start,
                         child.data_end,
                         opus_track.track_number,
@@ -594,17 +597,17 @@ def iter_ogg_opus_pages_from_webm_chunks(
                 if header.data_end > len(buffer):
                     break
                 for child in _iter_elements(
-                    bytes(buffer), header.data_start, header.data_end
+                    buffer, header.data_start, header.data_end
                 ):
                     if child.element_id == ID_TIMECODE_SCALE:
                         payload = buffer[child.data_start:child.data_end]
-                        timecode_scale_ns = _read_uint(bytes(payload))
+                        timecode_scale_ns = _read_uint(payload)
                 segment_offset = header.data_end
             elif header.element_id == ID_TRACKS:
                 if header.data_end > len(buffer):
                     break
                 opus_track = _find_opus_track(
-                    bytes(buffer), header.data_start, header.data_end
+                    buffer, header.data_start, header.data_end
                 )
                 for page in emit_headers():
                     yield page
