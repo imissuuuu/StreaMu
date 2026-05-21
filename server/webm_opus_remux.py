@@ -35,6 +35,8 @@ DEFAULT_TIMECODE_SCALE_NS = 1_000_000
 OGG_SERIAL = 0x5354524D
 MAX_EBML_ID_BYTES = 4
 MAX_EBML_SIZE_BYTES = 8
+MAX_OGG_PAGE_SEGMENTS = 255
+OGG_AUDIO_PAGE_TARGET_BYTES = 2048
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,12 @@ class _EbmlElementHeader:
     header_start: int
     data_start: int
     data_end: int
+
+
+@dataclass(frozen=True)
+class _OggPagePacket:
+    data: bytes
+    granule_position: int
 
 
 @dataclass
@@ -415,28 +423,51 @@ def _packet_segments(packet: bytes) -> bytes:
     return bytes(segments)
 
 
-def _ogg_page(packet: bytes, header_type: int, granule_position: int,
-              sequence: int) -> bytes:
-    segments = _packet_segments(packet)
+def _ogg_page_from_packets(packets: list[_OggPagePacket], header_type: int,
+                           sequence: int) -> bytes:
+    if not packets:
+        raise WebmOpusRemuxError("cannot write empty Ogg page")
+    segments = bytearray()
+    body = bytearray()
+    for packet in packets:
+        packet_segments = _packet_segments(packet.data)
+        if len(packet_segments) > MAX_OGG_PAGE_SEGMENTS:
+            raise WebmOpusRemuxError("packet too large for single Ogg page")
+        if len(segments) + len(packet_segments) > MAX_OGG_PAGE_SEGMENTS:
+            raise WebmOpusRemuxError("too many packet segments for Ogg page")
+        segments.extend(packet_segments)
+        body.extend(packet.data)
     if len(segments) > 255:
-        raise WebmOpusRemuxError("packet too large for single Ogg page")
+        raise WebmOpusRemuxError("too many segments for Ogg page")
     header = bytearray()
     header.extend(b"OggS")
     header.append(0)
     header.append(header_type)
+    granule_position = packets[-1].granule_position
     header.extend(int(granule_position).to_bytes(8, "little", signed=True))
     header.extend(OGG_SERIAL.to_bytes(4, "little"))
     header.extend(sequence.to_bytes(4, "little"))
     header.extend((0).to_bytes(4, "little"))
     header.append(len(segments))
     header.extend(segments)
-    page = bytes(header) + packet
+    page = bytes(header) + bytes(body)
     crc = _ogg_crc(page)
     return page[:22] + crc.to_bytes(4, "little") + page[26:]
 
 
+def _ogg_page(packet: bytes, header_type: int, granule_position: int,
+              sequence: int) -> bytes:
+    return _ogg_page_from_packets(
+        [_OggPagePacket(packet, granule_position)], header_type, sequence
+    )
+
+
 def _opus_tags(vendor: bytes) -> bytes:
     return b"OpusTags" + len(vendor).to_bytes(4, "little") + vendor + (0).to_bytes(4, "little")
+
+
+def _packet_segment_count(packet: bytes) -> int:
+    return len(_packet_segments(packet))
 
 
 def build_ogg_opus(track: WebmOpusTrack,
@@ -452,11 +483,48 @@ def build_ogg_opus(track: WebmOpusTrack,
     sequence += 1
 
     granule_position = 0
-    for index, packet in enumerate(track.packets):
-        granule_position += opus_packet_duration_samples(packet.data)
-        header_type = 0x04 if index == len(track.packets) - 1 else 0x00
-        pages.append(_ogg_page(packet.data, header_type, granule_position, sequence))
+    audio_page_packets: list[_OggPagePacket] = []
+    audio_page_bytes = 0
+    audio_page_segments = 0
+    pending_packet: _OggPagePacket | None = None
+
+    def flush_audio_page(header_type: int = 0x00) -> None:
+        nonlocal audio_page_bytes, audio_page_segments, sequence
+        if not audio_page_packets:
+            return
+        pages.append(_ogg_page_from_packets(audio_page_packets, header_type, sequence))
         sequence += 1
+        audio_page_packets.clear()
+        audio_page_bytes = 0
+        audio_page_segments = 0
+
+    def append_audio_packet(packet_data: bytes,
+                            packet_granule_position: int) -> None:
+        nonlocal audio_page_bytes, audio_page_segments
+        segment_count = _packet_segment_count(packet_data)
+        if audio_page_packets and (
+            audio_page_segments + segment_count > MAX_OGG_PAGE_SEGMENTS
+        ):
+            flush_audio_page()
+        audio_page_packets.append(
+            _OggPagePacket(packet_data, packet_granule_position)
+        )
+        audio_page_bytes += len(packet_data)
+        audio_page_segments += segment_count
+        if audio_page_bytes >= OGG_AUDIO_PAGE_TARGET_BYTES:
+            flush_audio_page()
+
+    for packet in track.packets:
+        granule_position += opus_packet_duration_samples(packet.data)
+        if pending_packet is not None:
+            append_audio_packet(
+                pending_packet.data, pending_packet.granule_position
+            )
+        pending_packet = _OggPagePacket(packet.data, granule_position)
+
+    flush_audio_page()
+    if pending_packet is not None:
+        pages.append(_ogg_page_from_packets([pending_packet], 0x04, sequence))
 
     return b"".join(pages)
 
@@ -481,7 +549,10 @@ def iter_ogg_opus_pages_from_webm_chunks(
     headers_emitted = False
     granule_position = 0
     sequence = 0
-    pending_packet: tuple[bytes, int] | None = None
+    pending_packet: _OggPagePacket | None = None
+    audio_page_packets: list[_OggPagePacket] = []
+    audio_page_bytes = 0
+    audio_page_segments = 0
 
     def emit_headers() -> Iterator[bytes]:
         nonlocal headers_emitted, sequence
@@ -493,14 +564,38 @@ def iter_ogg_opus_pages_from_webm_chunks(
         sequence += 1
         headers_emitted = True
 
+    def flush_audio_page(header_type: int = 0x00) -> Iterator[bytes]:
+        nonlocal audio_page_bytes, audio_page_segments, sequence
+        if not audio_page_packets:
+            return
+        yield _ogg_page_from_packets(audio_page_packets, header_type, sequence)
+        sequence += 1
+        audio_page_packets.clear()
+        audio_page_bytes = 0
+        audio_page_segments = 0
+
+    def append_audio_packet(packet: _OggPagePacket) -> Iterator[bytes]:
+        nonlocal audio_page_bytes, audio_page_segments
+        segment_count = _packet_segment_count(packet.data)
+        if audio_page_packets and (
+            audio_page_segments + segment_count > MAX_OGG_PAGE_SEGMENTS
+        ):
+            for page in flush_audio_page():
+                yield page
+        audio_page_packets.append(packet)
+        audio_page_bytes += len(packet.data)
+        audio_page_segments += segment_count
+        if audio_page_bytes >= OGG_AUDIO_PAGE_TARGET_BYTES:
+            for page in flush_audio_page():
+                yield page
+
     def emit_packet(packet_data: bytes) -> Iterator[bytes]:
-        nonlocal granule_position, pending_packet, sequence
+        nonlocal granule_position, pending_packet
         granule_position += opus_packet_duration_samples(packet_data)
         if pending_packet is not None:
-            pending_data, pending_granule = pending_packet
-            yield _ogg_page(pending_data, 0x00, pending_granule, sequence)
-            sequence += 1
-        pending_packet = (packet_data, granule_position)
+            for page in append_audio_packet(pending_packet):
+                yield page
+        pending_packet = _OggPagePacket(packet_data, granule_position)
 
     def should_emit_packet(packet_time_ms: int) -> bool:
         if seek_start_ms <= 0:
@@ -627,7 +722,8 @@ def iter_ogg_opus_pages_from_webm_chunks(
     if not headers_emitted:
         for page in emit_headers():
             yield page
+    for page in flush_audio_page():
+        yield page
     if pending_packet is not None:
-        pending_data, pending_granule = pending_packet
-        yield _ogg_page(pending_data, 0x04, pending_granule, sequence)
+        yield _ogg_page_from_packets([pending_packet], 0x04, sequence)
     _ = timecode_scale_ns
