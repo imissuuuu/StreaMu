@@ -178,19 +178,13 @@ void YouTubeAPI::search(const std::string &query, const std::string &lang,
 }
 
 void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
-                                      int seek_seconds, AudioPath path,
+                                      int seek_seconds,
                                       StreamCallback callback) {
-  // Delegate heavy work to PC; 3DS receives a ready-to-decode stream.
+  // Delegate WebM->Ogg remuxing to the proxy; 3DS decodes Opus directly.
   std::string url = get_base_url();
-  if (path == AudioPath::OpusDirect) {
-    url += "/stream_opus_ogg?i=" + video_id;
-    if (seek_seconds > 0)
-      url += "&t=" + std::to_string(seek_seconds);
-  } else {
-    url += "/stream?i=" + video_id;
-    if (seek_seconds > 0)
-      url += "&t=" + std::to_string(seek_seconds);
-  }
+  url += "/stream_opus_ogg?i=" + video_id;
+  if (seek_seconds > 0)
+    url += "&t=" + std::to_string(seek_seconds);
   callback(url, true);
 }
 std::vector<Track> YouTubeAPI::parse_search_results(const std::string &data) {

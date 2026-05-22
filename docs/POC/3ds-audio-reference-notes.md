@@ -18,17 +18,13 @@ Date: 2026-05-17
 
 ## Design Takeaways
 
-- Keep MP3 as the default and preserve the current proxy-transcoded path.
-- Split decoder logic from NDSP queueing before adding AAC. This keeps AAC PoC
-  work from tangling with playback buffer ownership.
-- For AAC PoC, avoid MP4 parsing on 3DS. The server should select `mp4a`,
-  transmux to ADTS, and let 3DS decode ADTS frames only.
+- Opus Direct is the release playback path. Keep codec-specific decoder logic
+  separated from NDSP queueing so future experiments stay isolated.
 - Do not import the full Video_player/FourthTube FFmpeg playback stack into
   StreaMu. It would work against the FFmpegless goal and increases build and
   release risk.
 
 ## Applied Now
 
-- `MP3Player` now delegates MP3 frame decode to `Minimp3StreamDecoder`.
-- The new `StreamDecoder` result shape is compatible with a future
-  `AacAdtsStreamDecoder`.
+- `OpusPocPlayer` handles release playback from Ogg Opus data produced by the
+  proxy server.

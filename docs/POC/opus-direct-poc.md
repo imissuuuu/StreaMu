@@ -74,7 +74,7 @@ Expected preparation:
 
 ## Promotion Notes
 
-- `Opus Direct` is being promoted from hidden PoC to a formal selectable Audio Path candidate.
-- Default audio path remains unchanged during the promotion step.
-- Initial promoted playback uses full Ogg Opus download before decoder open.
-- Seek is not supported for Opus in this phase; MP3 Proxy remains fallback.
+- `Opus Direct` is the only release playback path.
+- Settings no longer expose an audio path selector.
+- The proxy serves release playback through `/stream_opus_ogg`.
+- Seek is handled by `/stream_opus_ogg?t=...`.

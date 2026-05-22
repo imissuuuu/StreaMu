@@ -20,7 +20,6 @@ struct AppContext : public RenderContext {
   std::string current_stream_url = "";
   AudioPathConfig active_audio_path = AudioPathConfig::OPUS_DIRECT;
   bool opus_pending_decode_start = false;
-  bool opus_fallback_attempted = false;
   LightLock lock; // Mutex for thread synchronization
   // touch_state inherited from RenderContext (no shadowing)
 

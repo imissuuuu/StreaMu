@@ -17,11 +17,6 @@ This project uses the following third-party libraries and tools.
 - **License**: Unlicense
 - **URL**: https://github.com/yt-dlp/yt-dlp
 
-## FFmpeg
-- **Description**: Audio/video transcoding (used for MP3 conversion)
-- **License**: LGPL 2.1 or later
-- **URL**: https://ffmpeg.org/
-
 ## Starlette
 - **Description**: Lightweight ASGI framework for the proxy server
 - **License**: BSD 3-Clause

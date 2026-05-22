@@ -98,17 +98,14 @@ public:
 
 private:
   static AudioPathConfig parse_audio_path(const std::string &audio_path) {
-    if (audio_path == "mp3")
-      return AudioPathConfig::MP3_PROXY;
+    (void)audio_path;
     return AudioPathConfig::OPUS_DIRECT;
   }
 
   static const char *audio_path_to_string(AudioPathConfig audio_path) {
+    (void)audio_path;
     switch (audio_path) {
-    case AudioPathConfig::MP3_PROXY:
-      return "mp3";
     case AudioPathConfig::OPUS_DIRECT:
-      return "opus_direct";
     default:
       return "opus_direct";
     }

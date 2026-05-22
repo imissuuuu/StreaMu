@@ -17,11 +17,6 @@ struct Track {
 typedef std::function<void(const std::vector<Track> &, bool)> SearchCallback;
 typedef std::function<void(const std::string &, bool)> StreamCallback;
 
-enum class AudioPath {
-  Mp3Proxy = 0,
-  OpusDirect = 1,
-};
-
 class YouTubeAPI {
 public:
   void init();
@@ -29,7 +24,7 @@ public:
   void search(const std::string &query, const std::string &lang,
               SearchCallback callback);
   void get_audio_stream_url(const std::string &video_id, int seek_seconds,
-                            AudioPath path, StreamCallback callback);
+                            StreamCallback callback);
   bool start_streaming(const std::string &url);
   std::string http_get(const std::string &url, long timeout_sec = 15L);
   bool check_connection();

@@ -18,7 +18,7 @@ enum LRAction {
 enum MenuButtonSide { MENU_BTN_LEFT = 0, MENU_BTN_RIGHT = 1 };
 
 // === Audio Path ===
-enum class AudioPathConfig { MP3_PROXY = 0, OPUS_DIRECT = 1 };
+enum class AudioPathConfig { OPUS_DIRECT = 0 };
 
 // === Application Config ===
 struct AppConfig {

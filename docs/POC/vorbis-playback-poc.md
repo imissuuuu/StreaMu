@@ -15,7 +15,7 @@ Verify that StreaMu can feed PCM decoded by `VorbisStreamDecoder` into NDSP and 
 
 ## Implementation Notes
 - `VorbisPocPlayer` mirrors the existing stream-decoder-to-NDSP player shape.
-- The official Settings `Audio Path` remains `Opus Direct` / `MP3 Proxy`; Vorbis is not a user-facing delivery path yet.
+- The release playback path is Opus Direct only; Vorbis is not a user-facing delivery path yet.
 - Server-side YouTube to Ogg Vorbis conversion is intentionally out of scope for this PoC.
 - `3ds-libvorbisidec` and `3ds-libogg` are provided through the existing `vorbisidec` pkg-config Makefile integration.
 
@@ -24,4 +24,3 @@ Verify that StreaMu can feed PCM decoded by `VorbisStreamDecoder` into NDSP and 
 - Vorbis sample: `L+R+Y` starts playback and audio is heard.
 - Vorbis finish: playback reaches the end without freezing, and now-playing clears.
 - Opus Direct regression: normal playback still starts and produces audio.
-- MP3 Proxy regression: Settings can switch to MP3 Proxy and normal playback still works.

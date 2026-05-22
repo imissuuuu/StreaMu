@@ -45,7 +45,7 @@ Download `streamu.cia` or `streamu.3dsx` from [Releases](../../releases).
 
 Download `StreaMu-Server.zip` from [Releases](../../releases), extract it, and run `StreaMu-Server.exe`.
 
-On first launch, the server automatically downloads `ffmpeg.exe` and `yt-dlp.exe` into the same folder. No Python or manual setup needed.
+The server uses native YouTube Opus audio and does not require FFmpeg. No Python or manual setup needed.
 
 #### Option B: Python Script
 
@@ -142,7 +142,7 @@ Settings are saved to `sdmc:/3ds/StreaMu/config.json`.
 - **Mac/Linux Python version:** Run `./start_server.sh` from the `server/` folder. It creates the virtual environment and installs dependencies automatically.
 
 **No audio / playback issues**
-- The server needs FFmpeg for audio transcoding. The EXE version handles this automatically. For Windows Python, make sure `ffmpeg.exe` is in the `server/` directory. For Mac/Linux, install `ffmpeg` on your system PATH or place an executable named `ffmpeg` in the `server/` directory.
+- StreaMu uses Opus Direct only. Make sure the proxy server is current and that `/stream_opus_ogg` is reachable from the 3DS.
 
 ### Build from Source
 
@@ -207,7 +207,7 @@ PC上で動作するプロキシサーバーがYouTubeからのデータ取得�
 
 [Releases](../../releases) から `StreaMu-Server.zip` をダウンロードして解凍し、`StreaMu-Server.exe` を実行するだけです。
 
-初回起動時に `ffmpeg.exe` と `yt-dlp.exe` を同じディレクトリに自動ダウンロードします。Pythonやセットアップは不要です。
+サーバーはYouTubeのOpus音声を直接利用し、FFmpegは不要です。Pythonやセットアップは不要です。
 
 #### 方法B: Pythonスクリプト
 
@@ -304,7 +304,7 @@ venv\Scripts\python proxy.py
 - **Mac/Linux Python版：** `server/` フォルダで `./start_server.sh` を実行してください。仮想環境の作成と依存関係のインストールは自動で行われます。
 
 **音声が出ない・再生できない**
-- サーバーは音声変換にFFmpegが必要です。EXE版は自動処理されます。Windows Python版の場合は `server/` ディレクトリに `ffmpeg.exe` があるか確認してください。Mac/Linuxの場合は `ffmpeg` がシステムPATHに含まれているか、`server/` ディレクトリに実行可能な `ffmpeg` があるか確認してください。
+- StreaMu は Opus Direct のみを使用します。プロキシサーバーが最新で、3DS から `/stream_opus_ogg` に接続できることを確認してください。
 
 ### ソースからビルド
 
