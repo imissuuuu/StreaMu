@@ -16,7 +16,7 @@ CXX     := $(PREFIX)g++
 LD      := $(PREFIX)g++
 
 TARGET      := streamu
-VERSION     := 1.4.1
+VERSION     := 1.5.0
 SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens
 INCLUDES    := include include/network include/ui
 ENABLE_OPUS_PERF_LOG ?= 0

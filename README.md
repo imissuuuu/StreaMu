@@ -28,7 +28,7 @@ A lightweight proxy server runs on your PC and handles YouTube data fetching and
 
 1. Download `streamu.cia` (or `.3dsx`) and `StreaMu-Server.zip` from [Releases](../../releases)
 2. Install the CIA on your 3DS with FBI
-3. Extract `StreaMu-Server.zip` and run the EXE inside — it auto-downloads FFmpeg and yt-dlp on first launch
+3. Extract `StreaMu-Server.zip` and run the EXE inside
 4. Launch StreaMu on your 3DS and enter the IP address shown on the server dashboard
 5. Search for music with the Y button and enjoy!
 
@@ -59,10 +59,7 @@ chmod +x start_server.sh
 This will:
 1. Create a Python virtual environment
 2. Install required packages (starlette, yt-dlp, uvicorn)
-3. Check for FFmpeg
-4. Start the proxy server
-
-If FFmpeg is not found, the script prints install commands for macOS and common Linux distributions.
+3. Start the proxy server
 
 Windows:
 ```bash
@@ -166,6 +163,10 @@ Bundled third-party components are governed by their own licenses.
 
 Third-party licenses: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
 
+Development references: StreaMu's audio design was informed by public 3DS
+homebrew projects such as ctrmus, Video_player_for_3DS, FourthTube, and
+pomegranate. Their code is not bundled in StreaMu.
+
 ---
 
 ## 日本語
@@ -190,7 +191,7 @@ PC上で動作するプロキシサーバーがYouTubeからのデータ取得�
 
 1. [Releases](../../releases) から `streamu.cia`（または `.3dsx`）と `StreaMu-Server.zip` をダウンロード
 2. 3DSにCIAをFBIでインストール
-3. `StreaMu-Server.zip` を解凍してEXEを実行 — 初回起動時にFFmpegとyt-dlpを自動ダウンロード
+3. `StreaMu-Server.zip` を解凍してEXEを実行
 4. 3DSでStreaMuを起動し、サーバーダッシュボードに表示されるIPアドレスを入力
 5. Yボタンで音楽を検索して再生！
 
@@ -221,10 +222,7 @@ chmod +x start_server.sh
 以下が自動で行われます：
 1. Python仮想環境の作成
 2. 必要パッケージのインストール（starlette, yt-dlp, uvicorn）
-3. FFmpegの確認
-4. プロキシサーバーの起動
-
-FFmpegが見つからない場合、macOSや主なLinuxディストリビューション向けのインストールコマンド例が表示されます。
+3. プロキシサーバーの起動
 
 Windows:
 ```bash
@@ -327,3 +325,7 @@ StreaMu 本体コードは MIT License です。詳細は [LICENSE](LICENSE) を
 同梱しているサードパーティコンポーネントには、それぞれ別のライセンスが適用されます。
 
 サードパーティライセンス: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+
+開発時の参考: StreaMu の音声設計では ctrmus、Video_player_for_3DS、
+FourthTube、pomegranate などの公開3DS homebrewプロジェクトを参考にしました。
+これらのコードは StreaMu には同梱していません。
