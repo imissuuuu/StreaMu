@@ -50,18 +50,6 @@ def main() -> None:
         sys.exit(1)
     print("[OK] Dependencies installed")
 
-    # Check ffmpeg
-    ffmpeg_name: str = "ffmpeg.exe" if is_windows else "ffmpeg"
-    ffmpeg_local: Path = base_dir / ffmpeg_name
-    if ffmpeg_local.exists():
-        print(f"[OK] ffmpeg found: {ffmpeg_local}")
-    else:
-        print(f"\n[WARNING] ffmpeg not found in project directory.")
-        print(f"  The proxy server needs ffmpeg to transcode audio for the 3DS.")
-        print(f"  Please download ffmpeg and place '{ffmpeg_name}' in:")
-        print(f"    {base_dir}")
-        print(f"  Download: https://ffmpeg.org/download.html")
-
     # Done
     print("\n=== Setup Complete ===\n")
     print("To start the proxy server:")

@@ -37,7 +37,7 @@ echo.
 if exist dist\StreaMu-Server.exe (
     echo [OK] Built: dist\StreaMu-Server.exe
     echo Packaging into zip...
-    powershell -Command "Compress-Archive -Path 'dist\StreaMu-Server.exe' -DestinationPath 'dist\StreaMu-Server.zip' -Force"
+    powershell -Command "Compress-Archive -Path 'dist\StreaMu-Server.exe', '..\LICENSE', '..\THIRD_PARTY_LICENSES.md' -DestinationPath 'dist\StreaMu-Server.zip' -Force"
     if exist dist\StreaMu-Server.zip (
         echo [OK] Packaged: dist\StreaMu-Server.zip
     ) else (

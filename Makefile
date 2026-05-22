@@ -16,9 +16,10 @@ CXX     := $(PREFIX)g++
 LD      := $(PREFIX)g++
 
 TARGET      := streamu
-VERSION     := 1.4.1
+VERSION     := 1.5.0
 SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens
 INCLUDES    := include include/network include/ui
+ENABLE_OPUS_PERF_LOG ?= 0
 
 DEVKITPRO_LIB := $(DEVKITPRO)/libctru/lib
 DEVKITPRO_INC := $(DEVKITPRO)/libctru/include
@@ -26,17 +27,24 @@ PORTLIBS      := $(DEVKITPRO)/portlibs/3ds
 
 # --- 修正: libcurl の背後で動く mbedtls と zlib を追加 ---
 # 順番が非常に重要です (依存される側を後ろに置く)
-LIBS    := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lctru -lm
+PKG_CONFIG := $(PORTLIBS)/bin/arm-none-eabi-pkg-config
+VORBIS_CFLAGS := $(shell $(PKG_CONFIG) vorbisidec --cflags 2>/dev/null)
+VORBIS_LIBS   := $(shell $(PKG_CONFIG) vorbisidec --libs 2>/dev/null)
+OPUS_CFLAGS   := $(shell $(PKG_CONFIG) opusfile --cflags 2>/dev/null)
+OPUS_LIBS     := $(shell $(PKG_CONFIG) opusfile --libs 2>/dev/null)
+LIBS    := -lcitro2d -lcitro3d -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz $(VORBIS_LIBS) $(OPUS_LIBS) -lctru -lm
 
 ARCH    := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
-CFLAGS  := -g -Wall -O2 -mword-relocations -fomit-frame-pointer -ffunction-sections $(ARCH) -DARM11 -D__3DS__ -DAPP_VERSION='"v$(VERSION)"'
+CFLAGS  := -g -Wall -O2 -mword-relocations -fomit-frame-pointer -ffunction-sections $(ARCH) -DARM11 -D__3DS__ -DAPP_VERSION='"v$(VERSION)"' -DSTREAMU_ENABLE_OPUS_PERF_LOG=$(ENABLE_OPUS_PERF_LOG)
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 LDFLAGS := -specs=3dsx.specs -g $(ARCH)
 
 LIBDIRS := -L$(DEVKITPRO_LIB) -L$(PORTLIBS)/lib
 INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
            -I$(DEVKITPRO_INC) \
-           -I$(PORTLIBS)/include
+           -I$(PORTLIBS)/include \
+           $(VORBIS_CFLAGS) \
+           $(OPUS_CFLAGS)
 
 # ソースファイルの探索
 CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))

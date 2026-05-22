@@ -58,54 +58,6 @@ install_dependencies() {
     printf '%s\n' '[OK] Dependencies ready'
 }
 
-print_ffmpeg_help() {
-    printf '%s\n' '[ERROR] ffmpeg was not found.'
-    printf '%s\n' 'Install ffmpeg, then run this script again.'
-    printf '\n'
-
-    case "$(uname -s)" in
-        Darwin)
-            printf '%s\n' 'macOS with Homebrew:'
-            printf '%s\n' '  brew install ffmpeg'
-            ;;
-        *)
-            printf '%s\n' 'Debian / Ubuntu:'
-            printf '%s\n' '  sudo apt install ffmpeg'
-            printf '\n'
-            printf '%s\n' 'Fedora:'
-            printf '%s\n' '  sudo dnf install ffmpeg'
-            printf '\n'
-            printf '%s\n' 'Arch Linux:'
-            printf '%s\n' '  sudo pacman -S ffmpeg'
-            ;;
-    esac
-
-    printf '\n'
-    printf '%s\n' 'You can also place an executable named ffmpeg in this server folder.'
-}
-
-check_ffmpeg() {
-    if [ -x "./ffmpeg" ]; then
-        printf '%s\n' '[OK] ffmpeg found in server folder'
-        return 0
-    fi
-
-    if command -v ffmpeg >/dev/null 2>&1; then
-        ffmpeg_path="$(command -v ffmpeg)"
-        if ln -sf "$ffmpeg_path" ./ffmpeg >/dev/null 2>&1; then
-            printf '[OK] ffmpeg found: %s\n' "$ffmpeg_path"
-            return 0
-        fi
-
-        printf '[ERROR] ffmpeg was found at %s, but the local link could not be created.\n' "$ffmpeg_path"
-        printf '%s\n' 'Copy or link it manually as ./ffmpeg, then run this script again.'
-        exit 1
-    fi
-
-    print_ffmpeg_help
-    exit 1
-}
-
 start_server() {
     printf '\n'
     printf '%s\n' '[INFO] Starting the server...'
@@ -124,5 +76,4 @@ find_python
 check_python_version
 ensure_venv
 install_dependencies
-check_ffmpeg
 start_server

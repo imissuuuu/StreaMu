@@ -37,6 +37,7 @@ public:
     out.wallpaper_file = parse_string(json, "wallpaper_file", "");
     out.server_ip = parse_string(json, "server_ip", "");
     out.language = parse_string(json, "language", "en");
+    std::string audio_path = parse_string(json, "audio_path", "opus_direct");
     out.accent_saturation = parse_float(json, "accent_saturation", 0.75f);
     out.accent_brightness = parse_float(json, "accent_brightness", 0.78f);
 
@@ -53,6 +54,7 @@ public:
       out.dpad_speed = 5;
     if (out.language != "ja")
       out.language = "en";
+    out.audio_path = parse_audio_path(audio_path);
     if (out.accent_saturation < 0.0f || out.accent_saturation > 1.0f)
       out.accent_saturation = 0.75f;
     if (out.accent_brightness < 0.0f || out.accent_brightness > 1.0f)
@@ -84,6 +86,8 @@ public:
     fprintf(f, "  \"wallpaper_file\": \"%s\",\n", cfg.wallpaper_file.c_str());
     fprintf(f, "  \"server_ip\": \"%s\",\n", cfg.server_ip.c_str());
     fprintf(f, "  \"language\": \"%s\",\n", cfg.language.c_str());
+    fprintf(f, "  \"audio_path\": \"%s\",\n",
+            audio_path_to_string(cfg.audio_path));
     fprintf(f, "  \"accent_saturation\": %.2f,\n", cfg.accent_saturation);
     fprintf(f, "  \"accent_brightness\": %.2f\n", cfg.accent_brightness);
     fprintf(f, "}\n");
@@ -93,6 +97,20 @@ public:
   }
 
 private:
+  static AudioPathConfig parse_audio_path(const std::string &audio_path) {
+    (void)audio_path;
+    return AudioPathConfig::OPUS_DIRECT;
+  }
+
+  static const char *audio_path_to_string(AudioPathConfig audio_path) {
+    (void)audio_path;
+    switch (audio_path) {
+    case AudioPathConfig::OPUS_DIRECT:
+    default:
+      return "opus_direct";
+    }
+  }
+
   // Simple JSON string parser
   // Finds "key": "value" and returns the value
   static std::string parse_string(const std::string &json, const char *key,

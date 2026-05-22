@@ -1,20 +1,17 @@
 import asyncio
-import subprocess
 import collections
 import re
-import os
-import sys
 import time
+import urllib.parse
 import urllib.request
-from pathlib import Path
 from datetime import datetime
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Iterator
 
-from ffmpeg_bootstrap import get_app_dir, get_ffmpeg_path, ensure_ffmpeg, ensure_ytdlp
-
-BASE_DIR: Path = get_app_dir()
-FFMPEG_PATH: str = get_ffmpeg_path()
-YTDLP_EXE: str = ""
+from opus_probe import OpusFormatInfo, extract_opus_format
+from webm_opus_remux import (
+    WebmOpusRemuxError,
+    iter_ogg_opus_pages_from_webm_chunks,
+)
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -28,10 +25,18 @@ PORT = 8080
 MAX_LOGS = 50
 app_logs: collections.deque[str] = collections.deque(maxlen=MAX_LOGS)
 
-# Cache for seek format info.
-# value: (direct_url, fragments, http_headers, timestamp)
-_url_cache: dict[str, tuple[str, list[dict], dict[str, str], float]] = {}
+_opus_info_cache: dict[str, tuple[OpusFormatInfo, float]] = {}
 URL_CACHE_TTL = 3600  # 1 hour
+MAX_OPUS_WEBM_BYTES = 64 * 1024 * 1024
+OPUS_THUMBNAIL_DELAY_BYTES = 16 * 1024
+OPUS_OGG_PAGE_BATCH_BYTES = 16 * 1024
+OPUS_OGG_PAGE_BATCH_MAX = 64
+OPUS_THUMBNAIL_DELAY_TIMEOUT_SEC = 3.0
+OPUS_SEEK_PREROLL_SECONDS = 15
+OPUS_SEEK_RANGE_BACKTRACK_BYTES = 1024 * 1024
+OPUS_SEEK_CLUSTER_SCAN_BYTES = 1024 * 1024
+WEBM_CLUSTER_ID = b"\x1f\x43\xb6\x75"
+_opus_prebuffer_videos: set[str] = set()
 
 
 def add_log(msg: str) -> None:
@@ -161,274 +166,385 @@ async def search(request: Request) -> PlainTextResponse:
     output = await asyncio.to_thread(search_youtube, q, lang)
     return PlainTextResponse(output)
 
-def _extract_seek_info(v_id: str) -> tuple[str, list[dict], dict[str, str]]:
-    """Extract seek info from yt-dlp: (direct_url, fragments, http_headers).
-    For DASH content, fragments is a non-empty list of {url, duration} dicts.
-    For progressive content, fragments is empty and direct_url is the full file URL.
-    Cached for URL_CACHE_TTL seconds."""
-    cached = _url_cache.get(v_id)
-    if cached and time.time() - cached[3] < URL_CACHE_TTL:
-        add_log(f"Seek info cache hit: {v_id}")
-        return cached[0], cached[1], cached[2]
-
-    yt_url = f"https://www.youtube.com/watch?v={v_id}"
-    ydl_opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",
-        "quiet": True,
-        "no_warnings": True,
-        "socket_timeout": 10,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(yt_url, download=False)
-        direct_url  = info.get("url", "")
-        fragments   = info.get("fragments", [])
-        http_headers: dict[str, str] = info.get("http_headers", {})
-        ext = info.get("ext", "?")
-        n_frags = len(fragments)
-        _url_cache[v_id] = (direct_url, fragments, http_headers, time.time())
-        add_log(f"Seek info cached: {v_id} (ext={ext} frags={n_frags})")
-        return direct_url, fragments, http_headers
-    except (yt_dlp.utils.DownloadError, OSError, ValueError) as e:
-        add_log(f"Seek info extraction failed: {e}")
-    return "", [], {}
-
-def _yt_dlp_download_to_fd(url: str, w_fd: int, fmt: str = "bestaudio/best",
-                           resolved_url: str = "",
-                           resolved_headers: dict[str, str] | None = None) -> None:
-    """Download audio via yt-dlp Python API and write raw bytes to fd.
-    If resolved_url is provided, skip extract_info and use it directly."""
-    try:
-        with os.fdopen(w_fd, "wb") as pipe_out:
-            if not resolved_url:
-                ydl_opts = {
-                    "format": fmt,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "socket_timeout": 10,
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                resolved_url = info.get("url", "")
-                resolved_headers = info.get("http_headers", {})
-            req = urllib.request.Request(resolved_url, headers=resolved_headers or {})
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    pipe_out.write(chunk)
-    except (BrokenPipeError, OSError):
-        pass
-
-
-async def _stream_seek(v_id: str, t: int) -> AsyncGenerator[bytes, None]:
-    """Seek stream: extract seek info then pipe DASH or progressive content through ffmpeg."""
-    url = f"https://www.youtube.com/watch?v={v_id}"
-    direct_url, fragments, http_headers = await asyncio.to_thread(
-        _extract_seek_info, v_id
-    )
-
-    r_fd, w_fd = os.pipe()
-    ffmpeg_proc: asyncio.subprocess.Process | None = None
-    ydl_proc_seek: asyncio.subprocess.Process | None = None
-
-    if fragments:
-        cumulative = 0.0
-        start_idx = 0
-        for i, frag in enumerate(fragments):
-            dur = frag.get("duration", 0) or 0
-            if cumulative + dur > t:
-                start_idx = i
-                break
-            cumulative += dur
-
-        first_url = fragments[0].get("url", direct_url)
-        init_url  = re.sub(r"&sq=\d+", "&sq=0", first_url)
-
-        add_log(f"Seek info: DASH {len(fragments)} frags, start_idx={start_idx} (~{cumulative:.0f}s)")
-
-        def _fetch(fetch_url: str) -> bytes:
-            req = urllib.request.Request(fetch_url, headers=http_headers)
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return resp.read()
-
-        async def _feed_dash() -> None:
-            try:
-                with os.fdopen(w_fd, "wb") as pipe_out:
-                    pipe_out.write(await asyncio.to_thread(_fetch, init_url))
-                    for frag in fragments[start_idx:]:
-                        pipe_out.write(await asyncio.to_thread(_fetch, frag["url"]))
-            except (BrokenPipeError, OSError):
-                pass
-
-        asyncio.create_task(_feed_dash())
-    else:
-        if getattr(sys, 'frozen', False) and not YTDLP_EXE:
-            asyncio.get_event_loop().run_in_executor(
-                None, _yt_dlp_download_to_fd, url, w_fd,
-                "bestaudio[ext=m4a]/bestaudio/best", direct_url, http_headers
-            )
-        else:
-            ydl_bin = YTDLP_EXE if getattr(sys, 'frozen', False) else ""
-            ydl_cmd = ([ydl_bin] if ydl_bin else [sys.executable, "-m", "yt_dlp"]) + [
-                "-f", "bestaudio[ext=m4a]/bestaudio/best",
-                "--quiet", "--no-warnings", "-o", "-", url
-            ]
-            ydl_proc_seek = await asyncio.create_subprocess_exec(
-                *ydl_cmd, stdout=w_fd, stderr=subprocess.DEVNULL
-            )
-            os.close(w_fd)
-            w_fd = -1
-
-    ffmpeg_cmd = [
-        FFMPEG_PATH,
-        "-i", "pipe:0",
-        *([] if fragments else ["-ss", str(t)]),
-        "-f", "mp3", "-ar", "44100", "-ac", "2", "-b:a", "96k",
-        "pipe:1"
-    ]
-    label = "DASH-frags" if fragments else "progressive"
-    ydl_proc_seek_ref = ydl_proc_seek
-
-    try:
-        ffmpeg_proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
-            stdin=r_fd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL
-        )
-        os.close(r_fd)
-        r_fd = -1
-
-        assert ffmpeg_proc.stdout is not None
-        add_log(f"Seek stream started: {v_id} t={t}s ({label})")
-        while True:
-            data = await ffmpeg_proc.stdout.read(32768)
-            if not data:
-                break
-            yield data
-    except asyncio.CancelledError:
-        add_log(f"Seek stream disconnected: {v_id}")
-    except (BrokenPipeError, ConnectionResetError):
-        add_log(f"Seek stream socket closed: {v_id}")
-    except (OSError, RuntimeError) as e:
-        add_log(f"Seek stream error: {e}")
-    finally:
-        if w_fd >= 0:
-            try: os.close(w_fd)
-            except OSError: pass
-        if r_fd >= 0:
-            try: os.close(r_fd)
-            except OSError: pass
-        if ffmpeg_proc:
-            try: ffmpeg_proc.kill()
-            except OSError: pass
-            await ffmpeg_proc.wait()
-        if ydl_proc_seek_ref:
-            try: ydl_proc_seek_ref.kill()
-            except OSError: pass
-            await ydl_proc_seek_ref.wait()
-
-
-async def _stream_normal(v_id: str) -> AsyncGenerator[bytes, None]:
-    """Normal streaming: yt-dlp → pipe → ffmpeg."""
-    url = f"https://www.youtube.com/watch?v={v_id}"
-    ffmpeg_cmd = [
-        FFMPEG_PATH,
-        "-i", "pipe:0",
-        "-f", "mp3", "-ar", "44100", "-ac", "2", "-b:a", "96k",
-        "pipe:1"
-    ]
-
-    r_fd, w_fd = os.pipe()
-    ydl_proc = None
-    ffmpeg_proc = None
-    try:
-        if getattr(sys, 'frozen', False) and not YTDLP_EXE:
-            asyncio.get_event_loop().run_in_executor(
-                None, _yt_dlp_download_to_fd, url, w_fd, "bestaudio/best"
-            )
-        else:
-            ydl_bin = YTDLP_EXE if getattr(sys, 'frozen', False) else ""
-            ydl_cmd = ([ydl_bin] if ydl_bin else [sys.executable, "-m", "yt_dlp"]) + [
-                "-f", "bestaudio/best",
-                "--quiet", "--no-warnings",
-                "-o", "-",
-                url
-            ]
-            ydl_proc = await asyncio.create_subprocess_exec(
-                *ydl_cmd,
-                stdout=w_fd,
-                stderr=subprocess.DEVNULL
-            )
-            os.close(w_fd)
-            w_fd = -1
-
-        ffmpeg_proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
-            stdin=r_fd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL
-        )
-        os.close(r_fd)
-        r_fd = -1
-
-        assert ffmpeg_proc.stdout is not None
-        add_log(f"Pipe streaming started: {v_id}")
-        while True:
-            data = await ffmpeg_proc.stdout.read(32768)
-            if not data:
-                break
-            yield data
-    except asyncio.CancelledError:
-        add_log(f"Stream disconnected by 3DS: {v_id}")
-    except (BrokenPipeError, ConnectionResetError):
-        add_log(f"Stream socket closed: {v_id}")
-    except (OSError, RuntimeError) as e:
-        add_log(f"Unexpected stream error: {e}")
-    finally:
-        if w_fd >= 0:
-            try: os.close(w_fd)
-            except OSError: pass
-        if r_fd >= 0:
-            try: os.close(r_fd)
-            except OSError: pass
-        for proc in filter(None, [ffmpeg_proc, ydl_proc]):
-            try: proc.kill()
-            except OSError: pass
-        if ffmpeg_proc:
-            await ffmpeg_proc.wait()
-        if ydl_proc:
-            await ydl_proc.wait()
-
-
-async def stream_audio_generator(v_id: str, t: int = 0) -> AsyncGenerator[bytes, None]:
-    add_log(f"Stream requested: {v_id}" + (f" (seek {t}s)" if t > 0 else ""))
-    if t > 0:
-        async for chunk in _stream_seek(v_id, t):
-            yield chunk
-    else:
-        async for chunk in _stream_normal(v_id):
-            yield chunk
-
-async def stream(request: Request) -> StreamingResponse | PlainTextResponse:
-    i = request.query_params.get("i", "")
-    # Security: YouTube video IDs are 11 alphanumeric chars (plus hyphen/underscore).
-    # Reject anything else (e.g. OS commands) with 400 error.
-    if not i or not isinstance(i, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', i):
-        add_log(f"Blocked invalid stream ID: {i}")
+async def opus_info(request: Request) -> JSONResponse | PlainTextResponse:
+    v_id = request.query_params.get("i", "")
+    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+        add_log(f"Blocked invalid Opus info ID: {v_id}")
         return PlainTextResponse("Invalid video ID format", status_code=400)
 
-    t_str = request.query_params.get("t", "0")
-    try:
-        t = int(t_str)
-        if t < 0 or t > 86400:
-            t = 0
-    except ValueError:
-        t = 0
+    cached = _opus_info_cache.get(v_id)
+    if cached and time.time() - cached[1] < URL_CACHE_TTL:
+        add_log(f"Opus info cache hit: {v_id}")
+        return JSONResponse(cached[0].to_json_dict())
 
-    return StreamingResponse(stream_audio_generator(i, t), media_type="audio/mpeg")
+    info = await asyncio.to_thread(extract_opus_format, v_id)
+    if info is None:
+        add_log(f"Opus extraction failed: {v_id}")
+        return PlainTextResponse("Opus extraction failed", status_code=502)
+
+    _opus_info_cache[v_id] = (info, time.time())
+    add_log(f"Opus info cached: {v_id} (ext={info.ext} acodec={info.acodec})")
+    return JSONResponse(info.to_json_dict())
+
+def _get_cached_or_extract_opus_info(v_id: str) -> OpusFormatInfo | None:
+    cached = _opus_info_cache.get(v_id)
+    if cached and time.time() - cached[1] < URL_CACHE_TTL:
+        return cached[0]
+    info = extract_opus_format(v_id)
+    if info is None:
+        return None
+    _opus_info_cache[v_id] = (info, time.time())
+    return info
+
+
+def _clamp_seek_seconds(value: str | None) -> int:
+    try:
+        seek_seconds = int(value or "0")
+    except ValueError:
+        return 0
+    if seek_seconds < 0 or seek_seconds > 86400:
+        return 0
+    return seek_seconds
+
+
+def _fragment_start_index(fragments: list[dict[str, Any]],
+                          seek_seconds: int) -> tuple[int, float]:
+    if seek_seconds <= 0 or not fragments:
+        return 0, 0.0
+
+    cumulative = 0.0
+    for index, fragment in enumerate(fragments):
+        duration = fragment.get("duration", 0) or 0
+        try:
+            duration_seconds = float(duration)
+        except (TypeError, ValueError):
+            return 0, 0.0
+        if duration_seconds <= 0:
+            return 0, 0.0
+        if cumulative + duration_seconds > seek_seconds:
+            return index, cumulative
+        cumulative += duration_seconds
+
+    return max(0, len(fragments) - 1), cumulative
+
+
+def _fragment_duration_seconds(fragment: dict[str, Any]) -> float:
+    duration = fragment.get("duration", 0) or 0
+    try:
+        return float(duration)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fragment_url(base_url: str, fragment: dict[str, Any]) -> str:
+    fragment_url = str(fragment.get("url") or "")
+    if fragment_url.startswith("http://") or fragment_url.startswith("https://"):
+        return fragment_url
+    return urllib.parse.urljoin(base_url, fragment_url)
+
+
+def _webm_header_prefix(data: bytes) -> bytes:
+    cluster_offset = data.find(WEBM_CLUSTER_ID)
+    if cluster_offset <= 0:
+        return data
+    return data[:cluster_offset]
+
+
+def _opus_seek_range_start(info: OpusFormatInfo,
+                           seek_seconds: int) -> int | None:
+    if seek_seconds <= 0 or not info.filesize or not info.duration:
+        return None
+    if info.filesize <= 0 or info.duration <= 0:
+        return None
+    start_seconds = max(0.0, float(seek_seconds - OPUS_SEEK_PREROLL_SECONDS))
+    estimated = int((start_seconds / info.duration) * info.filesize)
+    return max(0, estimated - OPUS_SEEK_RANGE_BACKTRACK_BYTES)
+
+
+def _fetch_url_bytes(fetch_url: str, headers: dict[str, str],
+                     timeout: int = 30) -> bytes:
+    req = urllib.request.Request(fetch_url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _fetch_url_bytes_limited(fetch_url: str, headers: dict[str, str],
+                             max_bytes: int,
+                             timeout: int = 60) -> bytes:
+    req = urllib.request.Request(fetch_url, headers=headers)
+    chunks: list[bytes] = []
+    total = 0
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("response too large")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _fetch_url_range(fetch_url: str, headers: dict[str, str], start: int,
+                     end: int | None = None, timeout: int = 30) -> bytes:
+    if start < 0:
+        raise ValueError("negative range start")
+    range_headers = dict(headers)
+    if end is None:
+        range_headers["Range"] = f"bytes={start}-"
+    else:
+        if end < start:
+            raise ValueError("invalid byte range")
+        range_headers["Range"] = f"bytes={start}-{end}"
+    req = urllib.request.Request(fetch_url, headers=range_headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+async def opus_webm_generator(v_id: str) -> AsyncGenerator[bytes, None]:
+    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
+    if info is None:
+        add_log(f"Opus WebM extraction failed: {v_id}")
+        return
+    if not info.direct_url:
+        add_log(f"Opus WebM fragmented stream unsupported: {v_id}")
+        return
+
+    add_log(f"Opus WebM stream started: {v_id} ({info.ext}/{info.acodec})")
+    try:
+        req = urllib.request.Request(info.direct_url, headers=info.http_headers)
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            while True:
+                chunk = resp.read(32768)
+                if not chunk:
+                    break
+                yield chunk
+    except asyncio.CancelledError:
+        add_log(f"Opus WebM stream disconnected: {v_id}")
+    except OSError as e:
+        add_log(f"Opus WebM stream error: {e}")
+
+async def stream_opus(request: Request) -> StreamingResponse | PlainTextResponse:
+    v_id = request.query_params.get("i", "")
+    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+        add_log(f"Blocked invalid Opus stream ID: {v_id}")
+        return PlainTextResponse("Invalid video ID format", status_code=400)
+
+    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
+    if info is None:
+        return PlainTextResponse("Opus extraction failed", status_code=502)
+    if not info.direct_url:
+        return PlainTextResponse("Opus fragmented stream unsupported", status_code=501)
+    _opus_info_cache[v_id] = (info, time.time())
+    return StreamingResponse(opus_webm_generator(v_id), media_type="audio/webm")
+
+
+def _next_ogg_page_batch_or_none(iterator: Iterator[bytes]) -> list[bytes] | None:
+    pages: list[bytes] = []
+    total = 0
+    while len(pages) < OPUS_OGG_PAGE_BATCH_MAX and total < OPUS_OGG_PAGE_BATCH_BYTES:
+        try:
+            page = next(iterator)
+        except StopIteration:
+            break
+        pages.append(page)
+        total += len(page)
+    if not pages:
+        return None
+    return pages
+
+
+async def opus_ogg_generator(
+    v_id: str,
+    info: OpusFormatInfo,
+    seek_seconds: int = 0,
+) -> AsyncGenerator[bytes, None]:
+
+    perf_start = time.monotonic()
+    upstream_first_byte_logged = False
+
+    def perf_ms() -> int:
+        return int((time.monotonic() - perf_start) * 1000)
+
+    def webm_chunks() -> Iterator[bytes]:
+        nonlocal upstream_first_byte_logged
+        total = 0
+
+        def read_url(fetch_url: str) -> Iterator[bytes]:
+            nonlocal upstream_first_byte_logged
+            nonlocal total
+            req = urllib.request.Request(fetch_url, headers=info.http_headers)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                while True:
+                    chunk = resp.read(16384)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_OPUS_WEBM_BYTES:
+                        raise ValueError("response too large")
+                    if not upstream_first_byte_logged:
+                        upstream_first_byte_logged = True
+                        add_log(
+                            f"Opus perf: upstream first byte +{perf_ms()}ms "
+                            f"bytes={total}"
+                        )
+                    yield chunk
+
+        if info.fragments:
+            init_fragments = [
+                fragment for fragment in info.fragments
+                if _fragment_duration_seconds(fragment) <= 0.0
+            ]
+            media_fragments = [
+                fragment for fragment in info.fragments
+                if _fragment_duration_seconds(fragment) > 0.0
+            ]
+            if seek_seconds > 0 and not init_fragments:
+                start_idx, fragment_seconds = 0, 0.0
+                add_log("Opus Ogg seek: no init fragment; streaming from first fragment")
+            else:
+                start_idx, fragment_seconds = _fragment_start_index(
+                    media_fragments, seek_seconds
+                )
+            add_log(
+                f"Opus Ogg seek info: start_idx={start_idx} "
+                f"fragment_time={fragment_seconds:.1f}s"
+            )
+            for fragment in init_fragments:
+                yield from read_url(_fragment_url(info.direct_url, fragment))
+            for fragment in media_fragments[start_idx:]:
+                yield from read_url(_fragment_url(info.direct_url, fragment))
+            return
+
+        range_start = _opus_seek_range_start(info, seek_seconds)
+        if range_start is not None:
+            try:
+                header = _fetch_url_range(
+                    info.direct_url, info.http_headers, 0, (512 * 1024) - 1
+                )
+                header_prefix = _webm_header_prefix(header)
+                range_headers = dict(info.http_headers)
+                range_headers["Range"] = f"bytes={range_start}-"
+                req = urllib.request.Request(info.direct_url, headers=range_headers)
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    pending = bytearray()
+                    while True:
+                        chunk = resp.read(16384)
+                        if not chunk:
+                            raise ValueError("Opus seek cluster not found")
+                        total += len(chunk)
+                        if total > MAX_OPUS_WEBM_BYTES:
+                            raise ValueError("response too large")
+                        if not upstream_first_byte_logged:
+                            upstream_first_byte_logged = True
+                            add_log(
+                                f"Opus perf: upstream first byte +{perf_ms()}ms "
+                                f"bytes={total}"
+                            )
+                        pending.extend(chunk)
+                        cluster_offset = pending.find(WEBM_CLUSTER_ID)
+                        if cluster_offset >= 0:
+                            yield header_prefix
+                            yield bytes(pending[cluster_offset:])
+                            break
+                        if len(pending) > OPUS_SEEK_CLUSTER_SCAN_BYTES:
+                            raise ValueError("Opus seek cluster not found")
+                    while True:
+                        chunk = resp.read(16384)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_OPUS_WEBM_BYTES:
+                            raise ValueError("response too large")
+                        if not upstream_first_byte_logged:
+                            upstream_first_byte_logged = True
+                            add_log(
+                                f"Opus perf: upstream first byte +{perf_ms()}ms "
+                                f"bytes={total}"
+                            )
+                        yield chunk
+                    return
+            except (OSError, ValueError) as e:
+                add_log(f"Opus Ogg seek range fallback: {e}")
+
+        yield from read_url(info.direct_url)
+
+    _opus_info_cache[v_id] = (info, time.time())
+    add_log(
+        f"Opus Ogg stream started: {v_id} ({info.ext}/{info.acodec}) "
+        f"seek={seek_seconds}s fragments={len(info.fragments)}"
+    )
+    _opus_prebuffer_videos.add(v_id)
+    sent_bytes = 0
+    page_count = 0
+    first_page_logged = False
+    sixteen_k_logged = False
+    page_iterator = iter_ogg_opus_pages_from_webm_chunks(
+        webm_chunks(), seek_start_ms=seek_seconds * 1000
+    )
+    try:
+        while True:
+            page_batch = await asyncio.to_thread(
+                _next_ogg_page_batch_or_none, page_iterator
+            )
+            if page_batch is None:
+                break
+            for page in page_batch:
+                page_count += 1
+                if not first_page_logged:
+                    first_page_logged = True
+                    add_log(
+                        f"Opus perf: first ogg page +{perf_ms()}ms "
+                        f"bytes={len(page)}"
+                    )
+                sent_bytes += len(page)
+                yield page
+                if (
+                    not sixteen_k_logged
+                    and sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES
+                ):
+                    sixteen_k_logged = True
+                    add_log(
+                        f"Opus perf: sent 16KB +{perf_ms()}ms "
+                        f"pages={page_count}"
+                    )
+                if sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES:
+                    _opus_prebuffer_videos.discard(v_id)
+    except asyncio.CancelledError:
+        add_log(f"Opus Ogg stream disconnected: {v_id}")
+        raise
+    except ValueError as e:
+        add_log(f"Opus Ogg stream rejected: {e}")
+    except (OSError, WebmOpusRemuxError) as e:
+        add_log(f"Opus Ogg stream failed: {e}")
+    else:
+        add_log(
+            f"Opus Ogg stream finished: {v_id}"
+        )
+        add_log(
+            f"Opus perf: finished +{perf_ms()}ms sent={sent_bytes} "
+            f"pages={page_count}"
+        )
+    finally:
+        _opus_prebuffer_videos.discard(v_id)
+
+
+async def stream_opus_ogg(request: Request) -> StreamingResponse | PlainTextResponse:
+    v_id = request.query_params.get("i", "")
+    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+        add_log(f"Blocked invalid Opus Ogg stream ID: {v_id}")
+        return PlainTextResponse("Invalid video ID format", status_code=400)
+    t = _clamp_seek_seconds(request.query_params.get("t", "0"))
+
+    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
+    if info is None:
+        return PlainTextResponse("Opus extraction failed", status_code=502)
+    if not info.direct_url:
+        return PlainTextResponse("Opus fragmented remux unsupported", status_code=501)
+
+    _opus_info_cache[v_id] = (info, time.time())
+    return StreamingResponse(opus_ogg_generator(v_id, info, t), media_type="audio/ogg")
 
 async def thumbnail(request: Request) -> Response | PlainTextResponse:
     vid = request.query_params.get("id", "")
@@ -437,6 +553,10 @@ async def thumbnail(request: Request) -> Response | PlainTextResponse:
         return PlainTextResponse("Invalid video ID format", status_code=400)
 
     url = f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
+    if vid in _opus_prebuffer_videos:
+        deadline = time.monotonic() + OPUS_THUMBNAIL_DELAY_TIMEOUT_SEC
+        while vid in _opus_prebuffer_videos and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
 
     def fetch_image() -> bytes:
         with urllib.request.urlopen(url, timeout=8) as resp:
@@ -550,7 +670,9 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 routes = [
     Route("/search", search),
-    Route("/stream", stream),
+    Route("/api/opus-info", opus_info),
+    Route("/stream_opus", stream_opus),
+    Route("/stream_opus_ogg", stream_opus_ogg),
     Route("/thumbnail", thumbnail),
     Route("/api/logs", get_logs),
     Route("/", dashboard)
@@ -561,9 +683,6 @@ app = Starlette(debug=False, routes=routes)
 if __name__ == "__main__":
     try:
         print("=== StreaMu Server ===")
-        FFMPEG_PATH = ensure_ffmpeg()
-        if getattr(sys, 'frozen', False):
-            YTDLP_EXE = ensure_ytdlp()
         ip = get_local_ip()
         add_log(f"Starlette Server started on http://{ip}:{PORT}")
         add_log(f"You can now open http://127.0.0.1:{PORT} in your browser to view the dashboard.")

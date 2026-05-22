@@ -28,7 +28,7 @@ A lightweight proxy server runs on your PC and handles YouTube data fetching and
 
 1. Download `streamu.cia` (or `.3dsx`) and `StreaMu-Server.zip` from [Releases](../../releases)
 2. Install the CIA on your 3DS with FBI
-3. Extract `StreaMu-Server.zip` and run the EXE inside — it auto-downloads FFmpeg and yt-dlp on first launch
+3. Extract `StreaMu-Server.zip` and run the EXE inside
 4. Launch StreaMu on your 3DS and enter the IP address shown on the server dashboard
 5. Search for music with the Y button and enjoy!
 
@@ -45,7 +45,7 @@ Download `streamu.cia` or `streamu.3dsx` from [Releases](../../releases).
 
 Download `StreaMu-Server.zip` from [Releases](../../releases), extract it, and run `StreaMu-Server.exe`.
 
-On first launch, the server automatically downloads `ffmpeg.exe` and `yt-dlp.exe` into the same folder. No Python or manual setup needed.
+The server uses native YouTube Opus audio and does not require FFmpeg. No Python or manual setup needed.
 
 #### Option B: Python Script
 
@@ -59,10 +59,7 @@ chmod +x start_server.sh
 This will:
 1. Create a Python virtual environment
 2. Install required packages (starlette, yt-dlp, uvicorn)
-3. Check for FFmpeg
-4. Start the proxy server
-
-If FFmpeg is not found, the script prints install commands for macOS and common Linux distributions.
+3. Start the proxy server
 
 Windows:
 ```bash
@@ -142,7 +139,7 @@ Settings are saved to `sdmc:/3ds/StreaMu/config.json`.
 - **Mac/Linux Python version:** Run `./start_server.sh` from the `server/` folder. It creates the virtual environment and installs dependencies automatically.
 
 **No audio / playback issues**
-- The server needs FFmpeg for audio transcoding. The EXE version handles this automatically. For Windows Python, make sure `ffmpeg.exe` is in the `server/` directory. For Mac/Linux, install `ffmpeg` on your system PATH or place an executable named `ffmpeg` in the `server/` directory.
+- StreaMu uses Opus Direct only. Make sure the proxy server is current and that `/stream_opus_ogg` is reachable from the 3DS.
 
 ### Build from Source
 
@@ -161,9 +158,14 @@ build_exe.bat           # produces dist/StreaMu-Server.zip
 
 ### License
 
-MIT License. See [LICENSE](LICENSE) for details.
+StreaMu project code is MIT licensed. See [LICENSE](LICENSE) for details.
+Bundled third-party components are governed by their own licenses.
 
 Third-party licenses: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+
+Development references: StreaMu's audio design was informed by public 3DS
+homebrew projects such as ctrmus, Video_player_for_3DS, FourthTube, and
+pomegranate. Their code is not bundled in StreaMu.
 
 ---
 
@@ -189,7 +191,7 @@ PC上で動作するプロキシサーバーがYouTubeからのデータ取得�
 
 1. [Releases](../../releases) から `streamu.cia`（または `.3dsx`）と `StreaMu-Server.zip` をダウンロード
 2. 3DSにCIAをFBIでインストール
-3. `StreaMu-Server.zip` を解凍してEXEを実行 — 初回起動時にFFmpegとyt-dlpを自動ダウンロード
+3. `StreaMu-Server.zip` を解凍してEXEを実行
 4. 3DSでStreaMuを起動し、サーバーダッシュボードに表示されるIPアドレスを入力
 5. Yボタンで音楽を検索して再生！
 
@@ -206,7 +208,7 @@ PC上で動作するプロキシサーバーがYouTubeからのデータ取得�
 
 [Releases](../../releases) から `StreaMu-Server.zip` をダウンロードして解凍し、`StreaMu-Server.exe` を実行するだけです。
 
-初回起動時に `ffmpeg.exe` と `yt-dlp.exe` を同じディレクトリに自動ダウンロードします。Pythonやセットアップは不要です。
+サーバーはYouTubeのOpus音声を直接利用し、FFmpegは不要です。Pythonやセットアップは不要です。
 
 #### 方法B: Pythonスクリプト
 
@@ -220,10 +222,7 @@ chmod +x start_server.sh
 以下が自動で行われます：
 1. Python仮想環境の作成
 2. 必要パッケージのインストール（starlette, yt-dlp, uvicorn）
-3. FFmpegの確認
-4. プロキシサーバーの起動
-
-FFmpegが見つからない場合、macOSや主なLinuxディストリビューション向けのインストールコマンド例が表示されます。
+3. プロキシサーバーの起動
 
 Windows:
 ```bash
@@ -303,7 +302,7 @@ venv\Scripts\python proxy.py
 - **Mac/Linux Python版：** `server/` フォルダで `./start_server.sh` を実行してください。仮想環境の作成と依存関係のインストールは自動で行われます。
 
 **音声が出ない・再生できない**
-- サーバーは音声変換にFFmpegが必要です。EXE版は自動処理されます。Windows Python版の場合は `server/` ディレクトリに `ffmpeg.exe` があるか確認してください。Mac/Linuxの場合は `ffmpeg` がシステムPATHに含まれているか、`server/` ディレクトリに実行可能な `ffmpeg` があるか確認してください。
+- StreaMu は Opus Direct のみを使用します。プロキシサーバーが最新で、3DS から `/stream_opus_ogg` に接続できることを確認してください。
 
 ### ソースからビルド
 
@@ -322,6 +321,11 @@ build_exe.bat           # dist/StreaMu-Server.zip を生成
 
 ### ライセンス
 
-MIT License。詳細は [LICENSE](LICENSE) を参照。
+StreaMu 本体コードは MIT License です。詳細は [LICENSE](LICENSE) を参照。
+同梱しているサードパーティコンポーネントには、それぞれ別のライセンスが適用されます。
 
 サードパーティライセンス: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+
+開発時の参考: StreaMu の音声設計では ctrmus、Video_player_for_3DS、
+FourthTube、pomegranate などの公開3DS homebrewプロジェクトを参考にしました。
+これらのコードは StreaMu には同梱していません。
