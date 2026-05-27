@@ -25,6 +25,16 @@ bool g_stream_download_complete = true;
 static u64 g_opus_playback_perf_start_ms = 0;
 static bool g_opus_audio_started_logged = false;
 
+static const char *playback_status_message(bool is_paused, bool is_buffering) {
+  if (is_paused) {
+    return "Paused";
+  }
+  if (is_buffering) {
+    return "Buffering...";
+  }
+  return "Playing";
+}
+
 static void append_opus_playback_perf_log(const char *event, size_t bytes) {
 #if STREAMU_ENABLE_OPUS_PERF_LOG
   if (!event || g_opus_playback_perf_start_ms == 0) {
@@ -425,17 +435,16 @@ void download_thread(void *arg) {
 
       LightLock_Lock(&ctx.lock);
       ctx.is_downloading = false;
-      ctx.is_buffering = false;
-      // Unfreeze seek bar (unless user is still paused)
-      if (!ctx.is_paused && ctx.pause_started_at > 0) {
-        ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
-        ctx.pause_started_at = 0;
-      }
       // Don't change connection state if failure was due to cancellation
       if (!YouTubeAPI::should_cancel) {
         bool is_online = success ? true : api->check_connection();
         ctx.is_server_connected = is_online;
         if (!success) {
+          ctx.is_buffering = false;
+          if (!ctx.is_paused && ctx.pause_started_at > 0) {
+            ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+            ctx.pause_started_at = 0;
+          }
           ctx.g_status_msg = is_online ? "Opus Error (Check Proxy)"
                                        : "Stream Error (Offline?)";
           VorbisPocPlayer::is_playing = false;
@@ -814,6 +823,8 @@ int main(int argc, char *argv[]) {
   auto start_playback = [&](const Track &track) {
     // --- Fully stop and discard previous playback ---
     YouTubeAPI::should_cancel = true; // Signal download thread to stop
+    const bool keep_paused_after_seek =
+        ctx.seek_target_seconds >= 0 && ctx.is_paused;
     {                                 // Safely read is_downloading under lock
       bool still_dl;
       do {
@@ -825,8 +836,8 @@ int main(int argc, char *argv[]) {
       } while (still_dl);
     }
 
-    ctx.is_paused = false;
-    ndspChnSetPaused(0, false);
+    ctx.is_paused = keep_paused_after_seek;
+    ndspChnSetPaused(0, keep_paused_after_seek);
     vorbis_player.stop();
     opus_player.stop();
 
@@ -878,7 +889,8 @@ int main(int argc, char *argv[]) {
     VorbisPocPlayer::is_playing = false;
     OpusPocPlayer::is_playing = opus_ready;
     if (opus_ready) {
-      ctx.g_status_msg = "Buffering...";
+      ctx.g_status_msg =
+          playback_status_message(ctx.is_paused, ctx.is_buffering);
     } else {
       ctx.is_buffering = false;
       ctx.playing_id = "";
@@ -1227,13 +1239,17 @@ int main(int argc, char *argv[]) {
         if (ctx.playing_id != "") {
           ctx.is_paused = !ctx.is_paused;
           ndspChnSetPaused(0, ctx.is_paused);
-          ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+          ctx.g_status_msg =
+              playback_status_message(ctx.is_paused, ctx.is_buffering);
           if (ctx.is_paused) {
-            ctx.pause_started_at = osGetTime();
+            if (!ctx.is_buffering)
+              ctx.pause_started_at = osGetTime();
           } else {
-            if (ctx.pause_started_at > 0)
-              ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
-            ctx.pause_started_at = 0;
+            if (!ctx.is_buffering) {
+              if (ctx.pause_started_at > 0)
+                ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+              ctx.pause_started_at = 0;
+            }
           }
         }
       }
@@ -1320,7 +1336,8 @@ int main(int argc, char *argv[]) {
       if (ctx.playing_id != "") {
         ctx.is_paused = !ctx.is_paused;
         ndspChnSetPaused(0, ctx.is_paused);
-        ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+        ctx.g_status_msg =
+            playback_status_message(ctx.is_paused, ctx.is_buffering);
         if (ctx.is_paused) {
           // Start freeze only if not already frozen by buffering
           if (!ctx.is_buffering)
@@ -1408,7 +1425,8 @@ int main(int argc, char *argv[]) {
         if (!ctx.playing_id.empty()) {
           ctx.is_paused = !ctx.is_paused;
           ndspChnSetPaused(0, ctx.is_paused);
-          ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+          ctx.g_status_msg =
+              playback_status_message(ctx.is_paused, ctx.is_buffering);
           if (ctx.is_paused) {
             if (!ctx.is_buffering)
               ctx.pause_started_at = osGetTime();
@@ -2431,7 +2449,9 @@ int main(int argc, char *argv[]) {
         OpusPocPlayer::is_playing = false;
         ctx.playing_id = "";
       } else {
-        ctx.g_status_msg = "Opus decoding";
+        ndspChnSetPaused(0, ctx.is_paused);
+        ctx.g_status_msg =
+            playback_status_message(ctx.is_paused, ctx.is_buffering);
       }
       LightLock_Unlock(&ctx.lock);
     }
@@ -2486,7 +2506,8 @@ int main(int argc, char *argv[]) {
             : (use_vorbis_poc_for_update ? VorbisPocPlayer::is_playing : false);
     if (active_is_playing && has_started_playing && !ctx.is_paused) {
       LightLock_Lock(&ctx.lock);
-      ctx.g_status_msg = "Playing";
+      ctx.g_status_msg =
+          playback_status_message(ctx.is_paused, ctx.is_buffering);
       LightLock_Unlock(&ctx.lock);
     }
 
