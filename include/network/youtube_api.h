@@ -27,7 +27,8 @@ public:
                             StreamCallback callback);
   bool start_streaming(const std::string &url);
   std::string http_get(const std::string &url, long timeout_sec = 15L);
-  bool check_connection();
+  std::string http_get_ms(const std::string &url, long timeout_ms);
+  bool check_connection(long timeout_ms);
 
   static bool should_cancel;
   void set_server_ip(const std::string &ip) { m_server_ip = ip; }

@@ -161,9 +161,32 @@ std::string YouTubeAPI::http_get(const std::string &url, long timeout_sec) {
   return readBuffer;
 }
 
-bool YouTubeAPI::check_connection() {
-  std::string url = get_base_url() + "/api/logs";
-  std::string res = http_get(url, 1L); // 1s timeout to avoid startup delay
+std::string YouTubeAPI::http_get_ms(const std::string &url, long timeout_ms) {
+  CURL *curl = curl_easy_init();
+  std::string readBuffer;
+  if (curl) {
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+      readBuffer = "";
+    }
+    curl_easy_cleanup(curl);
+  }
+  return readBuffer;
+}
+
+bool YouTubeAPI::check_connection(long timeout_ms) {
+  std::string url = get_base_url() + "/healthz";
+  std::string res = http_get_ms(url, timeout_ms);
   return !res.empty();
 }
 

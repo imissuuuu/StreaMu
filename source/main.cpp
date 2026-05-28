@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdio.h>
 #include <string>
+#include <sys/stat.h>
 #include <time.h>
 #include <vector>
 
@@ -24,6 +25,7 @@ LightLock stream_lock;   // Mutex protecting stream_buffer access
 bool g_stream_download_complete = true;
 static u64 g_opus_playback_perf_start_ms = 0;
 static bool g_opus_audio_started_logged = false;
+static u64 g_startup_perf_start_ms = 0;
 
 static const char *playback_status_message(bool is_paused, bool is_buffering) {
   if (is_paused) {
@@ -56,6 +58,31 @@ static void append_opus_playback_perf_log(const char *event, size_t bytes) {
   (void)event;
   (void)bytes;
 #endif
+}
+
+static void ensure_streamu_data_dir() { mkdir("sdmc:/3ds/StreaMu", 0777); }
+
+static void append_startup_perf_log(const char *event, const char *detail) {
+  if (!event) {
+    return;
+  }
+  ensure_streamu_data_dir();
+  FILE *f = fopen("sdmc:/3ds/StreaMu/startup_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms =
+      (g_startup_perf_start_ms > 0 && now_ms >= g_startup_perf_start_ms)
+          ? now_ms - g_startup_perf_start_ms
+          : 0;
+  fprintf(f, "[startup] +%llums %s",
+          static_cast<unsigned long long>(elapsed_ms), event);
+  if (detail && detail[0] != '\0') {
+    fprintf(f, " %s", detail);
+  }
+  fputc('\n', f);
+  fclose(f);
 }
 
 #include "app_context.h"
@@ -235,31 +262,44 @@ struct StartupConnectionCheck {
   YouTubeAPI api;
   bool done = false;
   bool result = false;
+  u64 elapsed_ms = 0;
+  int attempt = 0;
+  long timeout_ms = 300;
 };
 
 static void startup_connection_check_thread(void *arg) {
   StartupConnectionCheck *check = static_cast<StartupConnectionCheck *>(arg);
-  bool result = check->api.check_connection();
+  const u64 start_ms = osGetTime();
+  bool result = check->api.check_connection(check->timeout_ms);
+  const u64 end_ms = osGetTime();
   LightLock_Lock(&check->lock);
   check->result = result;
   check->done = true;
+  check->elapsed_ms = (end_ms >= start_ms) ? (end_ms - start_ms) : 0;
   LightLock_Unlock(&check->lock);
 }
 
 static void reset_startup_connection_check(StartupConnectionCheck &check,
-                                           const std::string &server_ip) {
+                                           const std::string &server_ip,
+                                           int attempt, long timeout_ms) {
   LightLock_Lock(&check.lock);
   check.done = false;
   check.result = false;
+  check.elapsed_ms = 0;
+  check.attempt = attempt;
+  check.timeout_ms = timeout_ms;
   LightLock_Unlock(&check.lock);
   check.api.set_server_ip(server_ip);
 }
 
 static bool poll_startup_connection_check(StartupConnectionCheck &check,
-                                          bool &result) {
+                                          bool &result, u64 &elapsed_ms,
+                                          int &attempt) {
   LightLock_Lock(&check.lock);
   bool done = check.done;
   result = check.result;
+  elapsed_ms = check.elapsed_ms;
+  attempt = check.attempt;
   LightLock_Unlock(&check.lock);
   return done;
 }
@@ -396,7 +436,7 @@ void download_thread(void *arg) {
       api->search(q, lang, [&](const std::vector<Track> &res, bool ok) {
         bool is_online = true;
         if ((!ok || res.empty()) && !YouTubeAPI::should_cancel) {
-          is_online = api->check_connection();
+          is_online = api->check_connection(1000L);
         }
 
         LightLock_Lock(&ctx.lock);
@@ -425,7 +465,7 @@ void download_thread(void *arg) {
 
       // Retry only if server is reachable (e.g. transient extract error)
       if (!success && !YouTubeAPI::should_cancel) {
-        if (api->check_connection()) {
+        if (api->check_connection(1000L)) {
           svcSleepThread(500ULL * 1000 * 1000); // 0.5s wait
           if (!YouTubeAPI::should_cancel) {
             success = api->start_streaming(stream_url);
@@ -437,7 +477,7 @@ void download_thread(void *arg) {
       ctx.is_downloading = false;
       // Don't change connection state if failure was due to cancellation
       if (!YouTubeAPI::should_cancel) {
-        bool is_online = success ? true : api->check_connection();
+        bool is_online = success ? true : api->check_connection(1000L);
         ctx.is_server_connected = is_online;
         if (!success) {
           ctx.is_buffering = false;
@@ -537,6 +577,9 @@ void draw_loading_screen(UIManager &ui_mgr, C2D_TextBuf buf,
 }
 
 int main(int argc, char *argv[]) {
+  g_startup_perf_start_ms = osGetTime();
+  append_startup_perf_log("boot-start", "");
+
   // Dynamic allocation (RAII) to ensure destructors run before OS exit (socExit
   // etc.)
   g_ctx_ptr = std::make_unique<AppContext>();
@@ -571,6 +614,7 @@ int main(int argc, char *argv[]) {
   // --- Step 1/4: System Init ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 1, 4,
                       "Initializing system...");
+  const u64 step1_start_ms = osGetTime();
 
   aptSetSleepAllowed(false);
   osSetSpeedupEnable(
@@ -591,21 +635,51 @@ int main(int argc, char *argv[]) {
   YouTubeAPI &api = *g_api_ptr;
   api.init();
   ctx.api = &api;
+  {
+    char detail[64];
+    const u64 now_ms = osGetTime();
+    const u64 duration_ms = now_ms >= step1_start_ms ? now_ms - step1_start_ms : 0;
+    snprintf(detail, sizeof(detail), "duration_ms=%llu",
+             static_cast<unsigned long long>(duration_ms));
+    append_startup_perf_log("step1-system-init", detail);
+  }
 
   // Load wallpaper texture (after system init so loading screen is visible
   // first)
+  const u64 wallpaper_start_ms = osGetTime();
   if (!ctx.config.wallpaper_file.empty()) {
     std::string wp_path =
         std::string("sdmc:/3ds/StreaMu/wallpaper/") + ctx.config.wallpaper_file;
     g_wallpaper.load(wp_path);
+  }
+  {
+    char detail[96];
+    const u64 now_ms = osGetTime();
+    const u64 duration_ms =
+        now_ms >= wallpaper_start_ms ? now_ms - wallpaper_start_ms : 0;
+    snprintf(detail, sizeof(detail), "duration_ms=%llu loaded=%s",
+             static_cast<unsigned long long>(duration_ms),
+             ctx.config.wallpaper_file.empty() ? "false" : "true");
+    append_startup_perf_log("wallpaper-load", detail);
   }
 
   // --- Step 2/4: Config loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 2, 4,
                       "Loading config...");
 
+  const u64 playlist_start_ms = osGetTime();
   playlist_manager.init();
   ctx.playlists = playlist_manager.get_playlists();
+  {
+    char detail[96];
+    const u64 now_ms = osGetTime();
+    const u64 duration_ms =
+        now_ms >= playlist_start_ms ? now_ms - playlist_start_ms : 0;
+    snprintf(detail, sizeof(detail), "duration_ms=%llu playlists=%lu",
+             static_cast<unsigned long long>(duration_ms),
+             static_cast<unsigned long>(ctx.playlists.size()));
+    append_startup_perf_log("playlist-load", detail);
+  }
 
   // --- Step 3/4: Playlists loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 3, 4,
@@ -654,7 +728,9 @@ int main(int argc, char *argv[]) {
   bool is_confirming_exit = false;
   int confirm_selected_index = 0;
   u64 connect_start_ms = osGetTime();
-  u64 last_check_ms = connect_start_ms;
+  u64 next_startup_check_ms = connect_start_ms;
+  int startup_check_attempt_count = 0;
+  bool startup_timeout_logged = false;
   StartupConnectionCheck startup_check;
   LightLock_Init(&startup_check.lock);
   Thread startup_check_thread = nullptr;
@@ -669,10 +745,37 @@ int main(int argc, char *argv[]) {
 
   auto start_startup_check = [&]() {
     cleanup_startup_check_thread();
-    reset_startup_connection_check(startup_check, ctx.config.server_ip);
+    startup_check_attempt_count++;
+    const long timeout_ms = 300L;
+    reset_startup_connection_check(startup_check, ctx.config.server_ip,
+                                   startup_check_attempt_count, timeout_ms);
+    {
+      char detail[128];
+      snprintf(detail, sizeof(detail), "attempt=%d timeout_ms=%ld server=%s",
+               startup_check_attempt_count, timeout_ms,
+               ctx.config.server_ip.c_str());
+      append_startup_perf_log("startup-connect-begin", detail);
+    }
     startup_check_thread =
         threadCreate(startup_connection_check_thread, &startup_check, 0x8000,
                      0x3F, -2, false);
+  };
+
+  auto enter_startup_timeout = [&]() {
+    if (!startup_timeout_logged) {
+      char detail[64];
+      const u64 now_ms = osGetTime();
+      const u64 duration_ms =
+          now_ms >= connect_start_ms ? now_ms - connect_start_ms : 0;
+      snprintf(detail, sizeof(detail), "duration_ms=%llu",
+               static_cast<unsigned long long>(duration_ms));
+      append_startup_perf_log("startup-connect-timeout", detail);
+      startup_timeout_logged = true;
+    }
+    cleanup_startup_check_thread();
+    is_timeout = true;
+    is_confirming_exit = false;
+    timeout_selected_index = 1; // Change IP
   };
 
   if (!ctx.config.server_ip.empty()) {
@@ -753,7 +856,8 @@ int main(int argc, char *argv[]) {
           if (timeout_selected_index == 0) { // Retry
             is_timeout = false;
             connect_start_ms = osGetTime();
-            last_check_ms = connect_start_ms;
+            next_startup_check_ms = connect_start_ms;
+            startup_timeout_logged = false;
             start_startup_check();
           } else if (timeout_selected_index == 1) { // Change IP
             std::string ip = show_ip_keyboard(ctx.config.server_ip);
@@ -764,7 +868,8 @@ int main(int argc, char *argv[]) {
             }
             is_timeout = false;
             connect_start_ms = osGetTime();
-            last_check_ms = connect_start_ms;
+            next_startup_check_ms = connect_start_ms;
+            startup_timeout_logged = false;
             start_startup_check();
           } else { // Exit
             is_confirming_exit = true;
@@ -787,23 +892,36 @@ int main(int argc, char *argv[]) {
       }
     } else {
       if (kDown & KEY_B) {
-        is_timeout = true;
-        timeout_selected_index = 1; // Change IP
+        enter_startup_timeout();
       } else {
         anim_counter++;
         u64 now_ms = osGetTime();
         if (now_ms - connect_start_ms >= 15000) { // 15 seconds (real time)
-          is_timeout = true;
+          enter_startup_timeout();
         } else {
           bool check_result = false;
+          u64 check_elapsed_ms = 0;
+          int check_attempt = 0;
           if (startup_check_thread &&
-              poll_startup_connection_check(startup_check, check_result)) {
+              poll_startup_connection_check(startup_check, check_result,
+                                            check_elapsed_ms,
+                                            check_attempt)) {
             cleanup_startup_check_thread();
+            {
+              char detail[128];
+              snprintf(detail, sizeof(detail),
+                       "attempt=%d result=%s duration_ms=%llu", check_attempt,
+                       check_result ? "ok" : "fail",
+                       static_cast<unsigned long long>(check_elapsed_ms));
+              append_startup_perf_log("startup-connect-finish", detail);
+            }
             ctx.is_server_connected = check_result;
-          } else if (!startup_check_thread &&
-                     now_ms - last_check_ms >= 500) { // Check every 0.5s
-                                                      // (real time)
-            last_check_ms = now_ms;
+            if (!check_result) {
+              // Retry quickly after a failed probe; the timeout itself already
+              // spent 300ms waiting, so an extra 500ms gap just adds latency.
+              next_startup_check_ms = now_ms + 50;
+            }
+          } else if (!startup_check_thread && now_ms >= next_startup_check_ms) {
             start_startup_check();
           }
         }
@@ -813,6 +931,19 @@ int main(int argc, char *argv[]) {
   }
 
   cleanup_startup_check_thread();
+  {
+    char detail[160];
+    const u64 now_ms = osGetTime();
+    const u64 duration_ms =
+        now_ms >= connect_start_ms ? now_ms - connect_start_ms : 0;
+    snprintf(detail, sizeof(detail),
+             "connected=%s attempts=%d duration_ms=%llu", 
+             ctx.is_server_connected ? "true" : "false",
+             startup_check_attempt_count,
+             static_cast<unsigned long long>(duration_ms));
+    append_startup_perf_log("step4-connection-check", detail);
+    append_startup_perf_log("startup-ready", detail);
+  }
 
   Thread threadId = nullptr;
   if (ctx.is_running) {
