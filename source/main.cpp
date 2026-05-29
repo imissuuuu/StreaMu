@@ -1684,9 +1684,11 @@ int main(int argc, char *argv[]) {
             ctx.play_queue.clear();
             for (size_t i = 0; i < ctx.playing_tracks.size(); ++i)
               ctx.play_queue.push_back(i);
-            for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
-              size_t j = rand() % (i + 1);
-              std::swap(ctx.play_queue[i], ctx.play_queue[j]);
+            if (ctx.play_queue.size() > 1) {
+              for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
+                size_t j = rand() % (i + 1);
+                std::swap(ctx.play_queue[i], ctx.play_queue[j]);
+              }
             }
             if (cur_playing >= 0) {
               for (size_t i = 0; i < ctx.play_queue.size(); ++i) {
@@ -1769,7 +1771,7 @@ int main(int argc, char *argv[]) {
         ctx.play_queue.clear();
         for (size_t i = 0; i < ctx.playing_tracks.size(); ++i)
           ctx.play_queue.push_back(i);
-        if (ctx.shuffle_mode) {
+        if (ctx.shuffle_mode && ctx.play_queue.size() > 1) {
           for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
             size_t j = rand() % (i + 1);
             std::swap(ctx.play_queue[i], ctx.play_queue[j]);
@@ -1803,7 +1805,7 @@ int main(int argc, char *argv[]) {
           ctx.play_queue.clear();
           for (size_t i = 0; i < ctx.playing_tracks.size(); ++i)
             ctx.play_queue.push_back(i);
-          if (ctx.shuffle_mode) {
+          if (ctx.shuffle_mode && ctx.play_queue.size() > 1) {
             for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
               size_t j = rand() % (i + 1);
               std::swap(ctx.play_queue[i], ctx.play_queue[j]);
@@ -2203,9 +2205,11 @@ int main(int argc, char *argv[]) {
             for (size_t i = 0; i < ctx.playing_tracks.size(); ++i)
               ctx.play_queue.push_back(i);
             if (ctx.shuffle_mode) {
-              for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
-                size_t j = rand() % (i + 1);
-                std::swap(ctx.play_queue[i], ctx.play_queue[j]);
+              if (ctx.play_queue.size() > 1) {
+                for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
+                  size_t j = rand() % (i + 1);
+                  std::swap(ctx.play_queue[i], ctx.play_queue[j]);
+                }
               }
               if (cur_playing_idx >= 0) {
                 for (size_t i = 0; i < ctx.play_queue.size(); ++i) {
