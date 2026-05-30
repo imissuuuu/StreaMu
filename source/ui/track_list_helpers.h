@@ -19,6 +19,7 @@ void draw_playing_style_list(
 
 // Shared DPad navigation for g_tracks list (wrap-around + horizontal scroll)
 void navigate_track_list(AppContext& ctx, u32 kRepeat);
+void clamp_scroll_x_for_current_screen(AppContext& ctx, UIManager& ui_mgr);
 
 // Hamburger menu button
 struct MenuBtnRect { int x, y, w, h; };

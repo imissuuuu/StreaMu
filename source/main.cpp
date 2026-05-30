@@ -16,6 +16,7 @@
 #include "ui/ui_constants.h"
 #include "ui/ui_manager.h"
 #include "ui/ui_renderer.h"
+#include "ui/track_list_helpers.h"
 #include <memory>
 
 std::unique_ptr<std::vector<uint8_t>>
@@ -1170,14 +1171,7 @@ int main(int argc, char *argv[]) {
 
     if (kDown & KEY_B) {
       LightLock_Lock(&ctx.lock);
-      bool was_popup = (ctx.current_state == STATE_POPUP_PLAYLIST_ADD ||
-                        ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS ||
-                        ctx.current_state == STATE_POPUP_TRACK_OPTIONS ||
-                        ctx.current_state == STATE_POPUP_TRACK_DETAILS ||
-                        ctx.current_state == STATE_EXIT_CONFIRM ||
-                        ctx.current_state == STATE_POPUP_NAV ||
-                        ctx.current_state == STATE_POPUP_QA_ADD ||
-                        ctx.current_state == STATE_POPUP_QA_REMOVE);
+      bool was_popup = is_popup_state(ctx.current_state);
       if (was_popup) {
         ctx.current_state = ctx.previous_state;
       }
@@ -1556,15 +1550,7 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Common popup touch handling ---
-    bool is_popup_state = (ctx.current_state == STATE_POPUP_PLAYLIST_ADD ||
-                           ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS ||
-                           ctx.current_state == STATE_POPUP_TRACK_OPTIONS ||
-                           ctx.current_state == STATE_POPUP_TRACK_DETAILS ||
-                           ctx.current_state == STATE_EXIT_CONFIRM ||
-                           ctx.current_state == STATE_POPUP_NAV ||
-                           ctx.current_state == STATE_POPUP_QA_ADD ||
-                           ctx.current_state == STATE_POPUP_QA_REMOVE);
-    if (is_popup_state) {
+    if (is_popup_state(ctx.current_state)) {
       touchPosition touch;
       hidTouchRead(&touch);
 
@@ -2366,6 +2352,7 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Rendering (MVC: View) ---
+    clamp_scroll_x_for_current_screen(ctx, ui_mgr);
     LightLock_Lock(&ctx.lock);
     RenderContext render_ctx = ctx; // Slicing copy for safe, fast data snapshot
     LightLock_Unlock(&ctx.lock);
@@ -2373,14 +2360,7 @@ int main(int argc, char *argv[]) {
     // Draw without holding the lock
     // If it's a popup, UIRenderer needs to draw the overlay on top of whatever
     // screen was behind it.
-    bool is_popup = (render_ctx.current_state == STATE_POPUP_PLAYLIST_ADD ||
-                     render_ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS ||
-                     render_ctx.current_state == STATE_POPUP_TRACK_OPTIONS ||
-                     render_ctx.current_state == STATE_POPUP_TRACK_DETAILS ||
-                     render_ctx.current_state == STATE_EXIT_CONFIRM ||
-                     render_ctx.current_state == STATE_POPUP_QA_ADD ||
-                     render_ctx.current_state == STATE_POPUP_QA_REMOVE ||
-                     render_ctx.current_state == STATE_POPUP_NAV);
+    bool is_popup = is_popup_state(render_ctx.current_state);
 
     AppState bg_state =
         is_popup ? render_ctx.previous_state : render_ctx.current_state;

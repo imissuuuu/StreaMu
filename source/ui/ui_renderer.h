@@ -31,6 +31,22 @@ enum AppState {
 // Playback loop mode
 enum LoopMode { LOOP_OFF, LOOP_ALL, LOOP_ONE };
 
+inline bool is_popup_state(AppState state) {
+  switch (state) {
+  case STATE_POPUP_PLAYLIST_ADD:
+  case STATE_POPUP_PLAYLIST_OPTIONS:
+  case STATE_POPUP_TRACK_OPTIONS:
+  case STATE_POPUP_TRACK_DETAILS:
+  case STATE_EXIT_CONFIRM:
+  case STATE_POPUP_NAV:
+  case STATE_POPUP_QA_ADD:
+  case STATE_POPUP_QA_REMOVE:
+    return true;
+  default:
+    return false;
+  }
+}
+
 // Struct containing all data needed for rendering (passed from AppCtx etc.)
 struct RenderContext {
   AppState current_state;
