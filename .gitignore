@@ -29,8 +29,19 @@ dumps/
 
 # IDE / AI workspace
 .claude/
+.takt/
 review_result.json
 HANDOFF/
+tools/
+startup_perf.log
+.clang-format
+pyproject.toml
+
+# Working design / review docs
+docs/DESIGN/
+docs/RDD/
+docs/POC/
+docs/archive/
 
 # OS files
 .DS_Store
