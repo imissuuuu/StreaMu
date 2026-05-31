@@ -8,6 +8,9 @@ bool OpusPocPlayer::is_playing = false;
 
 static constexpr size_t OPUS_PCM_CAPACITY_SAMPLES = 8192;
 static constexpr int OPUS_WAVE_BUF_COUNT = 8;
+static constexpr int OPUS_STEADY_DECODE_BUFFERS_PER_UPDATE = 2;
+static constexpr int OPUS_REFILL_DECODE_BUFFERS_PER_UPDATE = 6;
+static constexpr int OPUS_LOW_QUEUE_WAVEBUF_THRESHOLD = 4;
 
 OpusPocPlayer::OpusPocPlayer() : audioBuffer(NULL), decode_failed_(false) {
   memset(waveBuf, 0, sizeof(waveBuf));
@@ -64,12 +67,24 @@ bool OpusPocPlayer::start_streaming(const std::vector<uint8_t> *buffer,
   return true;
 }
 
-void OpusPocPlayer::update() {
+void OpusPocPlayer::update() { (void)update_with_stats(); }
+
+OpusPlayerUpdateStats OpusPocPlayer::update_with_stats() {
+  OpusPlayerUpdateStats stats = {};
   if (!is_playing || !audioBuffer || !decoder_.is_open()) {
-    return;
+    return stats;
   }
 
+  const int queued_before_update = queued_wavebuf_count();
+  const int max_decode_buffers =
+      queued_before_update <= OPUS_LOW_QUEUE_WAVEBUF_THRESHOLD
+          ? OPUS_REFILL_DECODE_BUFFERS_PER_UPDATE
+          : OPUS_STEADY_DECODE_BUFFERS_PER_UPDATE;
+
   for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
+    if (stats.decoded_buffers >= max_decode_buffers) {
+      break;
+    }
     if (waveBuf[i].status == NDSP_WBUF_DONE ||
         waveBuf[i].status == NDSP_WBUF_FREE) {
       OpusDecodeResult decoded = decoder_.decode(
@@ -84,14 +99,17 @@ void OpusPocPlayer::update() {
                                                       decoded.channels *
                                                       sizeof(int16_t));
         ndspChnWaveBufAdd(0, &waveBuf[i]);
+        stats.decoded_buffers++;
       } else if (decoded.eof) {
         break;
       } else {
         decode_failed_ = true;
+        stats.hit_decode_failure = true;
         break;
       }
     }
   }
+  return stats;
 }
 
 bool OpusPocPlayer::is_track_finished() const {
@@ -156,4 +174,24 @@ bool OpusPocPlayer::has_decode_failed() const {
   return decode_failed_ || decoder_.has_failed();
 }
 
-bool OpusPocPlayer::is_decoder_open() const { return decoder_.is_open(); }
+int OpusPocPlayer::queued_wavebuf_count() const {
+  int queued_count = 0;
+  for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
+    if (waveBuf[i].status == NDSP_WBUF_QUEUED ||
+        waveBuf[i].status == NDSP_WBUF_PLAYING) {
+      queued_count++;
+    }
+  }
+  return queued_count;
+}
+
+int OpusPocPlayer::free_wavebuf_count() const {
+  int free_count = 0;
+  for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
+    if (waveBuf[i].status == NDSP_WBUF_FREE ||
+        waveBuf[i].status == NDSP_WBUF_DONE) {
+      free_count++;
+    }
+  }
+  return free_count;
+}

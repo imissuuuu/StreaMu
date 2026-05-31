@@ -7,6 +7,11 @@
 
 #include "opus_memory_decoder.h"
 
+struct OpusPlayerUpdateStats {
+  int decoded_buffers;
+  bool hit_decode_failure;
+};
+
 class OpusPocPlayer {
 public:
   OpusPocPlayer();
@@ -16,11 +21,13 @@ public:
   bool start_streaming(const std::vector<uint8_t> *buffer, LightLock *lock,
                        const bool *download_complete);
   void update();
+  OpusPlayerUpdateStats update_with_stats();
   void stop();
   bool is_track_finished() const;
   bool has_started_playing() const;
   bool has_decode_failed() const;
-  bool is_decoder_open() const;
+  int queued_wavebuf_count() const;
+  int free_wavebuf_count() const;
 
   static bool is_playing;
 
