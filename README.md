@@ -12,7 +12,7 @@ A homebrew music player for Nintendo 3DS that searches and streams YouTube audio
 
 This app runs on a Nintendo 3DS (with custom firmware) and lets you search for music on YouTube, browse playlists, and stream audio — all from the 3DS's dual-screen interface.
 
-A lightweight proxy server runs on your PC and handles YouTube data fetching and audio transcoding.
+A lightweight proxy server runs on your PC and handles YouTube data fetching and audio streaming.
 
 ### Requirements
 
