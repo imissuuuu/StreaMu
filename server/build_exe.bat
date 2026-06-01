@@ -1,5 +1,7 @@
 @echo off
 cd /d %~dp0
+set CI_MODE=0
+if "%~1"=="--ci" set CI_MODE=1
 echo === Building StreaMu-Server.exe ===
 echo.
 
@@ -46,4 +48,4 @@ if exist dist\StreaMu-Server.exe (
 ) else (
     echo [ERROR] Build failed.
 )
-pause
+if not "%CI_MODE%"=="1" pause
