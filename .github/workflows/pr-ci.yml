@@ -244,6 +244,15 @@ jobs:
         run: |
           npm install -g takt
 
+      - name: Validate TAKT API key
+        env:
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$TAKT_OPENAI_API_KEY" ]; then
+            echo "::error::Set repository secret TAKT_OPENAI_API_KEY (preferred) or OPENAI_API_KEY for TAKT Codex review."
+            exit 1
+          fi
+
       - name: Mark review running
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -260,7 +269,7 @@ jobs:
 
       - name: Run TAKT review
         env:
-          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY }}
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}
         run: |
           takt --pipeline --skip-git \
             --provider codex \
@@ -323,6 +332,15 @@ jobs:
         run: |
           npm install -g takt
 
+      - name: Validate TAKT API key
+        env:
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$TAKT_OPENAI_API_KEY" ]; then
+            echo "::error::Set repository secret TAKT_OPENAI_API_KEY (preferred) or OPENAI_API_KEY for TAKT Codex review."
+            exit 1
+          fi
+
       - name: Build auto-fix task
         run: |
           python .github/scripts/github_flow.py build-autofix-task \
@@ -333,7 +351,7 @@ jobs:
 
       - name: Run TAKT auto-fix
         env:
-          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY }}
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}
         run: |
           TASK_CONTENT="$(cat .takt/tmp/auto-fix-task.md)"
           takt --pipeline --skip-git \
@@ -465,9 +483,18 @@ jobs:
         run: |
           npm install -g takt
 
+      - name: Validate TAKT API key
+        env:
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$TAKT_OPENAI_API_KEY" ]; then
+            echo "::error::Set repository secret TAKT_OPENAI_API_KEY (preferred) or OPENAI_API_KEY for TAKT Codex review."
+            exit 1
+          fi
+
       - name: Run TAKT review
         env:
-          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY }}
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}
         run: |
           takt --pipeline --skip-git \
             --provider codex \
