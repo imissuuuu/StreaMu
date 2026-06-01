@@ -1,0 +1,21 @@
+name: auto-fix-ci
+description: "Bounded CI auto-fix workflow for safe mechanical review findings only"
+workflow_config:
+  provider_options:
+    codex:
+      network_access: true
+max_steps: 3
+initial_step: implement_fix
+steps:
+  - name: implement_fix
+    edit: true
+    instruction: |
+      Apply only the explicitly listed AUTO_FIXABLE findings from the task input.
+      Keep changes inside the current pull request scope.
+      Do not add features, change user-visible behavior, or modify release metadata.
+      If a requested change is not clearly safe and mechanical, leave it untouched.
+    rules:
+      - condition: 修正を完了した
+        next: COMPLETE
+      - condition: 修正を進行できない
+        next: ABORT

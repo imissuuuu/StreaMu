@@ -1,0 +1,697 @@
+name: PR CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  inspect_pr:
+    name: Inspect PR
+    runs-on: ubuntu-latest
+    outputs:
+      changed_files_json: ${{ steps.inspect.outputs.changed_files_json }}
+      device_test_passed: ${{ steps.inspect.outputs.device_test_passed }}
+      release_requested: ${{ steps.inspect.outputs.release_requested }}
+      selected_review_workflow: ${{ steps.inspect.outputs.selected_review_workflow }}
+      release_version: ${{ steps.inspect.outputs.release_version }}
+      release_eligible: ${{ steps.inspect.outputs.release_eligible }}
+      pull_request_number: ${{ steps.pr_context.outputs.pull_request_number }}
+      base_sha: ${{ steps.pr_context.outputs.base_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Export PR context
+        id: pr_context
+        shell: bash
+        run: |
+          echo "pull_request_number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect PR
+        id: inspect
+        run: |
+          python .github/scripts/github_flow.py inspect-pr \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --write-github-output "$GITHUB_OUTPUT"
+
+      - name: Sync running state
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python .github/scripts/github_flow.py sync-pr-state \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --phase ci-running \
+            --selected-workflow "${{ steps.inspect.outputs.selected_review_workflow }}" \
+            --device-test-passed "${{ steps.inspect.outputs.device_test_passed }}" \
+            --release-requested "${{ steps.inspect.outputs.release_requested }}" \
+            --release-version "${{ steps.inspect.outputs.release_version }}"
+
+  deterministic_autofix:
+    name: Deterministic Autofix
+    needs: inspect_pr
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.autofix.outputs.changed }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r server/requirements-dev.txt
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Apply deterministic autofix
+        id: autofix
+        run: |
+          python .github/scripts/github_flow.py apply-deterministic-autofix \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --changed-files-json '${{ needs.inspect_pr.outputs.changed_files_json }}' \
+            --write-github-output "$GITHUB_OUTPUT"
+
+      - name: Commit autofix changes
+        if: steps.autofix.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "ci: apply deterministic autofix"
+          git push
+
+  static_checks:
+    name: Static Checks
+    needs:
+      - inspect_pr
+      - deterministic_autofix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r server/requirements-dev.txt
+
+      - name: Run Ruff
+        run: |
+          ruff check server .github/scripts
+
+      - name: Run Mypy
+        run: |
+          mypy .github/scripts/github_flow.py
+
+  build_3ds:
+    name: Build 3DS
+    needs:
+      - inspect_pr
+      - deterministic_autofix
+    uses: ./.github/workflows/3ds-build.yml
+    with:
+      artifact_name: streamu-3ds-${{ github.event.pull_request.head.sha }}
+
+  build_server:
+    name: Build Server
+    needs:
+      - inspect_pr
+      - deterministic_autofix
+    runs-on: windows-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Build server zip
+        shell: cmd
+        run: |
+          cd server
+          build_exe.bat --ci
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamu-server-${{ github.event.pull_request.head.sha }}
+          path: server/dist/StreaMu-Server.zip
+          if-no-files-found: error
+
+  read_pr_state:
+    name: Read PR State
+    needs: inspect_pr
+    runs-on: ubuntu-latest
+    outputs:
+      phase: ${{ steps.state.outputs.phase }}
+      autofix_attempts: ${{ steps.state.outputs.autofix_attempts }}
+      review_attempts: ${{ steps.state.outputs.review_attempts }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read state
+        id: state
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python .github/scripts/github_flow.py read-pr-state \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --write-github-output "$GITHUB_OUTPUT"
+
+  takt_review:
+    name: TAKT Review
+    needs:
+      - inspect_pr
+      - deterministic_autofix
+      - static_checks
+      - build_3ds
+      - build_server
+      - read_pr_state
+    if: >
+      needs.inspect_pr.outputs.device_test_passed == 'true' &&
+      needs.read_pr_state.outputs.phase != 'needs-decision'
+    runs-on: ubuntu-latest
+    outputs:
+      decision: ${{ steps.parse.outputs.decision }}
+      auto_fix_allowed: ${{ steps.parse.outputs.auto_fix_allowed }}
+      summary: ${{ steps.parse.outputs.summary }}
+      user_decision_needed: ${{ steps.parse.outputs.user_decision_needed }}
+      user_prompt: ${{ steps.parse.outputs.user_prompt }}
+      report_path: ${{ steps.parse.outputs.report_path }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install TAKT
+        run: |
+          npm install -g takt
+
+      - name: Mark review running
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python .github/scripts/github_flow.py sync-pr-state \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --phase ai-review-running \
+            --selected-workflow "${{ needs.inspect_pr.outputs.selected_review_workflow }}" \
+            --device-test-passed "${{ needs.inspect_pr.outputs.device_test_passed }}" \
+            --release-requested "${{ needs.inspect_pr.outputs.release_requested }}" \
+            --release-version "${{ needs.inspect_pr.outputs.release_version }}" \
+            --increment-review-attempts
+
+      - name: Run TAKT review
+        env:
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY }}
+        run: |
+          takt --pipeline --skip-git \
+            --provider codex \
+            --model gpt-5.4 \
+            --workflow ".github/takt/workflows/${{ needs.inspect_pr.outputs.selected_review_workflow }}.yaml" \
+            --task "Review pull request #${{ needs.inspect_pr.outputs.pull_request_number }} after successful CI. Focus on release blockers only." \
+            --quiet
+
+      - name: Parse review report
+        id: parse
+        run: |
+          python .github/scripts/github_flow.py parse-review-report \
+            --runs-root ".takt/runs" \
+            --write-github-output "$GITHUB_OUTPUT"
+
+      - name: Publish review comment
+        if: always() && steps.parse.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python .github/scripts/github_flow.py publish-review-comment \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --decision "${{ steps.parse.outputs.decision }}" \
+            --summary "${{ steps.parse.outputs.summary }}" \
+            --user-decision-needed "${{ steps.parse.outputs.user_decision_needed }}" \
+            --user-prompt "${{ steps.parse.outputs.user_prompt }}"
+
+  takt_autofix:
+    name: TAKT Auto Fix
+    needs:
+      - inspect_pr
+      - read_pr_state
+      - takt_review
+    if: >
+      needs.takt_review.outputs.decision == 'AUTO_FIXABLE' &&
+      needs.takt_review.outputs.auto_fix_allowed == 'true' &&
+      fromJSON(needs.read_pr_state.outputs.autofix_attempts) < 2
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install TAKT
+        run: |
+          npm install -g takt
+
+      - name: Build auto-fix task
+        run: |
+          python .github/scripts/github_flow.py build-autofix-task \
+            --report-path "${{ needs.takt_review.outputs.report_path }}" \
+            --output-path ".takt/tmp/auto-fix-task.md" \
+            --pr-number "${{ needs.inspect_pr.outputs.pull_request_number }}" \
+            --base-sha "${{ needs.inspect_pr.outputs.base_sha }}"
+
+      - name: Run TAKT auto-fix
+        env:
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY }}
+        run: |
+          TASK_CONTENT="$(cat .takt/tmp/auto-fix-task.md)"
+          takt --pipeline --skip-git \
+            --provider codex \
+            --model gpt-5.4 \
+            --workflow ".github/takt/workflows/auto-fix-ci.yaml" \
+            --task "$TASK_CONTENT" \
+            --quiet
+
+      - name: Commit auto-fix changes
+        id: commit
+        shell: bash
+        run: |
+          if [[ -n "$(git status --short)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "ci: apply TAKT auto-fix"
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  static_checks_after_takt_autofix:
+    name: Static Checks After TAKT Auto Fix
+    needs:
+      - inspect_pr
+      - takt_autofix
+    if: needs.takt_autofix.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r server/requirements-dev.txt
+
+      - name: Run Ruff
+        run: |
+          ruff check server .github/scripts
+
+      - name: Run Mypy
+        run: |
+          mypy .github/scripts/github_flow.py
+
+  build_3ds_after_takt_autofix:
+    name: Build 3DS After TAKT Auto Fix
+    needs:
+      - inspect_pr
+      - takt_autofix
+    if: needs.takt_autofix.outputs.changed == 'true'
+    uses: ./.github/workflows/3ds-build.yml
+    with:
+      artifact_name: streamu-3ds-post-autofix-${{ github.event.pull_request.head.sha }}
+
+  build_server_after_takt_autofix:
+    name: Build Server After TAKT Auto Fix
+    needs:
+      - inspect_pr
+      - takt_autofix
+    if: needs.takt_autofix.outputs.changed == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Build server zip
+        shell: cmd
+        run: |
+          cd server
+          build_exe.bat --ci
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamu-server-post-autofix-${{ github.event.pull_request.head.sha }}
+          path: server/dist/StreaMu-Server.zip
+          if-no-files-found: error
+
+  takt_review_after_autofix:
+    name: TAKT Review After Auto Fix
+    needs:
+      - inspect_pr
+      - takt_autofix
+      - static_checks_after_takt_autofix
+      - build_3ds_after_takt_autofix
+      - build_server_after_takt_autofix
+    if: needs.takt_autofix.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      decision: ${{ steps.parse.outputs.decision }}
+      auto_fix_allowed: ${{ steps.parse.outputs.auto_fix_allowed }}
+      summary: ${{ steps.parse.outputs.summary }}
+      user_decision_needed: ${{ steps.parse.outputs.user_decision_needed }}
+      user_prompt: ${{ steps.parse.outputs.user_prompt }}
+      report_path: ${{ steps.parse.outputs.report_path }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install TAKT
+        run: |
+          npm install -g takt
+
+      - name: Run TAKT review
+        env:
+          TAKT_OPENAI_API_KEY: ${{ secrets.TAKT_OPENAI_API_KEY }}
+        run: |
+          takt --pipeline --skip-git \
+            --provider codex \
+            --model gpt-5.4 \
+            --workflow ".github/takt/workflows/${{ needs.inspect_pr.outputs.selected_review_workflow }}.yaml" \
+            --task "Review pull request #${{ needs.inspect_pr.outputs.pull_request_number }} after automatic fixes. Focus on release blockers only." \
+            --quiet
+
+      - name: Parse review report
+        id: parse
+        run: |
+          python .github/scripts/github_flow.py parse-review-report \
+            --runs-root ".takt/runs" \
+            --write-github-output "$GITHUB_OUTPUT"
+
+      - name: Publish review comment
+        if: always() && steps.parse.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python .github/scripts/github_flow.py publish-review-comment \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --decision "${{ steps.parse.outputs.decision }}" \
+            --summary "${{ steps.parse.outputs.summary }}" \
+            --user-decision-needed "${{ steps.parse.outputs.user_decision_needed }}" \
+            --user-prompt "${{ steps.parse.outputs.user_prompt }}"
+
+  finalize_ci_state:
+    name: Finalize CI State
+    needs:
+      - inspect_pr
+      - read_pr_state
+      - deterministic_autofix
+      - static_checks
+      - build_3ds
+      - build_server
+      - takt_review
+      - takt_autofix
+      - static_checks_after_takt_autofix
+      - build_3ds_after_takt_autofix
+      - build_server_after_takt_autofix
+      - takt_review_after_autofix
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      final_phase: ${{ steps.sync.outputs.final_phase }}
+      artifact_3ds_name: ${{ steps.sync.outputs.artifact_3ds_name }}
+      artifact_server_name: ${{ steps.sync.outputs.artifact_server_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync final state
+        id: sync
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PREVIOUS_AUTOFIX_ATTEMPTS: ${{ needs.read_pr_state.outputs.autofix_attempts }}
+          AUTOFIX_CHANGED: ${{ needs.deterministic_autofix.outputs.changed }}
+          STATIC_RESULT: ${{ needs.static_checks.result }}
+          BUILD_3DS_RESULT: ${{ needs.build_3ds.result }}
+          BUILD_SERVER_RESULT: ${{ needs.build_server.result }}
+          REVIEW_RESULT: ${{ needs.takt_review.result }}
+          REVIEW_DECISION: ${{ needs.takt_review.outputs.decision }}
+          TAKT_AUTOFIX_RESULT: ${{ needs.takt_autofix.result }}
+          TAKT_AUTOFIX_CHANGED: ${{ needs.takt_autofix.outputs.changed }}
+          POST_FIX_STATIC_RESULT: ${{ needs.static_checks_after_takt_autofix.result }}
+          POST_FIX_BUILD_3DS_RESULT: ${{ needs.build_3ds_after_takt_autofix.result }}
+          POST_FIX_BUILD_SERVER_RESULT: ${{ needs.build_server_after_takt_autofix.result }}
+          POST_FIX_REVIEW_RESULT: ${{ needs.takt_review_after_autofix.result }}
+          POST_FIX_REVIEW_DECISION: ${{ needs.takt_review_after_autofix.outputs.decision }}
+        run: |
+          phase="ci-failed"
+          artifact_3ds_name="streamu-3ds-${{ github.event.pull_request.head.sha }}"
+          artifact_server_name="streamu-server-${{ github.event.pull_request.head.sha }}"
+          effective_review_result="${REVIEW_RESULT}"
+          effective_review_decision="${REVIEW_DECISION}"
+          if [[ "${TAKT_AUTOFIX_CHANGED}" == "true" ]]; then
+            effective_review_result="${POST_FIX_REVIEW_RESULT}"
+            effective_review_decision="${POST_FIX_REVIEW_DECISION}"
+            artifact_3ds_name="streamu-3ds-post-autofix-${{ github.event.pull_request.head.sha }}"
+            artifact_server_name="streamu-server-post-autofix-${{ github.event.pull_request.head.sha }}"
+          fi
+          if [[ "${STATIC_RESULT}" == "success" && "${BUILD_3DS_RESULT}" == "success" && "${BUILD_SERVER_RESULT}" == "success" ]]; then
+            if [[ "${{ needs.inspect_pr.outputs.device_test_passed }}" == "true" ]]; then
+              if [[ "${TAKT_AUTOFIX_CHANGED}" == "true" ]]; then
+                if [[ "${POST_FIX_STATIC_RESULT}" != "success" || "${POST_FIX_BUILD_3DS_RESULT}" != "success" || "${POST_FIX_BUILD_SERVER_RESULT}" != "success" ]]; then
+                  phase="needs-maintainer-fix"
+                fi
+              fi
+              if [[ "${phase}" == "ci-failed" && "${effective_review_result}" == "success" ]]; then
+                case "${effective_review_decision}" in
+                  APPROVE)
+                    phase="review-approved"
+                    ;;
+                  NEEDS_DECISION)
+                    phase="needs-decision"
+                    ;;
+                  REJECT)
+                    phase="needs-maintainer-fix"
+                    ;;
+                  AUTO_FIXABLE)
+                    if [[ "${TAKT_AUTOFIX_CHANGED}" == "true" ]]; then
+                      phase="needs-maintainer-fix"
+                    elif [[ "${PREVIOUS_AUTOFIX_ATTEMPTS}" -ge 2 ]]; then
+                      phase="needs-maintainer-fix"
+                    else
+                      phase="needs-maintainer-fix"
+                    fi
+                    ;;
+                  *)
+                    phase="ready-for-ai-review"
+                    ;;
+                esac
+              elif [[ "${phase}" == "ci-failed" ]]; then
+                phase="ready-for-ai-review"
+              fi
+            else
+              phase="ci-awaiting-device-test"
+            fi
+          fi
+          python .github/scripts/github_flow.py sync-pr-state \
+            --event-path "${GITHUB_EVENT_PATH}" \
+            --phase "${phase}" \
+            --selected-workflow "${{ needs.inspect_pr.outputs.selected_review_workflow }}" \
+            --device-test-passed "${{ needs.inspect_pr.outputs.device_test_passed }}" \
+            --release-requested "${{ needs.inspect_pr.outputs.release_requested }}" \
+            --release-version "${{ needs.inspect_pr.outputs.release_version }}" \
+            $([[ "${TAKT_AUTOFIX_RESULT}" == "success" && "${TAKT_AUTOFIX_CHANGED}" == "true" ]] && echo "--increment-autofix-attempts")
+          {
+            echo "final_phase=${phase}"
+            echo "artifact_3ds_name=${artifact_3ds_name}"
+            echo "artifact_server_name=${artifact_server_name}"
+          } >> "$GITHUB_OUTPUT"
+
+  draft_release:
+    name: Draft Release
+    needs:
+      - inspect_pr
+      - finalize_ci_state
+    if: >
+      needs.finalize_ci_state.outputs.final_phase == 'review-approved' &&
+      needs.inspect_pr.outputs.release_requested == 'true' &&
+      needs.inspect_pr.outputs.release_eligible == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Download 3DS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.finalize_ci_state.outputs.artifact_3ds_name }}
+          path: release-artifacts/3ds
+
+      - name: Download server artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.finalize_ci_state.outputs.artifact_server_name }}
+          path: release-artifacts/server
+
+      - name: Create or update draft release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.inspect_pr.outputs.release_version }}
+        run: |
+          tag="v${RELEASE_VERSION}"
+          title="StreaMu v${RELEASE_VERSION}"
+          notes_file="RELEASE_NOTES_v${RELEASE_VERSION}.md"
+          target_sha="$(git rev-parse HEAD)"
+
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.draft' >/tmp/release_draft_state 2>/dev/null; then
+            if [[ "$(cat /tmp/release_draft_state)" != "true" ]]; then
+              echo "Published release already exists for ${tag}; refusing to overwrite it." >&2
+              exit 1
+            fi
+            gh release edit "${tag}" \
+              --draft \
+              --title "${title}" \
+              --notes-file "${notes_file}" \
+              --target "${target_sha}"
+          else
+            gh release create "${tag}" \
+              --draft \
+              --title "${title}" \
+              --notes-file "${notes_file}" \
+              --target "${target_sha}"
+          fi
+
+      - name: Upload draft release assets
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.inspect_pr.outputs.release_version }}
+        run: |
+          tag="v${RELEASE_VERSION}"
+          gh release upload "${tag}" \
+            release-artifacts/3ds/streamu.cia \
+            release-artifacts/3ds/streamu.3dsx \
+            release-artifacts/server/StreaMu-Server.zip \
+            --clobber
+
+      - name: Mark release draft ready
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python .github/scripts/github_flow.py sync-pr-state \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --phase release-draft-ready \
+            --selected-workflow "${{ needs.inspect_pr.outputs.selected_review_workflow }}" \
+            --device-test-passed "${{ needs.inspect_pr.outputs.device_test_passed }}" \
+            --release-requested "${{ needs.inspect_pr.outputs.release_requested }}" \
+            --release-version "${{ needs.inspect_pr.outputs.release_version }}"

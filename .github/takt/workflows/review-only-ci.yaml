@@ -1,0 +1,90 @@
+name: review-only-ci
+description: "CI review for docs, workflows, and operational changes"
+workflow_config:
+  provider_options:
+    codex:
+      network_access: true
+report_formats:
+  review_step: ../output-contracts/review-step.md
+  automation_final: ../output-contracts/review-automation-final.md
+max_steps: 6
+initial_step: cheap_review
+steps:
+  - name: cheap_review
+    edit: false
+    instruction: |
+      Review the current pull request diff with a low-cost pass.
+      Focus only on blocking issues, obvious regressions, and missing operational steps.
+      For docs or workflow-only changes, verify factual consistency and reproducibility.
+      Output one of: APPROVE, AUTO_FIXABLE, NEEDS_DECISION, REJECT, or 対象なし.
+      - APPROVE: no blocking issue.
+      - AUTO_FIXABLE: only mechanical or safe fixes are required.
+      - NEEDS_DECISION: user behavior/product decision is required.
+      - REJECT: maintainer code or config changes are required, but no user decision is needed.
+    output_contracts:
+      report:
+        - name: cheap-review.md
+          format: review_step
+    rules:
+      - condition: APPROVE
+        next: targeted_review
+      - condition: 対象なし
+        next: final_check
+      - condition: AUTO_FIXABLE
+        next: final_check
+      - condition: NEEDS_DECISION
+        next: final_check
+      - condition: REJECT
+        next: final_check
+      - condition: レビューを進行できない
+        next: ABORT
+
+  - name: targeted_review
+    edit: false
+    model: gpt-5.5
+    instruction: |
+      Perform the final high-signal review on the current pull request diff.
+      Confirm whether the change is safe to release.
+      Only raise issues that are truly blocking, operationally unsafe, or missing evidence.
+      If you find a required fix, classify it as:
+      - AUTO_FIXABLE when it is mechanical and safe.
+      - NEEDS_DECISION when user judgment is required.
+      - REJECT when maintainer changes are needed without user judgment.
+      Otherwise conclude APPROVE.
+    output_contracts:
+      report:
+        - name: targeted-review.md
+          format: review_step
+    rules:
+      - condition: APPROVE
+        next: final_check
+      - condition: AUTO_FIXABLE
+        next: final_check
+      - condition: NEEDS_DECISION
+        next: final_check
+      - condition: REJECT
+        next: final_check
+      - condition: 対象なし
+        next: final_check
+      - condition: レビューを進行できない
+        next: ABORT
+
+  - name: final_check
+    edit: false
+    instruction: |
+      Produce the final machine-readable review result for automation.
+      Use the strongest blocking conclusion from previous review steps.
+      If no blocking issue exists, output APPROVE.
+      If every required fix is mechanical and safe, output AUTO_FIXABLE with AutoFixAllowed: true.
+      If the user must choose behavior or product direction, output NEEDS_DECISION with UserDecisionNeeded: yes and a short UserPrompt.
+      If maintainer changes are needed without user choice, output REJECT.
+      The output must follow the automation_final contract exactly.
+    output_contracts:
+      report:
+        - name: review-report.md
+          format: automation_final
+    rules:
+      - condition: レビュー最終レポートを作成できた
+        next: COMPLETE
+      - condition: レビュー最終レポートを作成できない
+        next: ABORT
