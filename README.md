@@ -171,6 +171,7 @@ powershell -ExecutionPolicy Bypass -File scripts/review_local.ps1 -DeviceTestSum
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/sync_remote.ps1
 ```
+   `scripts/sync_remote.ps1` only stages publishable project files. Local-only paths such as `.claude/`, `.takt/`, `docs/`, `HANDOFF/`, `tools/`, and working review artifacts are blocked from remote sync.
 5. After the PR is merged to `main`, GitHub automatically builds artifacts and publishes a release when `Makefile` version and `RELEASE_NOTES_v{VERSION}.md` indicate a new release.
 
 For the full linked local flow up to PR sync, use:

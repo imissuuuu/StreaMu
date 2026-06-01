@@ -113,6 +113,9 @@ try {
     $inspection = Invoke-JsonCommand -Command (Get-InspectCommand)
 
     if ($null -eq $inspection.changed_files -or $inspection.changed_files.Count -eq 0) {
+        if ($null -ne $inspection.blocked_paths -and $inspection.blocked_paths.Count -gt 0) {
+            throw "No publishable local changes found. Blocked local-only paths: $($inspection.blocked_paths -join ', ')"
+        }
         throw "No local changes found to review."
     }
 

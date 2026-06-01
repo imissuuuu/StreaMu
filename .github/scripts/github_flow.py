@@ -34,6 +34,49 @@ CPP_PATH_PREFIXES: tuple[str, ...] = ("source/", "include/")
 PYTHON_PATH_PREFIXES: tuple[str, ...] = ("server/", "tools/", ".github/scripts/")
 CPP_FILE_EXTENSIONS: tuple[str, ...] = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp")
 PYTHON_FILE_EXTENSIONS: tuple[str, ...] = (".py",)
+PUBLISHABLE_PATH_PREFIXES: tuple[str, ...] = (
+    ".github/",
+    "android/",
+    "assets/",
+    "include/",
+    "scripts/",
+    "server/",
+    "source/",
+    "third_party/",
+)
+PUBLISHABLE_EXACT_PATHS: tuple[str, ...] = (
+    ".gitignore",
+    "LICENSE",
+    "Makefile",
+    "README.md",
+    "THIRD_PARTY_LICENSES.md",
+    "app.rsf",
+    "banner.bnr",
+    "build.sh",
+)
+LOCAL_ONLY_PATH_PREFIXES: tuple[str, ...] = (
+    ".claude/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".takt/",
+    "docs/",
+    "dumps/",
+    "HANDOFF/",
+    "logs/",
+    "mockup/",
+    "release-artifacts-",
+    "test_wallpapers/",
+    "tools/",
+    "venv/",
+    "__pycache__/",
+)
+LOCAL_ONLY_EXACT_PATHS: tuple[str, ...] = (
+    ".clang-format",
+    "pyproject.toml",
+    "review_result.json",
+    "startup_perf.log",
+)
+RELEASE_NOTES_PATTERN = re.compile(r"^RELEASE_NOTES_v[0-9]+\.[0-9]+\.[0-9]+\.md$")
 
 
 @dataclass(frozen=True)
@@ -129,6 +172,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     local_checks_parser.add_argument("--repo-root", type=Path, required=True)
     local_checks_parser.add_argument("--skip-build", action="store_true")
     local_checks_parser.add_argument("--scope-path", action="append", default=[])
+
+    publishable_parser = subparsers.add_parser("classify-publishable")
+    publishable_parser.add_argument("--paths-json", required=True)
 
     static_checks_parser = subparsers.add_parser("run-static-checks")
     static_checks_parser.add_argument("--repo-root", type=Path, required=True)
@@ -308,6 +354,42 @@ def filter_changed_files_by_scope(
                 filtered.append(changed_file)
                 break
     return tuple(filtered)
+
+
+def is_publishable_path(path: str) -> bool:
+    normalized_path = path.replace("\\", "/").strip().strip("/")
+    if not normalized_path:
+        return False
+    if normalized_path in LOCAL_ONLY_EXACT_PATHS:
+        return False
+    if any(
+        normalized_path == prefix.rstrip("/")
+        or normalized_path.startswith(prefix)
+        for prefix in LOCAL_ONLY_PATH_PREFIXES
+    ):
+        return False
+    if normalized_path in PUBLISHABLE_EXACT_PATHS:
+        return True
+    if RELEASE_NOTES_PATTERN.fullmatch(normalized_path):
+        return True
+    return any(
+        normalized_path == prefix.rstrip("/")
+        or normalized_path.startswith(prefix)
+        for prefix in PUBLISHABLE_PATH_PREFIXES
+    )
+
+
+def split_publishable_paths(
+    changed_files: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    publishable_paths: list[str] = []
+    blocked_paths: list[str] = []
+    for path in changed_files:
+        if is_publishable_path(path):
+            publishable_paths.append(path)
+        else:
+            blocked_paths.append(path)
+    return tuple(publishable_paths), tuple(blocked_paths)
 
 
 def load_pull_request_context(event_path: Path, repo_root: Path) -> PullRequestContext:
@@ -519,14 +601,18 @@ def handle_inspect_pr(
 
 
 def handle_inspect_local(repo_root: Path, scope_paths: tuple[str, ...]) -> int:
-    changed_files = filter_changed_files_by_scope(
+    scoped_changed_files = filter_changed_files_by_scope(
         collect_worktree_changed_files(repo_root),
         scope_paths,
     )
-    inspection = select_local_review_workflow(changed_files)
+    publishable_changed_files, blocked_paths = split_publishable_paths(
+        scoped_changed_files
+    )
+    inspection = select_local_review_workflow(publishable_changed_files)
     payload: JsonObject = {
         "branch": get_current_branch(repo_root),
         "changed_files": list(inspection.changed_files),
+        "blocked_paths": list(blocked_paths),
         "selected_workflow": inspection.selected_workflow,
         "touches_python": inspection.touches_python,
         "touches_cpp": inspection.touches_cpp,
@@ -667,17 +753,25 @@ def handle_apply_deterministic_autofix(
 def handle_run_local_checks(
     repo_root: Path, skip_build: bool, scope_paths: tuple[str, ...]
 ) -> int:
-    changed_files = filter_changed_files_by_scope(
+    scoped_changed_files = filter_changed_files_by_scope(
         collect_worktree_changed_files(repo_root),
         scope_paths,
     )
+    changed_files, blocked_paths = split_publishable_paths(scoped_changed_files)
     if not changed_files:
+        if blocked_paths:
+            blocked_display = ", ".join(blocked_paths)
+            raise ValueError(
+                f"no publishable local changes found; blocked local-only paths: {blocked_display}"
+            )
         raise ValueError("no local changes found")
 
     changed_after_fix, _, _ = apply_deterministic_autofix_to_files(
         repo_root, changed_files
     )
-    effective_changed_files = changed_after_fix or collect_worktree_changed_files(repo_root)
+    effective_changed_files, blocked_after_fix = split_publishable_paths(
+        changed_after_fix or collect_worktree_changed_files(repo_root)
+    )
     static_check_plan = build_static_check_plan(effective_changed_files)
     run_static_check_plan(repo_root, static_check_plan)
 
@@ -708,6 +802,7 @@ def handle_run_local_checks(
             "mypy_targets": list(static_check_plan.mypy_targets),
             "ran_3ds_build": ran_3ds_build,
             "ran_server_build": ran_server_build,
+            "blocked_paths": list(blocked_after_fix),
             "scope_paths": list(scope_paths),
         }
     )
@@ -721,6 +816,18 @@ def parse_string_json_array(raw_value: str, argument_name: str) -> tuple[str, ..
     ):
         raise ValueError(f"{argument_name} must be a JSON array of strings")
     return tuple(parsed)
+
+
+def handle_classify_publishable(paths_json: str) -> int:
+    paths = parse_string_json_array(paths_json, "paths-json")
+    publishable_paths, blocked_paths = split_publishable_paths(paths)
+    print_json(
+        {
+            "publishable_paths": list(publishable_paths),
+            "blocked_paths": list(blocked_paths),
+        }
+    )
+    return 0
 
 
 def handle_run_static_checks(
@@ -1319,6 +1426,8 @@ def main(argv: list[str]) -> int:
                 skip_build=args.skip_build,
                 scope_paths=normalize_scope_paths(args.scope_path),
             )
+        if args.command == "classify-publishable":
+            return handle_classify_publishable(paths_json=args.paths_json)
         if args.command == "run-static-checks":
             return handle_run_static_checks(
                 repo_root=args.repo_root.resolve(),
