@@ -8,7 +8,8 @@ bool OpusPocPlayer::is_playing = false;
 
 static constexpr size_t OPUS_PCM_CAPACITY_SAMPLES = 8192;
 static constexpr int OPUS_WAVE_BUF_COUNT = 8;
-static constexpr int OPUS_STEADY_DECODE_BUFFERS_PER_UPDATE = 2;
+static constexpr int OPUS_STEADY_TARGET_QUEUED_WAVEBUFS = 7;
+static constexpr int OPUS_STEADY_MAX_DECODE_BUFFERS_PER_UPDATE = 2;
 static constexpr int OPUS_REFILL_DECODE_BUFFERS_PER_UPDATE = 6;
 static constexpr int OPUS_LOW_QUEUE_WAVEBUF_THRESHOLD = 4;
 
@@ -76,13 +77,18 @@ OpusPlayerUpdateStats OpusPocPlayer::update_with_stats() {
   }
 
   const int queued_before_update = queued_wavebuf_count();
+  const bool low_queue_refill =
+      queued_before_update <= OPUS_LOW_QUEUE_WAVEBUF_THRESHOLD;
   const int max_decode_buffers =
-      queued_before_update <= OPUS_LOW_QUEUE_WAVEBUF_THRESHOLD
+      low_queue_refill
           ? OPUS_REFILL_DECODE_BUFFERS_PER_UPDATE
-          : OPUS_STEADY_DECODE_BUFFERS_PER_UPDATE;
+          : OPUS_STEADY_MAX_DECODE_BUFFERS_PER_UPDATE;
+  const int target_queued_wavebufs =
+      low_queue_refill ? OPUS_WAVE_BUF_COUNT : OPUS_STEADY_TARGET_QUEUED_WAVEBUFS;
 
   for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
-    if (stats.decoded_buffers >= max_decode_buffers) {
+    if (stats.decoded_buffers >= max_decode_buffers ||
+        queued_wavebuf_count() >= target_queued_wavebufs) {
       break;
     }
     if (waveBuf[i].status == NDSP_WBUF_DONE ||
