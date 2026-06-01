@@ -77,6 +77,13 @@ class ReviewDecision:
     user_prompt: str | None
 
 
+@dataclass(frozen=True)
+class StaticCheckPlan:
+    ruff_targets: tuple[str, ...]
+    py_compile_targets: tuple[str, ...]
+    mypy_targets: tuple[str, ...]
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="GitHub automation helper for StreaMu PR CI."
@@ -92,6 +99,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     autofix_parser.add_argument("--repo-root", type=Path, required=True)
     autofix_parser.add_argument("--changed-files-json", required=True)
     autofix_parser.add_argument("--write-github-output", type=Path)
+
+    static_checks_parser = subparsers.add_parser("run-static-checks")
+    static_checks_parser.add_argument("--repo-root", type=Path, required=True)
+    static_checks_parser.add_argument("--ruff-targets-json", required=True)
+    static_checks_parser.add_argument("--py-compile-targets-json", required=True)
+    static_checks_parser.add_argument("--mypy-targets-json", required=True)
 
     sync_parser = subparsers.add_parser("sync-pr-state")
     sync_parser.add_argument("--event-path", type=Path, required=True)
@@ -283,6 +296,37 @@ def select_review_workflow(
     )
 
 
+def build_static_check_plan(changed_files: tuple[str, ...]) -> StaticCheckPlan:
+    ruff_targets: list[str] = []
+    py_compile_targets: list[str] = []
+    mypy_targets: list[str] = []
+    seen_ruff: set[str] = set()
+    seen_py_compile: set[str] = set()
+    seen_mypy: set[str] = set()
+
+    for path in changed_files:
+        suffix = Path(path).suffix.lower()
+        if suffix not in PYTHON_FILE_EXTENSIONS:
+            continue
+        if not path.startswith(PYTHON_PATH_PREFIXES):
+            continue
+        if path not in seen_ruff:
+            ruff_targets.append(path)
+            seen_ruff.add(path)
+        if path not in seen_py_compile:
+            py_compile_targets.append(path)
+            seen_py_compile.add(path)
+        if path.startswith(".github/scripts/") and path not in seen_mypy:
+            mypy_targets.append(path)
+            seen_mypy.add(path)
+
+    return StaticCheckPlan(
+        ruff_targets=tuple(ruff_targets),
+        py_compile_targets=tuple(py_compile_targets),
+        mypy_targets=tuple(mypy_targets),
+    )
+
+
 def print_json(payload: JsonObject) -> None:
     print(json.dumps(payload, ensure_ascii=True, indent=2))
 
@@ -302,6 +346,7 @@ def handle_inspect_pr(
         release_requested=release_requested,
         release_version=release_version,
     )
+    static_check_plan = build_static_check_plan(context.changed_files)
 
     outputs = {
         "changed_files_json": json.dumps(
@@ -312,6 +357,15 @@ def handle_inspect_pr(
         "selected_review_workflow": selection.workflow_name,
         "release_version": release_version or "",
         "release_eligible": "true" if release_eligible else "false",
+        "ruff_targets_json": json.dumps(
+            list(static_check_plan.ruff_targets), ensure_ascii=True
+        ),
+        "py_compile_targets_json": json.dumps(
+            list(static_check_plan.py_compile_targets), ensure_ascii=True
+        ),
+        "mypy_targets_json": json.dumps(
+            list(static_check_plan.mypy_targets), ensure_ascii=True
+        ),
     }
     write_github_output(output_path, outputs)
 
@@ -324,6 +378,9 @@ def handle_inspect_pr(
             "release_version": release_version,
             "release_eligible": release_eligible,
             "changed_files": list(context.changed_files),
+            "ruff_targets": list(static_check_plan.ruff_targets),
+            "py_compile_targets": list(static_check_plan.py_compile_targets),
+            "mypy_targets": list(static_check_plan.mypy_targets),
         }
     )
     return 0
@@ -413,6 +470,42 @@ def handle_apply_deterministic_autofix(
             "changed_paths": list(changed_after_fix),
             "python_targets": python_files,
             "cpp_targets": cpp_files,
+        }
+    )
+    return 0
+
+
+def parse_string_json_array(raw_value: str, argument_name: str) -> tuple[str, ...]:
+    parsed = json.loads(raw_value)
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"{argument_name} must be a JSON array of strings")
+    return tuple(parsed)
+
+
+def handle_run_static_checks(
+    repo_root: Path,
+    ruff_targets_json: str,
+    py_compile_targets_json: str,
+    mypy_targets_json: str,
+) -> int:
+    ruff_targets = parse_string_json_array(ruff_targets_json, "--ruff-targets-json")
+    py_compile_targets = parse_string_json_array(
+        py_compile_targets_json, "--py-compile-targets-json"
+    )
+    mypy_targets = parse_string_json_array(mypy_targets_json, "--mypy-targets-json")
+
+    if ruff_targets:
+        run_command(repo_root, ["ruff", "check", *ruff_targets])
+    if py_compile_targets:
+        run_command(repo_root, [sys.executable, "-m", "py_compile", *py_compile_targets])
+    if mypy_targets:
+        run_command(repo_root, ["mypy", *mypy_targets])
+
+    print_json(
+        {
+            "ruff_targets": list(ruff_targets),
+            "py_compile_targets": list(py_compile_targets),
+            "mypy_targets": list(mypy_targets),
         }
     )
     return 0
@@ -917,6 +1010,13 @@ def main(argv: list[str]) -> int:
                 output_path=args.write_github_output.resolve()
                 if args.write_github_output
                 else None,
+            )
+        if args.command == "run-static-checks":
+            return handle_run_static_checks(
+                repo_root=args.repo_root.resolve(),
+                ruff_targets_json=args.ruff_targets_json,
+                py_compile_targets_json=args.py_compile_targets_json,
+                mypy_targets_json=args.mypy_targets_json,
             )
         if args.command == "sync-pr-state":
             return handle_sync_pr_state(

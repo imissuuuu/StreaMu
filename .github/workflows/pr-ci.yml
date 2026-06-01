@@ -24,6 +24,9 @@ jobs:
       selected_review_workflow: ${{ steps.inspect.outputs.selected_review_workflow }}
       release_version: ${{ steps.inspect.outputs.release_version }}
       release_eligible: ${{ steps.inspect.outputs.release_eligible }}
+      ruff_targets_json: ${{ steps.inspect.outputs.ruff_targets_json }}
+      py_compile_targets_json: ${{ steps.inspect.outputs.py_compile_targets_json }}
+      mypy_targets_json: ${{ steps.inspect.outputs.mypy_targets_json }}
       pull_request_number: ${{ steps.pr_context.outputs.pull_request_number }}
       base_sha: ${{ steps.pr_context.outputs.base_sha }}
     steps:
@@ -130,13 +133,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r server/requirements-dev.txt
 
-      - name: Run Ruff
+      - name: Run scoped static checks
         run: |
-          ruff check server .github/scripts
-
-      - name: Run Mypy
-        run: |
-          mypy .github/scripts/github_flow.py
+          python .github/scripts/github_flow.py run-static-checks \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --ruff-targets-json '${{ needs.inspect_pr.outputs.ruff_targets_json }}' \
+            --py-compile-targets-json '${{ needs.inspect_pr.outputs.py_compile_targets_json }}' \
+            --mypy-targets-json '${{ needs.inspect_pr.outputs.mypy_targets_json }}'
 
   build_3ds:
     name: Build 3DS
@@ -379,13 +382,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r server/requirements-dev.txt
 
-      - name: Run Ruff
+      - name: Run scoped static checks
         run: |
-          ruff check server .github/scripts
-
-      - name: Run Mypy
-        run: |
-          mypy .github/scripts/github_flow.py
+          python .github/scripts/github_flow.py run-static-checks \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --ruff-targets-json '${{ needs.inspect_pr.outputs.ruff_targets_json }}' \
+            --py-compile-targets-json '${{ needs.inspect_pr.outputs.py_compile_targets_json }}' \
+            --mypy-targets-json '${{ needs.inspect_pr.outputs.mypy_targets_json }}'
 
   build_3ds_after_takt_autofix:
     name: Build 3DS After TAKT Auto Fix
