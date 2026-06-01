@@ -21,7 +21,7 @@ def main() -> None:
     print("\n=== Setup Complete ===\n")
     print("To start the proxy server:")
     print(f"  {python_path} proxy.py")
-    print(f"\nThe server will start on port 8080.")
+    print("\nThe server will start on port 8080.")
     print("Enter this PC's IP address on your 3DS when prompted.")
 
 
