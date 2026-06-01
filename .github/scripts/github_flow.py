@@ -477,7 +477,9 @@ def handle_apply_deterministic_autofix(
 
 def parse_string_json_array(raw_value: str, argument_name: str) -> tuple[str, ...]:
     parsed = json.loads(raw_value)
-    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, str) for item in parsed
+    ):
         raise ValueError(f"{argument_name} must be a JSON array of strings")
     return tuple(parsed)
 
@@ -497,7 +499,9 @@ def handle_run_static_checks(
     if ruff_targets:
         run_command(repo_root, ["ruff", "check", *ruff_targets])
     if py_compile_targets:
-        run_command(repo_root, [sys.executable, "-m", "py_compile", *py_compile_targets])
+        run_command(
+            repo_root, [sys.executable, "-m", "py_compile", *py_compile_targets]
+        )
     if mypy_targets:
         run_command(repo_root, ["mypy", *mypy_targets])
 
