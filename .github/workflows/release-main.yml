@@ -1,0 +1,124 @@
+name: Release On Main
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  inspect_release:
+    name: Inspect Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.inspect.outputs.version }}
+      tag_name: ${{ steps.inspect.outputs.tag_name }}
+      notes_file: ${{ steps.inspect.outputs.notes_file }}
+      should_release: ${{ steps.inspect.outputs.should_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Inspect version and notes
+        id: inspect
+        shell: bash
+        run: |
+          version="$(grep -E '^VERSION[[:space:]]*:=' Makefile | head -n 1 | sed -E 's/^VERSION[[:space:]]*:=[[:space:]]*//')"
+          if [[ -z "$version" ]]; then
+            echo "::error::VERSION was not found in Makefile."
+            exit 1
+          fi
+
+          tag_name="v${version}"
+          notes_file="RELEASE_NOTES_v${version}.md"
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
+          echo "notes_file=${notes_file}" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse "${tag_name}" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ ! -f "${notes_file}" ]]; then
+            echo "::error::Release notes file ${notes_file} is required for ${tag_name}."
+            exit 1
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+  build_3ds:
+    name: Build 3DS
+    needs: inspect_release
+    if: needs.inspect_release.outputs.should_release == 'true'
+    uses: ./.github/workflows/3ds-build.yml
+    with:
+      artifact_name: streamu-3ds-release-${{ github.sha }}
+
+  build_server:
+    name: Build Server
+    needs: inspect_release
+    if: needs.inspect_release.outputs.should_release == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build server zip
+        shell: cmd
+        run: |
+          cd server
+          build_exe.bat --ci
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamu-server-release-${{ github.sha }}
+          path: server/dist/StreaMu-Server.zip
+          if-no-files-found: error
+
+  create_release:
+    name: Create Release
+    needs:
+      - inspect_release
+      - build_3ds
+      - build_server
+    if: needs.inspect_release.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download 3DS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: streamu-3ds-release-${{ github.sha }}
+          path: release-artifacts/3ds
+
+      - name: Download server artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: streamu-server-release-${{ github.sha }}
+          path: release-artifacts/server
+
+      - name: Create published release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.inspect_release.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.inspect_release.outputs.version }}
+          NOTES_FILE: ${{ needs.inspect_release.outputs.notes_file }}
+        run: |
+          gh release create "${TAG_NAME}" \
+            release-artifacts/3ds/streamu.cia \
+            release-artifacts/3ds/streamu.3dsx \
+            release-artifacts/server/StreaMu-Server.zip \
+            --title "StreaMu ${TAG_NAME}" \
+            --notes-file "${NOTES_FILE}" \
+            --target "${GITHUB_SHA}"

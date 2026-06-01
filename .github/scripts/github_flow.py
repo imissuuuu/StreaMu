@@ -84,6 +84,25 @@ class StaticCheckPlan:
     mypy_targets: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class LocalInspection:
+    branch: str
+    changed_files: tuple[str, ...]
+    selected_workflow: str
+    touches_python: bool
+    touches_cpp: bool
+
+
+@dataclass(frozen=True)
+class ReleasePlan:
+    version: str
+    tag_name: str
+    release_title: str
+    release_notes_path: str
+    asset_paths: tuple[str, ...]
+    target_sha: str
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="GitHub automation helper for StreaMu PR CI."
@@ -95,10 +114,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     inspect_parser.add_argument("--repo-root", type=Path, required=True)
     inspect_parser.add_argument("--write-github-output", type=Path)
 
+    inspect_local_parser = subparsers.add_parser("inspect-local")
+    inspect_local_parser.add_argument("--repo-root", type=Path, required=True)
+    inspect_local_parser.add_argument(
+        "--scope-path", action="append", default=[]
+    )
+
     autofix_parser = subparsers.add_parser("apply-deterministic-autofix")
     autofix_parser.add_argument("--repo-root", type=Path, required=True)
     autofix_parser.add_argument("--changed-files-json", required=True)
     autofix_parser.add_argument("--write-github-output", type=Path)
+
+    local_checks_parser = subparsers.add_parser("run-local-checks")
+    local_checks_parser.add_argument("--repo-root", type=Path, required=True)
+    local_checks_parser.add_argument("--skip-build", action="store_true")
+    local_checks_parser.add_argument("--scope-path", action="append", default=[])
 
     static_checks_parser = subparsers.add_parser("run-static-checks")
     static_checks_parser.add_argument("--repo-root", type=Path, required=True)
@@ -125,7 +155,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     read_state_parser.add_argument("--write-github-output", type=Path)
 
     parse_report_parser = subparsers.add_parser("parse-review-report")
-    parse_report_parser.add_argument("--runs-root", type=Path, required=True)
+    parse_report_parser.add_argument("--runs-root", type=Path)
+    parse_report_parser.add_argument("--report-path", type=Path)
     parse_report_parser.add_argument("--write-github-output", type=Path)
 
     publish_review_parser = subparsers.add_parser("publish-review-comment")
@@ -142,6 +173,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     autofix_task_parser.add_argument("--output-path", type=Path, required=True)
     autofix_task_parser.add_argument("--pr-number", type=int, required=True)
     autofix_task_parser.add_argument("--base-sha", required=True)
+
+    release_plan_parser = subparsers.add_parser("prepare-release-local")
+    release_plan_parser.add_argument("--repo-root", type=Path, required=True)
 
     return parser.parse_args(argv)
 
@@ -196,6 +230,84 @@ def collect_changed_files(
     result = run_git(repo_root, ["diff", "--name-only", f"{base_sha}...{head_sha}"])
     paths = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     return tuple(paths)
+
+
+def parse_git_name_list(stdout: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    normalized_paths: list[str] = []
+    for raw_line in stdout.splitlines():
+        path = raw_line.strip().replace("\\", "/")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        normalized_paths.append(path)
+    return tuple(normalized_paths)
+
+
+def collect_worktree_changed_files(repo_root: Path) -> tuple[str, ...]:
+    seen: set[str] = set()
+    changed_files: list[str] = []
+    command_sets = (
+        ["diff", "--name-only", "--"],
+        ["diff", "--cached", "--name-only", "--"],
+        ["ls-files", "--others", "--exclude-standard"],
+    )
+
+    for args in command_sets:
+        result = run_git(repo_root, args)
+        for path in parse_git_name_list(result.stdout):
+            if path in seen:
+                continue
+            seen.add(path)
+            changed_files.append(path)
+    return tuple(changed_files)
+
+
+def get_current_branch(repo_root: Path) -> str:
+    result = run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    branch = result.stdout.strip()
+    if not branch:
+        raise ValueError("current branch could not be determined")
+    return branch
+
+
+def read_head_sha(repo_root: Path) -> str:
+    result = run_git(repo_root, ["rev-parse", "HEAD"])
+    head_sha = result.stdout.strip()
+    if not head_sha:
+        raise ValueError("HEAD SHA could not be determined")
+    return head_sha
+
+
+def normalize_scope_paths(scope_paths: list[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for path in scope_paths:
+        candidate = path.replace("\\", "/").strip().strip("/")
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return tuple(normalized)
+
+
+def filter_changed_files_by_scope(
+    changed_files: tuple[str, ...], scope_paths: tuple[str, ...]
+) -> tuple[str, ...]:
+    if not scope_paths:
+        return changed_files
+
+    filtered: list[str] = []
+    for changed_file in changed_files:
+        normalized_file = changed_file.replace("\\", "/")
+        for scope_path in scope_paths:
+            if (
+                normalized_file == scope_path
+                or normalized_file.startswith(f"{scope_path}/")
+            ):
+                filtered.append(changed_file)
+                break
+    return tuple(filtered)
 
 
 def load_pull_request_context(event_path: Path, repo_root: Path) -> PullRequestContext:
@@ -296,6 +408,26 @@ def select_review_workflow(
     )
 
 
+def select_local_review_workflow(changed_files: tuple[str, ...]) -> LocalInspection:
+    selection = select_review_workflow(
+        changed_files=changed_files,
+        release_requested=False,
+        release_version=None,
+    )
+    local_workflow = (
+        "review-pipeline"
+        if selection.workflow_name == "review-pipeline-ci"
+        else "review-only"
+    )
+    return LocalInspection(
+        branch="",
+        changed_files=changed_files,
+        selected_workflow=local_workflow,
+        touches_python=selection.touches_python,
+        touches_cpp=selection.touches_cpp,
+    )
+
+
 def build_static_check_plan(changed_files: tuple[str, ...]) -> StaticCheckPlan:
     ruff_targets: list[str] = []
     py_compile_targets: list[str] = []
@@ -386,6 +518,25 @@ def handle_inspect_pr(
     return 0
 
 
+def handle_inspect_local(repo_root: Path, scope_paths: tuple[str, ...]) -> int:
+    changed_files = filter_changed_files_by_scope(
+        collect_worktree_changed_files(repo_root),
+        scope_paths,
+    )
+    inspection = select_local_review_workflow(changed_files)
+    payload: JsonObject = {
+        "branch": get_current_branch(repo_root),
+        "changed_files": list(inspection.changed_files),
+        "selected_workflow": inspection.selected_workflow,
+        "touches_python": inspection.touches_python,
+        "touches_cpp": inspection.touches_cpp,
+        "release_version": read_release_version(repo_root),
+        "scope_paths": list(scope_paths),
+    }
+    print_json(payload)
+    return 0
+
+
 def split_autofix_targets(
     changed_files: tuple[str, ...],
 ) -> tuple[list[str], list[str]]:
@@ -404,15 +555,59 @@ def run_command(repo_root: Path, args: list[str]) -> None:
     subprocess.run(args, cwd=repo_root, check=True)
 
 
+def filter_existing_files(repo_root: Path, changed_files: tuple[str, ...]) -> tuple[str, ...]:
+    existing_files: list[str] = []
+    for path in changed_files:
+        if (repo_root / path).is_file():
+            existing_files.append(path)
+    return tuple(existing_files)
+
+
+def apply_deterministic_autofix_to_files(
+    repo_root: Path, changed_files: tuple[str, ...]
+) -> tuple[tuple[str, ...], list[str], list[str]]:
+    existing_files = filter_existing_files(repo_root, changed_files)
+    python_files, cpp_files = split_autofix_targets(existing_files)
+
+    if python_files:
+        run_command(repo_root, ["ruff", "check", "--fix", *python_files])
+        run_command(repo_root, ["ruff", "format", *python_files])
+    if cpp_files:
+        run_command(repo_root, ["clang-format", "-i", *cpp_files])
+
+    changed_after_fix = collect_worktree_changed_files(repo_root)
+    return changed_after_fix, python_files, cpp_files
+
+
+def run_static_check_plan(repo_root: Path, static_check_plan: StaticCheckPlan) -> None:
+    if static_check_plan.ruff_targets:
+        run_command(repo_root, ["ruff", "check", *static_check_plan.ruff_targets])
+    if static_check_plan.py_compile_targets:
+        run_command(
+            repo_root,
+            [sys.executable, "-m", "py_compile", *static_check_plan.py_compile_targets],
+        )
+    if static_check_plan.mypy_targets:
+        run_command(repo_root, ["mypy", *static_check_plan.mypy_targets])
+
+
+def run_local_3ds_build(repo_root: Path) -> None:
+    jobs = str(max(1, os.cpu_count() or 1))
+    run_command(repo_root, ["make", "clean"])
+    run_command(repo_root, ["make", f"-j{jobs}"])
+
+
+def run_local_server_build(repo_root: Path) -> None:
+    server_root = repo_root / "server"
+    subprocess.run(
+        ["cmd", "/c", "build_exe.bat", "--ci"],
+        cwd=server_root,
+        check=True,
+    )
+
+
 def collect_git_diff_paths(repo_root: Path) -> tuple[str, ...]:
-    result = run_git(repo_root, ["status", "--short"])
-    changed: list[str] = []
-    for raw_line in result.stdout.splitlines():
-        line = raw_line.rstrip()
-        if not line:
-            continue
-        changed.append(line[3:])
-    return tuple(changed)
+    return collect_worktree_changed_files(repo_root)
 
 
 def parse_existing_state(body: str) -> AutomationState | None:
@@ -450,15 +645,9 @@ def handle_apply_deterministic_autofix(
         raise ValueError("changed-files-json must be a JSON array of strings")
 
     changed_files = tuple(raw_changed_files)
-    python_files, cpp_files = split_autofix_targets(changed_files)
-
-    if python_files:
-        run_command(repo_root, ["ruff", "check", "--fix", *python_files])
-        run_command(repo_root, ["ruff", "format", *python_files])
-    if cpp_files:
-        run_command(repo_root, ["clang-format", "-i", *cpp_files])
-
-    changed_after_fix = collect_git_diff_paths(repo_root)
+    changed_after_fix, python_files, cpp_files = apply_deterministic_autofix_to_files(
+        repo_root, changed_files
+    )
     outputs = {
         "changed": "true" if bool(changed_after_fix) else "false",
         "changed_paths_json": json.dumps(list(changed_after_fix), ensure_ascii=True),
@@ -470,6 +659,56 @@ def handle_apply_deterministic_autofix(
             "changed_paths": list(changed_after_fix),
             "python_targets": python_files,
             "cpp_targets": cpp_files,
+        }
+    )
+    return 0
+
+
+def handle_run_local_checks(
+    repo_root: Path, skip_build: bool, scope_paths: tuple[str, ...]
+) -> int:
+    changed_files = filter_changed_files_by_scope(
+        collect_worktree_changed_files(repo_root),
+        scope_paths,
+    )
+    if not changed_files:
+        raise ValueError("no local changes found")
+
+    changed_after_fix, _, _ = apply_deterministic_autofix_to_files(
+        repo_root, changed_files
+    )
+    effective_changed_files = changed_after_fix or collect_worktree_changed_files(repo_root)
+    static_check_plan = build_static_check_plan(effective_changed_files)
+    run_static_check_plan(repo_root, static_check_plan)
+
+    touches_cpp = any(
+        path.startswith(CPP_PATH_PREFIXES) and Path(path).suffix.lower() in CPP_FILE_EXTENSIONS
+        for path in effective_changed_files
+    )
+    touches_server_python = any(
+        path.startswith("server/") and Path(path).suffix.lower() in PYTHON_FILE_EXTENSIONS
+        for path in effective_changed_files
+    )
+
+    ran_3ds_build = False
+    ran_server_build = False
+    if not skip_build:
+        if touches_cpp:
+            run_local_3ds_build(repo_root)
+            ran_3ds_build = True
+        if touches_server_python:
+            run_local_server_build(repo_root)
+            ran_server_build = True
+
+    print_json(
+        {
+            "changed_files": list(effective_changed_files),
+            "ruff_targets": list(static_check_plan.ruff_targets),
+            "py_compile_targets": list(static_check_plan.py_compile_targets),
+            "mypy_targets": list(static_check_plan.mypy_targets),
+            "ran_3ds_build": ran_3ds_build,
+            "ran_server_build": ran_server_build,
+            "scope_paths": list(scope_paths),
         }
     )
     return 0
@@ -495,15 +734,14 @@ def handle_run_static_checks(
         py_compile_targets_json, "--py-compile-targets-json"
     )
     mypy_targets = parse_string_json_array(mypy_targets_json, "--mypy-targets-json")
-
-    if ruff_targets:
-        run_command(repo_root, ["ruff", "check", *ruff_targets])
-    if py_compile_targets:
-        run_command(
-            repo_root, [sys.executable, "-m", "py_compile", *py_compile_targets]
-        )
-    if mypy_targets:
-        run_command(repo_root, ["mypy", *mypy_targets])
+    run_static_check_plan(
+        repo_root,
+        StaticCheckPlan(
+            ruff_targets=ruff_targets,
+            py_compile_targets=py_compile_targets,
+            mypy_targets=mypy_targets,
+        ),
+    )
 
     print_json(
         {
@@ -863,6 +1101,18 @@ def find_latest_review_report(runs_root: Path) -> Path:
     return max(report_candidates, key=lambda path: path.stat().st_mtime)
 
 
+def resolve_review_report_path(
+    runs_root: Path | None, report_path: Path | None
+) -> Path:
+    if report_path is not None:
+        if not report_path.is_file():
+            raise FileNotFoundError(f"review report not found: {report_path}")
+        return report_path
+    if runs_root is None:
+        raise ValueError("either --runs-root or --report-path is required")
+    return find_latest_review_report(runs_root)
+
+
 def parse_review_report_file(report_path: Path) -> ReviewDecision:
     values: dict[str, str] = {}
     with report_path.open("r", encoding="utf-8-sig") as handle:
@@ -897,16 +1147,18 @@ def parse_review_report_file(report_path: Path) -> ReviewDecision:
     )
 
 
-def handle_parse_review_report(runs_root: Path, output_path: Path | None) -> int:
-    report_path = find_latest_review_report(runs_root)
-    decision = parse_review_report_file(report_path)
+def handle_parse_review_report(
+    runs_root: Path | None, report_path: Path | None, output_path: Path | None
+) -> int:
+    resolved_report_path = resolve_review_report_path(runs_root, report_path)
+    decision = parse_review_report_file(resolved_report_path)
     outputs = {
         "decision": decision.decision,
         "auto_fix_allowed": "true" if decision.auto_fix_allowed else "false",
         "summary": decision.summary,
         "user_decision_needed": "true" if decision.user_decision_needed else "false",
         "user_prompt": decision.user_prompt or "",
-        "report_path": str(report_path),
+        "report_path": str(resolved_report_path),
     }
     write_github_output(output_path, outputs)
     print_json(
@@ -916,7 +1168,48 @@ def handle_parse_review_report(runs_root: Path, output_path: Path | None) -> int
             "summary": decision.summary,
             "user_decision_needed": decision.user_decision_needed,
             "user_prompt": decision.user_prompt,
-            "report_path": str(report_path),
+            "report_path": str(resolved_report_path),
+        }
+    )
+    return 0
+
+
+def handle_prepare_release_local(repo_root: Path) -> int:
+    version = read_release_version(repo_root)
+    if version is None:
+        raise ValueError("VERSION was not found in Makefile")
+
+    release_notes_path = repo_root / f"RELEASE_NOTES_v{version}.md"
+    if not release_notes_path.is_file():
+        raise FileNotFoundError(f"release notes missing: {release_notes_path}")
+
+    asset_paths = (
+        repo_root / "streamu.3dsx",
+        repo_root / "streamu.cia",
+        repo_root / "server" / "dist" / "StreaMu-Server.zip",
+    )
+    missing_assets = [str(path) for path in asset_paths if not path.is_file()]
+    if missing_assets:
+        raise FileNotFoundError(
+            f"release assets missing: {', '.join(missing_assets)}"
+        )
+
+    release_plan = ReleasePlan(
+        version=version,
+        tag_name=f"v{version}",
+        release_title=f"StreaMu v{version}",
+        release_notes_path=str(release_notes_path),
+        asset_paths=tuple(str(path) for path in asset_paths),
+        target_sha=read_head_sha(repo_root),
+    )
+    print_json(
+        {
+            "version": release_plan.version,
+            "tag_name": release_plan.tag_name,
+            "release_title": release_plan.release_title,
+            "release_notes_path": release_plan.release_notes_path,
+            "asset_paths": list(release_plan.asset_paths),
+            "target_sha": release_plan.target_sha,
         }
     )
     return 0
@@ -1007,6 +1300,11 @@ def main(argv: list[str]) -> int:
                 if args.write_github_output
                 else None,
             )
+        if args.command == "inspect-local":
+            return handle_inspect_local(
+                repo_root=args.repo_root.resolve(),
+                scope_paths=normalize_scope_paths(args.scope_path),
+            )
         if args.command == "apply-deterministic-autofix":
             return handle_apply_deterministic_autofix(
                 repo_root=args.repo_root.resolve(),
@@ -1014,6 +1312,12 @@ def main(argv: list[str]) -> int:
                 output_path=args.write_github_output.resolve()
                 if args.write_github_output
                 else None,
+            )
+        if args.command == "run-local-checks":
+            return handle_run_local_checks(
+                repo_root=args.repo_root.resolve(),
+                skip_build=args.skip_build,
+                scope_paths=normalize_scope_paths(args.scope_path),
             )
         if args.command == "run-static-checks":
             return handle_run_static_checks(
@@ -1042,7 +1346,8 @@ def main(argv: list[str]) -> int:
             )
         if args.command == "parse-review-report":
             return handle_parse_review_report(
-                runs_root=args.runs_root.resolve(),
+                runs_root=args.runs_root.resolve() if args.runs_root else None,
+                report_path=args.report_path.resolve() if args.report_path else None,
                 output_path=args.write_github_output.resolve()
                 if args.write_github_output
                 else None,
@@ -1062,6 +1367,8 @@ def main(argv: list[str]) -> int:
                 pr_number=args.pr_number,
                 base_sha=args.base_sha,
             )
+        if args.command == "prepare-release-local":
+            return handle_prepare_release_local(repo_root=args.repo_root.resolve())
         raise ValueError(f"unsupported command: {args.command}")
     except (
         FileNotFoundError,
