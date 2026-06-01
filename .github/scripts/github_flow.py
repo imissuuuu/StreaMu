@@ -78,7 +78,9 @@ class ReviewDecision:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="GitHub automation helper for StreaMu PR CI.")
+    parser = argparse.ArgumentParser(
+        description="GitHub automation helper for StreaMu PR CI."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     inspect_parser = subparsers.add_parser("inspect-pr")
@@ -95,8 +97,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     sync_parser.add_argument("--event-path", type=Path, required=True)
     sync_parser.add_argument("--phase", required=True)
     sync_parser.add_argument("--selected-workflow")
-    sync_parser.add_argument("--device-test-passed", choices=("true", "false"), required=True)
-    sync_parser.add_argument("--release-requested", choices=("true", "false"), required=True)
+    sync_parser.add_argument(
+        "--device-test-passed", choices=("true", "false"), required=True
+    )
+    sync_parser.add_argument(
+        "--release-requested", choices=("true", "false"), required=True
+    )
     sync_parser.add_argument("--release-version")
     sync_parser.add_argument("--increment-autofix-attempts", action="store_true")
     sync_parser.add_argument("--increment-review-attempts", action="store_true")
@@ -113,7 +119,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     publish_review_parser.add_argument("--event-path", type=Path, required=True)
     publish_review_parser.add_argument("--decision", required=True)
     publish_review_parser.add_argument("--summary", required=True)
-    publish_review_parser.add_argument("--user-decision-needed", choices=("true", "false"), required=True)
+    publish_review_parser.add_argument(
+        "--user-decision-needed", choices=("true", "false"), required=True
+    )
     publish_review_parser.add_argument("--user-prompt")
 
     autofix_task_parser = subparsers.add_parser("build-autofix-task")
@@ -169,7 +177,9 @@ def run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str
     return subprocess.run(command, check=True, capture_output=True, text=True)
 
 
-def collect_changed_files(repo_root: Path, base_sha: str, head_sha: str) -> tuple[str, ...]:
+def collect_changed_files(
+    repo_root: Path, base_sha: str, head_sha: str
+) -> tuple[str, ...]:
     result = run_git(repo_root, ["diff", "--name-only", f"{base_sha}...{head_sha}"])
     paths = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     return tuple(paths)
@@ -243,7 +253,9 @@ def release_notes_exists(repo_root: Path, version: str | None) -> bool:
     return (repo_root / f"RELEASE_NOTES_v{version}.md").is_file()
 
 
-def select_review_workflow(changed_files: tuple[str, ...], release_requested: bool, release_version: str | None) -> ReviewSelection:
+def select_review_workflow(
+    changed_files: tuple[str, ...], release_requested: bool, release_version: str | None
+) -> ReviewSelection:
     touches_python = any(
         path.startswith(PYTHON_PATH_PREFIXES) and path.endswith(PYTHON_FILE_EXTENSIONS)
         for path in changed_files
@@ -275,12 +287,16 @@ def print_json(payload: JsonObject) -> None:
     print(json.dumps(payload, ensure_ascii=True, indent=2))
 
 
-def handle_inspect_pr(event_path: Path, repo_root: Path, output_path: Path | None) -> int:
+def handle_inspect_pr(
+    event_path: Path, repo_root: Path, output_path: Path | None
+) -> int:
     context = load_pull_request_context(event_path=event_path, repo_root=repo_root)
     device_test_passed = detect_device_test_passed(context.body)
     release_requested = detect_release_requested(context.body)
     release_version = read_release_version(repo_root)
-    release_eligible = release_requested and release_notes_exists(repo_root, release_version)
+    release_eligible = release_requested and release_notes_exists(
+        repo_root, release_version
+    )
     selection = select_review_workflow(
         changed_files=context.changed_files,
         release_requested=release_requested,
@@ -288,7 +304,9 @@ def handle_inspect_pr(event_path: Path, repo_root: Path, output_path: Path | Non
     )
 
     outputs = {
-        "changed_files_json": json.dumps(list(context.changed_files), ensure_ascii=True),
+        "changed_files_json": json.dumps(
+            list(context.changed_files), ensure_ascii=True
+        ),
         "device_test_passed": "true" if device_test_passed else "false",
         "release_requested": "true" if release_requested else "false",
         "selected_review_workflow": selection.workflow_name,
@@ -311,7 +329,9 @@ def handle_inspect_pr(event_path: Path, repo_root: Path, output_path: Path | Non
     return 0
 
 
-def split_autofix_targets(changed_files: tuple[str, ...]) -> tuple[list[str], list[str]]:
+def split_autofix_targets(
+    changed_files: tuple[str, ...],
+) -> tuple[list[str], list[str]]:
     python_files: list[str] = []
     cpp_files: list[str] = []
     for path in changed_files:
@@ -363,9 +383,13 @@ def parse_existing_state(body: str) -> AutomationState | None:
     )
 
 
-def handle_apply_deterministic_autofix(repo_root: Path, changed_files_json: str, output_path: Path | None) -> int:
+def handle_apply_deterministic_autofix(
+    repo_root: Path, changed_files_json: str, output_path: Path | None
+) -> int:
     raw_changed_files = json.loads(changed_files_json)
-    if not isinstance(raw_changed_files, list) or not all(isinstance(path, str) for path in raw_changed_files):
+    if not isinstance(raw_changed_files, list) or not all(
+        isinstance(path, str) for path in raw_changed_files
+    ):
         raise ValueError("changed-files-json must be a JSON array of strings")
 
     changed_files = tuple(raw_changed_files)
@@ -419,14 +443,23 @@ def build_state_comment(state: AutomationState) -> str:
 def build_review_comment(decision: ReviewDecision) -> str:
     action_lines: list[str]
     if decision.decision == "APPROVE":
-        action_lines = ["- No blocking review issue remains. Release automation can continue."]
+        action_lines = [
+            "- No blocking review issue remains. Release automation can continue."
+        ]
     elif decision.decision == "AUTO_FIXABLE":
         if decision.auto_fix_allowed:
-            action_lines = ["- Safe mechanical fixes were identified and the automation will attempt them."]
+            action_lines = [
+                "- Safe mechanical fixes were identified and the automation will attempt them."
+            ]
         else:
-            action_lines = ["- Auto-fix was requested, but the workflow could not safely proceed without maintainer follow-up."]
+            action_lines = [
+                "- Auto-fix was requested, but the workflow could not safely proceed without maintainer follow-up."
+            ]
     elif decision.decision == "NEEDS_DECISION":
-        prompt = decision.user_prompt or "Please reply with the preferred behavior in natural language."
+        prompt = (
+            decision.user_prompt
+            or "Please reply with the preferred behavior in natural language."
+        )
         action_lines = [
             "- Reply on this PR with the desired behavior in natural language.",
             f"- Decision needed: {prompt}",
@@ -467,7 +500,9 @@ def github_api_request(
     data = None
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
-    request_object = request.Request(url=url, data=data, method=method, headers=github_headers(token))
+    request_object = request.Request(
+        url=url, data=data, method=method, headers=github_headers(token)
+    )
     with request.urlopen(request_object) as response:
         if response.status == 204:
             return None
@@ -483,7 +518,9 @@ def github_api_request(
     raise ValueError(f"unexpected GitHub API response from {url}")
 
 
-def list_issue_comments(repository: str, pr_number: int, token: str) -> list[JsonObject]:
+def list_issue_comments(
+    repository: str, pr_number: int, token: str
+) -> list[JsonObject]:
     url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments?per_page=100"
     response = github_api_request("GET", url, token)
     if response is None:
@@ -493,7 +530,9 @@ def list_issue_comments(repository: str, pr_number: int, token: str) -> list[Jso
     return response
 
 
-def upsert_state_comment(repository: str, pr_number: int, token: str, body: str) -> None:
+def upsert_state_comment(
+    repository: str, pr_number: int, token: str, body: str
+) -> None:
     upsert_marked_comment(
         repository=repository,
         pr_number=pr_number,
@@ -503,7 +542,9 @@ def upsert_state_comment(repository: str, pr_number: int, token: str, body: str)
     )
 
 
-def upsert_marked_comment(repository: str, pr_number: int, token: str, marker: str, body: str) -> None:
+def upsert_marked_comment(
+    repository: str, pr_number: int, token: str, marker: str, body: str
+) -> None:
     comments = list_issue_comments(repository, pr_number, token)
     for comment in comments:
         existing_body = get_optional_str(comment, "body")
@@ -519,7 +560,9 @@ def upsert_marked_comment(repository: str, pr_number: int, token: str, marker: s
     github_api_request("POST", url, token, {"body": body})
 
 
-def read_state_from_github(repository: str, pr_number: int, token: str) -> AutomationState | None:
+def read_state_from_github(
+    repository: str, pr_number: int, token: str
+) -> AutomationState | None:
     for comment in list_issue_comments(repository, pr_number, token):
         existing_body = get_optional_str(comment, "body")
         if existing_body is None:
@@ -530,7 +573,9 @@ def read_state_from_github(repository: str, pr_number: int, token: str) -> Autom
     return None
 
 
-def add_labels(repository: str, pr_number: int, token: str, labels: tuple[str, ...]) -> None:
+def add_labels(
+    repository: str, pr_number: int, token: str, labels: tuple[str, ...]
+) -> None:
     if not labels:
         return
     url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/labels"
@@ -539,7 +584,9 @@ def add_labels(repository: str, pr_number: int, token: str, labels: tuple[str, .
 
 def remove_label(repository: str, pr_number: int, token: str, label: str) -> None:
     encoded = parse.quote(label, safe="")
-    url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/labels/{encoded}"
+    url = (
+        f"https://api.github.com/repos/{repository}/issues/{pr_number}/labels/{encoded}"
+    )
     try:
         github_api_request("DELETE", url, token)
     except error.HTTPError as http_error:
@@ -563,8 +610,15 @@ def sync_labels(
 
     labels_to_remove = set(PHASE_LABELS).union(PERSISTENT_LABELS) - desired_labels
     for label in sorted(labels_to_remove):
-        remove_label(repository=repository, pr_number=context.number, token=token, label=label)
-    add_labels(repository=repository, pr_number=context.number, token=token, labels=tuple(sorted(desired_labels)))
+        remove_label(
+            repository=repository, pr_number=context.number, token=token, label=label
+        )
+    add_labels(
+        repository=repository,
+        pr_number=context.number,
+        token=token,
+        labels=tuple(sorted(desired_labels)),
+    )
 
 
 def handle_sync_pr_state(
@@ -616,8 +670,10 @@ def handle_sync_pr_state(
     else:
         existing_state = AutomationState(
             phase=phase,
-            autofix_attempts=previous_state.autofix_attempts + (1 if increment_autofix_attempts else 0),
-            review_attempts=previous_state.review_attempts + (1 if increment_review_attempts else 0),
+            autofix_attempts=previous_state.autofix_attempts
+            + (1 if increment_autofix_attempts else 0),
+            review_attempts=previous_state.review_attempts
+            + (1 if increment_review_attempts else 0),
             selected_workflow=selected_workflow or previous_state.selected_workflow,
             release_requested=release_requested,
             release_version=release_version or previous_state.release_version,
@@ -815,7 +871,9 @@ def handle_publish_review_comment(
     return 0
 
 
-def handle_build_autofix_task(report_path: Path, output_path: Path, pr_number: int, base_sha: str) -> int:
+def handle_build_autofix_task(
+    report_path: Path, output_path: Path, pr_number: int, base_sha: str
+) -> int:
     decision = parse_review_report_file(report_path)
     if decision.decision != "AUTO_FIXABLE":
         raise ValueError("build-autofix-task requires an AUTO_FIXABLE report")
@@ -848,13 +906,17 @@ def main(argv: list[str]) -> int:
             return handle_inspect_pr(
                 event_path=args.event_path.resolve(),
                 repo_root=args.repo_root.resolve(),
-                output_path=args.write_github_output.resolve() if args.write_github_output else None,
+                output_path=args.write_github_output.resolve()
+                if args.write_github_output
+                else None,
             )
         if args.command == "apply-deterministic-autofix":
             return handle_apply_deterministic_autofix(
                 repo_root=args.repo_root.resolve(),
                 changed_files_json=args.changed_files_json,
-                output_path=args.write_github_output.resolve() if args.write_github_output else None,
+                output_path=args.write_github_output.resolve()
+                if args.write_github_output
+                else None,
             )
         if args.command == "sync-pr-state":
             return handle_sync_pr_state(
@@ -870,12 +932,16 @@ def main(argv: list[str]) -> int:
         if args.command == "read-pr-state":
             return handle_read_pr_state(
                 event_path=args.event_path.resolve(),
-                output_path=args.write_github_output.resolve() if args.write_github_output else None,
+                output_path=args.write_github_output.resolve()
+                if args.write_github_output
+                else None,
             )
         if args.command == "parse-review-report":
             return handle_parse_review_report(
                 runs_root=args.runs_root.resolve(),
-                output_path=args.write_github_output.resolve() if args.write_github_output else None,
+                output_path=args.write_github_output.resolve()
+                if args.write_github_output
+                else None,
             )
         if args.command == "publish-review-comment":
             return handle_publish_review_comment(
