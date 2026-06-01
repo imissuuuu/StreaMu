@@ -1,0 +1,99 @@
+name: PR CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+
+permissions:
+  contents: read
+
+jobs:
+  inspect_pr:
+    name: Inspect PR
+    runs-on: ubuntu-latest
+    outputs:
+      ruff_targets_json: ${{ steps.inspect.outputs.ruff_targets_json }}
+      py_compile_targets_json: ${{ steps.inspect.outputs.py_compile_targets_json }}
+      mypy_targets_json: ${{ steps.inspect.outputs.mypy_targets_json }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Inspect PR
+        id: inspect
+        run: |
+          python .github/scripts/github_flow.py inspect-pr \
+            --event-path "$GITHUB_EVENT_PATH" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --write-github-output "$GITHUB_OUTPUT"
+
+  static_checks:
+    name: Static Checks
+    needs: inspect_pr
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install mypy ruff
+
+      - name: Run scoped static checks
+        run: |
+          python .github/scripts/github_flow.py run-static-checks \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --ruff-targets-json '${{ needs.inspect_pr.outputs.ruff_targets_json }}' \
+            --py-compile-targets-json '${{ needs.inspect_pr.outputs.py_compile_targets_json }}' \
+            --mypy-targets-json '${{ needs.inspect_pr.outputs.mypy_targets_json }}'
+
+  build_3ds:
+    name: Build 3DS
+    needs: inspect_pr
+    uses: ./.github/workflows/3ds-build.yml
+    with:
+      artifact_name: streamu-3ds-${{ github.event.pull_request.head.sha }}
+
+  build_server:
+    name: Build Server
+    needs: inspect_pr
+    runs-on: windows-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Build server zip
+        shell: cmd
+        run: |
+          cd server
+          build_exe.bat --ci
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamu-server-${{ github.event.pull_request.head.sha }}
+          path: server/dist/StreaMu-Server.zip
+          if-no-files-found: error
