@@ -575,6 +575,9 @@ async def thumbnail(request: Request) -> Response | PlainTextResponse:
 async def get_logs(request: Request) -> JSONResponse:
     return JSONResponse({"logs": list(app_logs)})
 
+async def healthz(request: Request) -> PlainTextResponse:
+    return PlainTextResponse("ok")
+
 async def dashboard(request: Request) -> HTMLResponse:
     ip: str = get_local_ip()
     html_content: str = f"""
@@ -674,6 +677,7 @@ routes = [
     Route("/stream_opus", stream_opus),
     Route("/stream_opus_ogg", stream_opus_ogg),
     Route("/thumbnail", thumbnail),
+    Route("/healthz", healthz),
     Route("/api/logs", get_logs),
     Route("/", dashboard)
 ]
