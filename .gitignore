@@ -29,8 +29,18 @@ dumps/
 
 # IDE / AI workspace
 .claude/
+.mypy_cache/
+.ruff_cache/
+.takt/
 review_result.json
 HANDOFF/
+tools/
+startup_perf.log
+.clang-format
+pyproject.toml
+
+# Working design / review docs
+docs/
 
 # OS files
 .DS_Store

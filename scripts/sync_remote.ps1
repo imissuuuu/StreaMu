@@ -28,6 +28,20 @@ function Save-RepoState {
     $State | ConvertTo-Json -Depth 6 | Set-Content -Path $statePath -Encoding UTF8
 }
 
+function Get-PublishableFiles {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Paths
+    )
+
+    $pathsJson = $Paths | ConvertTo-Json -Compress
+    $result = & py -3 .github/scripts/github_flow.py classify-publishable --paths-json $pathsJson
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to classify publishable files."
+    }
+    return $result | ConvertFrom-Json
+}
+
 function Find-OrCreatePullRequest {
     param(
         [Parameter(Mandatory = $true)]
@@ -85,7 +99,16 @@ try {
         throw "Latest local review decision is $($state.decision). Sync is allowed only after APPROVE."
     }
 
-    $filesToStage = @($state.changed_files)
+    $classification = Get-PublishableFiles -Paths @($state.changed_files)
+    if ($null -ne $classification.blocked_paths -and $classification.blocked_paths.Count -gt 0) {
+        throw "Blocked local-only paths are present in review state: $($classification.blocked_paths -join ', ')"
+    }
+
+    $filesToStage = @($classification.publishable_paths)
+    if ($filesToStage.Count -eq 0) {
+        throw "No publishable files are available to sync."
+    }
+
     if ($filesToStage.Count -gt 0) {
         git add -- @filesToStage
     }
