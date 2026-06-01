@@ -1,60 +1,27 @@
 #!/usr/bin/env python3
 """Cross-platform setup script for 3DS Music Player proxy server."""
 
-import sys
-import subprocess
-import platform
 from pathlib import Path
+
+from setup_common import ensure_python_version, ensure_venv, install_requirements
 
 
 def main() -> None:
     print("=== 3DS Music Player - Proxy Server Setup ===\n")
 
-    # Check Python version
-    if sys.version_info < (3, 10):
-        print(f"[ERROR] Python 3.10+ is required. You have {sys.version}")
-        sys.exit(1)
-    print(f"[OK] Python {sys.version_info.major}.{sys.version_info.minor}")
-
     base_dir: Path = Path(__file__).parent.resolve()
-    venv_dir: Path = base_dir / "venv"
-    is_windows: bool = platform.system() == "Windows"
-
-    # Create venv
-    if venv_dir.exists():
-        print(f"[OK] venv already exists: {venv_dir}")
-    else:
-        print("[...] Creating virtual environment...")
-        try:
-            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
-        except subprocess.CalledProcessError:
-            print("[ERROR] Failed to create virtual environment.")
-            sys.exit(1)
-        print(f"[OK] venv created: {venv_dir}")
-
-    # Determine pip path inside venv
-    if is_windows:
-        pip_path: Path = venv_dir / "Scripts" / "pip.exe"
-        python_path: Path = venv_dir / "Scripts" / "python.exe"
-    else:
-        pip_path = venv_dir / "bin" / "pip"
-        python_path = venv_dir / "bin" / "python"
+    ensure_python_version()
+    pip_path, python_path = ensure_venv(base_dir)
 
     # Install dependencies
     req_file: Path = base_dir / "requirements.txt"
-    print("[...] Installing dependencies...")
-    try:
-        subprocess.run([str(pip_path), "install", "-r", str(req_file)], check=True)
-    except subprocess.CalledProcessError:
-        print("[ERROR] Failed to install dependencies. Check your network connection.")
-        sys.exit(1)
-    print("[OK] Dependencies installed")
+    install_requirements(pip_path, req_file, "runtime")
 
     # Done
     print("\n=== Setup Complete ===\n")
     print("To start the proxy server:")
     print(f"  {python_path} proxy.py")
-    print(f"\nThe server will start on port 8080.")
+    print("\nThe server will start on port 8080.")
     print("Enter this PC's IP address on your 3DS when prompted.")
 
 

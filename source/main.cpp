@@ -6,16 +6,19 @@
 #include <sstream>
 #include <stdio.h>
 #include <string>
+#include <sys/stat.h>
 #include <time.h>
 #include <vector>
 
+#include "audio/opus_perf_metrics.h"
 #include "audio/opus_poc_player.h"
-#include "audio/vorbis_poc_player.h"
+#include "audio/opus_stream_pipeline.h"
 #include "network/youtube_api.h"
 #include "playlist_manager.h"
 #include "ui/ui_constants.h"
 #include "ui/ui_manager.h"
 #include "ui/ui_renderer.h"
+#include "ui/track_list_helpers.h"
 #include <memory>
 
 std::unique_ptr<std::vector<uint8_t>>
@@ -24,6 +27,20 @@ LightLock stream_lock;   // Mutex protecting stream_buffer access
 bool g_stream_download_complete = true;
 static u64 g_opus_playback_perf_start_ms = 0;
 static bool g_opus_audio_started_logged = false;
+static u64 g_opus_last_frame_observe_ms = 0;
+static int g_opus_observed_max_decoded_buffers = 0;
+static bool g_opus_observed_decode_failure = false;
+static u64 g_startup_perf_start_ms = 0;
+
+static const char *playback_status_message(bool is_paused, bool is_buffering) {
+  if (is_paused) {
+    return "Paused";
+  }
+  if (is_buffering) {
+    return "Buffering...";
+  }
+  return "Playing";
+}
 
 static void append_opus_playback_perf_log(const char *event, size_t bytes) {
 #if STREAMU_ENABLE_OPUS_PERF_LOG
@@ -48,6 +65,73 @@ static void append_opus_playback_perf_log(const char *event, size_t bytes) {
 #endif
 }
 
+static void append_opus_playback_perf_log(OpusPerfEvent event, size_t bytes) {
+  append_opus_playback_perf_log(opus_perf_event_name(event), bytes);
+}
+
+static void append_opus_playback_perf_log(OpusPerfEvent event,
+                                          const OpusPerfSnapshot &snapshot) {
+#if STREAMU_ENABLE_OPUS_PERF_LOG
+  if (g_opus_playback_perf_start_ms == 0) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/opus_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms = now_ms >= g_opus_playback_perf_start_ms
+                             ? now_ms - g_opus_playback_perf_start_ms
+                             : 0;
+  fprintf(f, "[opus-perf] +%llums %s bytes=%lu queued=%d free=%d decoded=%d\n",
+          static_cast<unsigned long long>(elapsed_ms),
+          opus_perf_event_name(event),
+          static_cast<unsigned long>(snapshot.stream_buffer_bytes),
+          snapshot.queued_wavebufs, snapshot.free_wavebufs,
+          snapshot.decoded_chunks_in_frame);
+  fclose(f);
+#else
+  (void)event;
+  (void)snapshot;
+#endif
+}
+
+static OpusPerfSnapshot
+make_opus_perf_snapshot(const OpusPipelineState &pipeline_state,
+                        const OpusPlayerUpdateStats &update_stats) {
+  OpusPerfSnapshot snapshot = {};
+  snapshot.stream_buffer_bytes = pipeline_state.stream_buffer_bytes;
+  snapshot.queued_wavebufs = pipeline_state.queued_wavebufs;
+  snapshot.free_wavebufs = pipeline_state.free_wavebufs;
+  snapshot.decoded_chunks_in_frame = update_stats.decoded_buffers;
+  return snapshot;
+}
+
+static void ensure_streamu_data_dir() { mkdir("sdmc:/3ds/StreaMu", 0777); }
+
+static void append_startup_perf_log(const char *event, const char *detail) {
+  if (!event) {
+    return;
+  }
+  ensure_streamu_data_dir();
+  FILE *f = fopen("sdmc:/3ds/StreaMu/startup_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms =
+      (g_startup_perf_start_ms > 0 && now_ms >= g_startup_perf_start_ms)
+          ? now_ms - g_startup_perf_start_ms
+          : 0;
+  fprintf(f, "[startup] +%llums %s",
+          static_cast<unsigned long long>(elapsed_ms), event);
+  if (detail && detail[0] != '\0') {
+    fprintf(f, " %s", detail);
+  }
+  fputc('\n', f);
+  fclose(f);
+}
+
 #include "app_context.h"
 #include "config_manager.h"
 #include "stb_image.h"
@@ -61,8 +145,6 @@ static void append_opus_playback_perf_log(const char *event, size_t bytes) {
 #include "ui/wallpaper.h"
 
 // Use smart pointers to ensure destructors run before socExit (prevents crash).
-std::unique_ptr<VorbisPocPlayer> g_vorbis_player_ptr;
-#define vorbis_player (*g_vorbis_player_ptr)
 std::unique_ptr<OpusPocPlayer> g_opus_player_ptr;
 #define opus_player (*g_opus_player_ptr)
 
@@ -92,13 +174,11 @@ static bool validate_ip_port(const std::string &input) {
     return false;
   // Check port part is digits only
   for (size_t i = colon + 1; i < input.size(); ++i) {
-    if (input[i] < '0' || input[i] > '9')
-      return false;
+    if (input[i] < '0' || input[i] > '9') return false;
   }
   // Check IP part contains at least one '.'
   std::string ip_part = input.substr(0, colon);
-  if (ip_part.find('.') == std::string::npos)
-    return false;
+  if (ip_part.find('.') == std::string::npos) return false;
   return true;
 }
 
@@ -108,107 +188,17 @@ static std::string show_ip_keyboard(const std::string &initial) {
     SwkbdState swkbd;
     char buf[64] = {0};
     swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 1, 63);
-    if (!current.empty())
-      swkbdSetInitialText(&swkbd, current.c_str());
+    if (!current.empty()) swkbdSetInitialText(&swkbd, current.c_str());
     SwkbdButton button = swkbdInputText(&swkbd, buf, sizeof(buf));
-    if (button != SWKBD_BUTTON_CONFIRM || strlen(buf) == 0)
-      return "";
+    if (button != SWKBD_BUTTON_CONFIRM || strlen(buf) == 0) return "";
     std::string input(buf);
-    if (validate_ip_port(input))
-      return input;
+    if (validate_ip_port(input)) return input;
     // Validation failed: keep input and retry
     current = input;
   }
 }
 
-static constexpr const char *VORBIS_POC_PATHS[] = {
-    "sdmc:/3ds/StreaMu/vorbis_poc.ogg",
-    "sdmc:/3ds/streamu/vorbis_poc.ogg",
-    "sdmc:/vorbis_poc.ogg",
-};
-static constexpr const char *OPUS_POC_PATHS[] = {
-    "sdmc:/3ds/StreaMu/opus_poc.opus",
-    "sdmc:/3ds/streamu/opus_poc.opus",
-    "sdmc:/opus_poc.opus",
-};
-static constexpr long AUDIO_POC_MAX_BYTES = 64L * 1024L * 1024L;
 static constexpr size_t OPUS_STREAM_START_BYTES = 16U * 1024U;
-
-enum class FileLoadStatus {
-  Ok,
-  NotFound,
-  BadSize,
-  ReadError,
-};
-
-static FileLoadStatus load_file_to_stream_buffer(const char *path) {
-  if (!path || !g_stream_buffer_ptr) {
-    return FileLoadStatus::NotFound;
-  }
-
-  FILE *f = fopen(path, "rb");
-  if (!f) {
-    return FileLoadStatus::NotFound;
-  }
-
-  FileLoadStatus status = FileLoadStatus::ReadError;
-  if (fseek(f, 0, SEEK_END) == 0) {
-    const long file_size = ftell(f);
-    if (file_size <= 0 || file_size > AUDIO_POC_MAX_BYTES) {
-      status = FileLoadStatus::BadSize;
-    } else if (fseek(f, 0, SEEK_SET) == 0) {
-      std::vector<uint8_t> data(static_cast<size_t>(file_size));
-      const size_t read_size = fread(data.data(), 1, data.size(), f);
-      if (read_size == data.size()) {
-        LightLock_Lock(&stream_lock);
-        g_stream_buffer_ptr->swap(data);
-        g_stream_download_complete = true;
-        LightLock_Unlock(&stream_lock);
-        status = FileLoadStatus::Ok;
-      }
-    }
-  }
-
-  fclose(f);
-  return status;
-}
-
-static FileLoadStatus load_vorbis_poc_to_stream_buffer(const char **used_path) {
-  FileLoadStatus last_status = FileLoadStatus::NotFound;
-  for (size_t i = 0; i < sizeof(VORBIS_POC_PATHS) / sizeof(VORBIS_POC_PATHS[0]);
-       i++) {
-    const FileLoadStatus status =
-        load_file_to_stream_buffer(VORBIS_POC_PATHS[i]);
-    if (status == FileLoadStatus::Ok) {
-      if (used_path) {
-        *used_path = VORBIS_POC_PATHS[i];
-      }
-      return status;
-    }
-    if (status != FileLoadStatus::NotFound) {
-      last_status = status;
-    }
-  }
-  return last_status;
-}
-
-static FileLoadStatus load_opus_poc_to_stream_buffer(const char **used_path) {
-  FileLoadStatus last_status = FileLoadStatus::NotFound;
-  for (size_t i = 0; i < sizeof(OPUS_POC_PATHS) / sizeof(OPUS_POC_PATHS[0]);
-       i++) {
-    const FileLoadStatus status = load_file_to_stream_buffer(OPUS_POC_PATHS[i]);
-    if (status == FileLoadStatus::Ok) {
-      if (used_path) {
-        *used_path = OPUS_POC_PATHS[i];
-      }
-      return status;
-    }
-    if (status != FileLoadStatus::NotFound) {
-      last_status = status;
-    }
-  }
-  return last_status;
-}
 
 ThemeColors g_theme_colors;
 std::unique_ptr<AppContext> g_ctx_ptr;
@@ -225,39 +215,51 @@ struct StartupConnectionCheck {
   YouTubeAPI api;
   bool done = false;
   bool result = false;
+  u64 elapsed_ms = 0;
+  int attempt = 0;
+  long timeout_ms = 300;
 };
 
 static void startup_connection_check_thread(void *arg) {
   StartupConnectionCheck *check = static_cast<StartupConnectionCheck *>(arg);
-  bool result = check->api.check_connection();
+  const u64 start_ms = osGetTime();
+  bool result = check->api.check_connection(check->timeout_ms);
+  const u64 end_ms = osGetTime();
   LightLock_Lock(&check->lock);
   check->result = result;
   check->done = true;
+  check->elapsed_ms = (end_ms >= start_ms) ? (end_ms - start_ms) : 0;
   LightLock_Unlock(&check->lock);
 }
 
 static void reset_startup_connection_check(StartupConnectionCheck &check,
-                                           const std::string &server_ip) {
+                                           const std::string &server_ip,
+                                           int attempt, long timeout_ms) {
   LightLock_Lock(&check.lock);
   check.done = false;
   check.result = false;
+  check.elapsed_ms = 0;
+  check.attempt = attempt;
+  check.timeout_ms = timeout_ms;
   LightLock_Unlock(&check.lock);
   check.api.set_server_ip(server_ip);
 }
 
 static bool poll_startup_connection_check(StartupConnectionCheck &check,
-                                          bool &result) {
+                                          bool &result, u64 &elapsed_ms,
+                                          int &attempt) {
   LightLock_Lock(&check.lock);
   bool done = check.done;
   result = check.result;
+  elapsed_ms = check.elapsed_ms;
+  attempt = check.attempt;
   LightLock_Unlock(&check.lock);
   return done;
 }
 
 void update_playing_title_lines(C2D_TextBuf buf) {
   ctx.playing_title_lines.clear();
-  if (ctx.playing_title.empty())
-    return;
+  if (ctx.playing_title.empty()) return;
 
   // ---- Line 1: longest prefix that fits within 360px ----
   size_t pos = 0;
@@ -273,11 +275,9 @@ void update_playing_title_lines(C2D_TextBuf buf) {
       C2D_TextParse(&test_text, buf, test_str.c_str());
       float w = 0, h = 0;
       C2D_TextGetDimensions(&test_text, 0.50f, 0.50f, &w, &h);
-      if (w > 360.0f)
-        break;
+      if (w > 360.0f) break;
       best_len = len;
-      if (pos + len >= ctx.playing_title.length())
-        break;
+      if (pos + len >= ctx.playing_title.length()) break;
       len++;
     }
     ctx.playing_title_lines.push_back(ctx.playing_title.substr(pos, best_len));
@@ -305,11 +305,9 @@ void update_playing_title_lines(C2D_TextBuf buf) {
         C2D_TextParse(&test_text, buf, candidate.c_str());
         float cw = 0, ch = 0;
         C2D_TextGetDimensions(&test_text, 0.50f, 0.50f, &cw, &ch);
-        if (cw > 360.0f)
-          break;
+        if (cw > 360.0f) break;
         best_len = len;
-        if (len >= remaining.length())
-          break;
+        if (len >= remaining.length()) break;
         len++;
       }
       ctx.playing_title_lines.push_back(remaining.substr(0, best_len) + "...");
@@ -359,8 +357,7 @@ static void thumbnail_dl_thread(void *arg) {
       LightLock_Unlock(&c->lock);
       return;
     }
-    if (rgba)
-      stbi_image_free(rgba);
+    if (rgba) stbi_image_free(rgba);
   }
 
   LightLock_Lock(&c->lock);
@@ -386,7 +383,7 @@ void download_thread(void *arg) {
       api->search(q, lang, [&](const std::vector<Track> &res, bool ok) {
         bool is_online = true;
         if ((!ok || res.empty()) && !YouTubeAPI::should_cancel) {
-          is_online = api->check_connection();
+          is_online = api->check_connection(1000L);
         }
 
         LightLock_Lock(&ctx.lock);
@@ -415,7 +412,7 @@ void download_thread(void *arg) {
 
       // Retry only if server is reachable (e.g. transient extract error)
       if (!success && !YouTubeAPI::should_cancel) {
-        if (api->check_connection()) {
+        if (api->check_connection(1000L)) {
           svcSleepThread(500ULL * 1000 * 1000); // 0.5s wait
           if (!YouTubeAPI::should_cancel) {
             success = api->start_streaming(stream_url);
@@ -425,20 +422,18 @@ void download_thread(void *arg) {
 
       LightLock_Lock(&ctx.lock);
       ctx.is_downloading = false;
-      ctx.is_buffering = false;
-      // Unfreeze seek bar (unless user is still paused)
-      if (!ctx.is_paused && ctx.pause_started_at > 0) {
-        ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
-        ctx.pause_started_at = 0;
-      }
       // Don't change connection state if failure was due to cancellation
       if (!YouTubeAPI::should_cancel) {
-        bool is_online = success ? true : api->check_connection();
+        bool is_online = success ? true : api->check_connection(1000L);
         ctx.is_server_connected = is_online;
         if (!success) {
+          ctx.is_buffering = false;
+          if (!ctx.is_paused && ctx.pause_started_at > 0) {
+            ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+            ctx.pause_started_at = 0;
+          }
           ctx.g_status_msg = is_online ? "Opus Error (Check Proxy)"
                                        : "Stream Error (Offline?)";
-          VorbisPocPlayer::is_playing = false;
           OpusPocPlayer::is_playing = false;
           ctx.opus_pending_decode_start = false;
           ctx.playing_id = "";
@@ -528,10 +523,12 @@ void draw_loading_screen(UIManager &ui_mgr, C2D_TextBuf buf,
 }
 
 int main(int argc, char *argv[]) {
+  g_startup_perf_start_ms = osGetTime();
+  append_startup_perf_log("boot-start", "");
+
   // Dynamic allocation (RAII) to ensure destructors run before OS exit (socExit
   // etc.)
   g_ctx_ptr = std::make_unique<AppContext>();
-  g_vorbis_player_ptr = std::make_unique<VorbisPocPlayer>();
   g_opus_player_ptr = std::make_unique<OpusPocPlayer>();
   g_playlist_manager_ptr = std::make_unique<PlaylistManager>();
   g_stream_buffer_ptr = std::make_unique<std::vector<uint8_t>>();
@@ -562,6 +559,7 @@ int main(int argc, char *argv[]) {
   // --- Step 1/4: System Init ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 1, 4,
                       "Initializing system...");
+  const u64 step1_start_ms = osGetTime();
 
   aptSetSleepAllowed(false);
   osSetSpeedupEnable(
@@ -570,33 +568,62 @@ int main(int argc, char *argv[]) {
   ndspInit();
   ndmuInit();
   NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
-  bool vorbis_ready = vorbis_player.init();
   bool opus_ready = opus_player.init();
   ctx.active_audio_path = ctx.config.audio_path;
   ptmuInit();
   u32 *soc_buffer = (u32 *)memalign(0x1000, 0x100000);
-  if (soc_buffer)
-    socInit(soc_buffer, 0x100000);
+  if (soc_buffer) socInit(soc_buffer, 0x100000);
 
   auto g_api_ptr = std::make_unique<YouTubeAPI>();
   YouTubeAPI &api = *g_api_ptr;
   api.init();
   ctx.api = &api;
+  {
+    char detail[64];
+    const u64 now_ms = osGetTime();
+    const u64 duration_ms =
+        now_ms >= step1_start_ms ? now_ms - step1_start_ms : 0;
+    snprintf(detail, sizeof(detail), "duration_ms=%llu",
+             static_cast<unsigned long long>(duration_ms));
+    append_startup_perf_log("step1-system-init", detail);
+  }
 
   // Load wallpaper texture (after system init so loading screen is visible
   // first)
+  const u64 wallpaper_start_ms = osGetTime();
   if (!ctx.config.wallpaper_file.empty()) {
     std::string wp_path =
         std::string("sdmc:/3ds/StreaMu/wallpaper/") + ctx.config.wallpaper_file;
     g_wallpaper.load(wp_path);
+  }
+  {
+    char detail[96];
+    const u64 now_ms = osGetTime();
+    const u64 duration_ms =
+        now_ms >= wallpaper_start_ms ? now_ms - wallpaper_start_ms : 0;
+    snprintf(detail, sizeof(detail), "duration_ms=%llu loaded=%s",
+             static_cast<unsigned long long>(duration_ms),
+             ctx.config.wallpaper_file.empty() ? "false" : "true");
+    append_startup_perf_log("wallpaper-load", detail);
   }
 
   // --- Step 2/4: Config loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 2, 4,
                       "Loading config...");
 
+  const u64 playlist_start_ms = osGetTime();
   playlist_manager.init();
   ctx.playlists = playlist_manager.get_playlists();
+  {
+    char detail[96];
+    const u64 now_ms = osGetTime();
+    const u64 duration_ms =
+        now_ms >= playlist_start_ms ? now_ms - playlist_start_ms : 0;
+    snprintf(detail, sizeof(detail), "duration_ms=%llu playlists=%lu",
+             static_cast<unsigned long long>(duration_ms),
+             static_cast<unsigned long>(ctx.playlists.size()));
+    append_startup_perf_log("playlist-load", detail);
+  }
 
   // --- Step 3/4: Playlists loaded ---
   draw_loading_screen(ui_mgr, g_staticBuf, ctx.theme, 3, 4,
@@ -645,7 +672,9 @@ int main(int argc, char *argv[]) {
   bool is_confirming_exit = false;
   int confirm_selected_index = 0;
   u64 connect_start_ms = osGetTime();
-  u64 last_check_ms = connect_start_ms;
+  u64 next_startup_check_ms = connect_start_ms;
+  int startup_check_attempt_count = 0;
+  bool startup_timeout_logged = false;
   StartupConnectionCheck startup_check;
   LightLock_Init(&startup_check.lock);
   Thread startup_check_thread = nullptr;
@@ -660,10 +689,37 @@ int main(int argc, char *argv[]) {
 
   auto start_startup_check = [&]() {
     cleanup_startup_check_thread();
-    reset_startup_connection_check(startup_check, ctx.config.server_ip);
+    startup_check_attempt_count++;
+    const long timeout_ms = 300L;
+    reset_startup_connection_check(startup_check, ctx.config.server_ip,
+                                   startup_check_attempt_count, timeout_ms);
+    {
+      char detail[128];
+      snprintf(detail, sizeof(detail), "attempt=%d timeout_ms=%ld server=%s",
+               startup_check_attempt_count, timeout_ms,
+               ctx.config.server_ip.c_str());
+      append_startup_perf_log("startup-connect-begin", detail);
+    }
     startup_check_thread =
         threadCreate(startup_connection_check_thread, &startup_check, 0x8000,
                      0x3F, -2, false);
+  };
+
+  auto enter_startup_timeout = [&]() {
+    if (!startup_timeout_logged) {
+      char detail[64];
+      const u64 now_ms = osGetTime();
+      const u64 duration_ms =
+          now_ms >= connect_start_ms ? now_ms - connect_start_ms : 0;
+      snprintf(detail, sizeof(detail), "duration_ms=%llu",
+               static_cast<unsigned long long>(duration_ms));
+      append_startup_perf_log("startup-connect-timeout", detail);
+      startup_timeout_logged = true;
+    }
+    cleanup_startup_check_thread();
+    is_timeout = true;
+    is_confirming_exit = false;
+    timeout_selected_index = 1; // Change IP
   };
 
   if (!ctx.config.server_ip.empty()) {
@@ -744,7 +800,8 @@ int main(int argc, char *argv[]) {
           if (timeout_selected_index == 0) { // Retry
             is_timeout = false;
             connect_start_ms = osGetTime();
-            last_check_ms = connect_start_ms;
+            next_startup_check_ms = connect_start_ms;
+            startup_timeout_logged = false;
             start_startup_check();
           } else if (timeout_selected_index == 1) { // Change IP
             std::string ip = show_ip_keyboard(ctx.config.server_ip);
@@ -755,7 +812,8 @@ int main(int argc, char *argv[]) {
             }
             is_timeout = false;
             connect_start_ms = osGetTime();
-            last_check_ms = connect_start_ms;
+            next_startup_check_ms = connect_start_ms;
+            startup_timeout_logged = false;
             start_startup_check();
           } else { // Exit
             is_confirming_exit = true;
@@ -763,10 +821,8 @@ int main(int argc, char *argv[]) {
           }
         }
       } else {
-        if (kRepeat & KEY_DRIGHT)
-          confirm_selected_index = 1;
-        if (kRepeat & KEY_DLEFT)
-          confirm_selected_index = 0;
+        if (kRepeat & KEY_DRIGHT) confirm_selected_index = 1;
+        if (kRepeat & KEY_DLEFT) confirm_selected_index = 0;
 
         if (kDown & KEY_A) {
           if (confirm_selected_index == 1) {
@@ -778,23 +834,35 @@ int main(int argc, char *argv[]) {
       }
     } else {
       if (kDown & KEY_B) {
-        is_timeout = true;
-        timeout_selected_index = 1; // Change IP
+        enter_startup_timeout();
       } else {
         anim_counter++;
         u64 now_ms = osGetTime();
         if (now_ms - connect_start_ms >= 15000) { // 15 seconds (real time)
-          is_timeout = true;
+          enter_startup_timeout();
         } else {
           bool check_result = false;
+          u64 check_elapsed_ms = 0;
+          int check_attempt = 0;
           if (startup_check_thread &&
-              poll_startup_connection_check(startup_check, check_result)) {
+              poll_startup_connection_check(startup_check, check_result,
+                                            check_elapsed_ms, check_attempt)) {
             cleanup_startup_check_thread();
+            {
+              char detail[128];
+              snprintf(detail, sizeof(detail),
+                       "attempt=%d result=%s duration_ms=%llu", check_attempt,
+                       check_result ? "ok" : "fail",
+                       static_cast<unsigned long long>(check_elapsed_ms));
+              append_startup_perf_log("startup-connect-finish", detail);
+            }
             ctx.is_server_connected = check_result;
-          } else if (!startup_check_thread &&
-                     now_ms - last_check_ms >= 500) { // Check every 0.5s
-                                                      // (real time)
-            last_check_ms = now_ms;
+            if (!check_result) {
+              // Retry quickly after a failed probe; the timeout itself already
+              // spent 300ms waiting, so an extra 500ms gap just adds latency.
+              next_startup_check_ms = now_ms + 50;
+            }
+          } else if (!startup_check_thread && now_ms >= next_startup_check_ms) {
             start_startup_check();
           }
         }
@@ -804,6 +872,18 @@ int main(int argc, char *argv[]) {
   }
 
   cleanup_startup_check_thread();
+  {
+    char detail[160];
+    const u64 now_ms = osGetTime();
+    const u64 duration_ms =
+        now_ms >= connect_start_ms ? now_ms - connect_start_ms : 0;
+    snprintf(
+        detail, sizeof(detail), "connected=%s attempts=%d duration_ms=%llu",
+        ctx.is_server_connected ? "true" : "false", startup_check_attempt_count,
+        static_cast<unsigned long long>(duration_ms));
+    append_startup_perf_log("step4-connection-check", detail);
+    append_startup_perf_log("startup-ready", detail);
+  }
 
   Thread threadId = nullptr;
   if (ctx.is_running) {
@@ -814,7 +894,9 @@ int main(int argc, char *argv[]) {
   auto start_playback = [&](const Track &track) {
     // --- Fully stop and discard previous playback ---
     YouTubeAPI::should_cancel = true; // Signal download thread to stop
-    {                                 // Safely read is_downloading under lock
+    const bool keep_paused_after_seek =
+        ctx.seek_target_seconds >= 0 && ctx.is_paused;
+    { // Safely read is_downloading under lock
       bool still_dl;
       do {
         LightLock_Lock(&ctx.lock);
@@ -825,14 +907,12 @@ int main(int argc, char *argv[]) {
       } while (still_dl);
     }
 
-    ctx.is_paused = false;
-    ndspChnSetPaused(0, false);
-    vorbis_player.stop();
+    ctx.is_paused = keep_paused_after_seek;
+    ndspChnSetPaused(0, keep_paused_after_seek);
     opus_player.stop();
 
     LightLock_Lock(&stream_lock);
-    if (g_stream_buffer_ptr)
-      g_stream_buffer_ptr->clear(); // Discard buffer
+    if (g_stream_buffer_ptr) g_stream_buffer_ptr->clear(); // Discard buffer
     g_stream_download_complete = false;
     LightLock_Unlock(&stream_lock);
 
@@ -843,7 +923,10 @@ int main(int argc, char *argv[]) {
     ctx.seek_target_seconds = -1;
     g_opus_playback_perf_start_ms = osGetTime();
     g_opus_audio_started_logged = false;
-    append_opus_playback_perf_log("playback-request", 0);
+    g_opus_last_frame_observe_ms = 0;
+    g_opus_observed_max_decoded_buffers = 0;
+    g_opus_observed_decode_failure = false;
+    append_opus_playback_perf_log(OpusPerfEvent::PlaybackRequest, 0);
 
     LightLock_Lock(&ctx.lock);
     ctx.pause_accumulated_ms = 0;
@@ -861,13 +944,11 @@ int main(int argc, char *argv[]) {
       meta += track.duration;
     if (!track.views.empty() && track.views != "?" &&
         ctx.active_playlist_id.empty()) {
-      if (!meta.empty())
-        meta += " ";
+      if (!meta.empty()) meta += " ";
       meta += track.views;
     }
     if (!track.upload_date.empty() && track.upload_date != "?") {
-      if (!meta.empty())
-        meta += " ";
+      if (!meta.empty()) meta += " ";
       meta += track.upload_date;
     }
     ctx.playing_meta = meta;
@@ -875,10 +956,10 @@ int main(int argc, char *argv[]) {
     update_playing_title_lines(ui_mgr.get_text_buf());
     ctx.active_audio_path = AudioPathConfig::OPUS_DIRECT;
     ctx.opus_pending_decode_start = opus_ready;
-    VorbisPocPlayer::is_playing = false;
     OpusPocPlayer::is_playing = opus_ready;
     if (opus_ready) {
-      ctx.g_status_msg = "Buffering...";
+      ctx.g_status_msg =
+          playback_status_message(ctx.is_paused, ctx.is_buffering);
     } else {
       ctx.is_buffering = false;
       ctx.playing_id = "";
@@ -898,7 +979,6 @@ int main(int argc, char *argv[]) {
                                  ctx.is_downloading = true;
                                } else {
                                  ctx.g_status_msg = "Stream Error";
-                                 VorbisPocPlayer::is_playing = false;
                                  OpusPocPlayer::is_playing = false;
                                  ctx.opus_pending_decode_start = false;
                                  ctx.seek_target_seconds = -1;
@@ -909,145 +989,6 @@ int main(int argc, char *argv[]) {
                              });
   };
 
-  auto start_vorbis_poc_playback = [&](std::string &status_msg) {
-    if (!vorbis_ready) {
-      status_msg = "Vorbis init failed";
-      return false;
-    }
-
-    YouTubeAPI::should_cancel = true;
-    bool still_dl;
-    do {
-      LightLock_Lock(&ctx.lock);
-      still_dl = ctx.is_downloading;
-      LightLock_Unlock(&ctx.lock);
-      if (still_dl) {
-        svcSleepThread(10 * 1000 * 1000);
-      }
-    } while (still_dl);
-
-    ctx.is_paused = false;
-    ndspChnSetPaused(0, false);
-    vorbis_player.stop();
-    opus_player.stop();
-
-    const char *used_path = NULL;
-    const FileLoadStatus load_status =
-        load_vorbis_poc_to_stream_buffer(&used_path);
-    if (load_status != FileLoadStatus::Ok) {
-      YouTubeAPI::should_cancel = false;
-      if (load_status == FileLoadStatus::BadSize) {
-        status_msg = "Vorbis file too large/empty";
-      } else if (load_status == FileLoadStatus::ReadError) {
-        status_msg = "Vorbis file read error";
-      } else {
-        status_msg = "Vorbis file not found";
-      }
-      return false;
-    }
-
-    YouTubeAPI::should_cancel = false;
-
-    LightLock_Lock(&ctx.lock);
-    ctx.pause_accumulated_ms = 0;
-    ctx.pause_started_at = 0;
-    ctx.is_buffering = false;
-    ctx.is_downloading = false;
-    ctx.playback_start_time = osGetTime();
-    ctx.playing_id = "vorbis_poc";
-    ctx.playing_title = "Vorbis PoC";
-    ctx.playing_duration = "?";
-    ctx.playing_meta = used_path ? used_path : "vorbis_poc.ogg";
-    ctx.active_playlist_id = "";
-    ctx.current_track_idx = -1;
-    ctx.play_queue.clear();
-    ctx.active_audio_path = AudioPathConfig::OPUS_DIRECT;
-    ctx.opus_pending_decode_start = false;
-    update_playing_title_lines(ui_mgr.get_text_buf());
-    OpusPocPlayer::is_playing = false;
-    VorbisPocPlayer::is_playing = true;
-    LightLock_Unlock(&ctx.lock);
-    status_msg = "Vorbis PoC";
-    return true;
-  };
-
-  auto start_opus_poc_playback = [&](std::string &status_msg) {
-    g_opus_playback_perf_start_ms = 0;
-    g_opus_audio_started_logged = false;
-    if (!opus_ready) {
-      status_msg = "Opus init failed";
-      return false;
-    }
-
-    YouTubeAPI::should_cancel = true;
-    bool still_dl;
-    do {
-      LightLock_Lock(&ctx.lock);
-      still_dl = ctx.is_downloading;
-      LightLock_Unlock(&ctx.lock);
-      if (still_dl) {
-        svcSleepThread(10 * 1000 * 1000);
-      }
-    } while (still_dl);
-
-    ctx.is_paused = false;
-    ndspChnSetPaused(0, false);
-    vorbis_player.stop();
-    opus_player.stop();
-
-    const char *used_path = NULL;
-    const FileLoadStatus load_status =
-        load_opus_poc_to_stream_buffer(&used_path);
-    if (load_status != FileLoadStatus::Ok) {
-      YouTubeAPI::should_cancel = false;
-      if (load_status == FileLoadStatus::BadSize) {
-        status_msg = "Opus PoC file too large";
-      } else if (load_status == FileLoadStatus::ReadError) {
-        status_msg = "Opus PoC file read error";
-      } else {
-        status_msg = "Opus PoC file missing";
-      }
-      return false;
-    }
-
-    bool started = false;
-    LightLock_Lock(&stream_lock);
-    if (g_stream_buffer_ptr && !g_stream_buffer_ptr->empty()) {
-      started = opus_player.start(g_stream_buffer_ptr->data(),
-                                  g_stream_buffer_ptr->size());
-    }
-    LightLock_Unlock(&stream_lock);
-    if (!started) {
-      YouTubeAPI::should_cancel = false;
-      status_msg = "Opus decode failed";
-      return false;
-    }
-
-    YouTubeAPI::should_cancel = false;
-
-    LightLock_Lock(&ctx.lock);
-    ctx.pause_accumulated_ms = 0;
-    ctx.pause_started_at = 0;
-    ctx.is_buffering = false;
-    ctx.is_downloading = false;
-    ctx.playback_start_time = osGetTime();
-    ctx.playing_id = "opus_poc";
-    ctx.playing_title = "Opus PoC";
-    ctx.playing_duration = "?";
-    ctx.playing_meta = used_path ? used_path : "opus_poc.opus";
-    ctx.active_playlist_id = "";
-    ctx.current_track_idx = -1;
-    ctx.play_queue.clear();
-    ctx.active_audio_path = AudioPathConfig::OPUS_DIRECT;
-    ctx.opus_pending_decode_start = false;
-    update_playing_title_lines(ui_mgr.get_text_buf());
-    VorbisPocPlayer::is_playing = false;
-    OpusPocPlayer::is_playing = true;
-    LightLock_Unlock(&ctx.lock);
-    status_msg = "Opus PoC";
-    return true;
-  };
-
   while (aptMainLoop()) {
     if (!ctx.is_running)
       break; // Exit immediately if START pressed right after boot
@@ -1056,24 +997,14 @@ int main(int argc, char *argv[]) {
     LightLock_Lock(&ctx.lock);
     bool should_auto_next = false;
 
-    bool use_opus_poc = OpusPocPlayer::is_playing;
-    bool use_vorbis_poc = VorbisPocPlayer::is_playing;
-    if (use_vorbis_poc) {
-      vorbis_player.set_downloading_status(false);
-    }
-
     bool active_player_finished =
-        use_opus_poc
-            ? opus_player.is_track_finished()
-            : (use_vorbis_poc ? vorbis_player.is_track_finished() : false);
+        OpusPocPlayer::is_playing && opus_player.is_track_finished();
     if (active_player_finished) {
-      const bool local_opus_poc = ctx.playing_id == "opus_poc";
-      if (!local_opus_poc && !use_vorbis_poc && !ctx.play_queue.empty()) {
+      if (!ctx.play_queue.empty()) {
         // Auto-advance: loop when reaching the end (per user request)
         should_auto_next = true;
       } else {
         // End of playlist or single track
-        VorbisPocPlayer::is_playing = false;
         OpusPocPlayer::is_playing = false;
         ctx.opus_pending_decode_start = false;
         ctx.g_status_msg = "";
@@ -1096,13 +1027,11 @@ int main(int argc, char *argv[]) {
             LightLock_Unlock(&ctx.lock);
             start_playback(cur_track);
           } else {
-            VorbisPocPlayer::is_playing = false;
             OpusPocPlayer::is_playing = false;
             ctx.playing_id = "";
             LightLock_Unlock(&ctx.lock);
           }
         } else {
-          VorbisPocPlayer::is_playing = false;
           OpusPocPlayer::is_playing = false;
           ctx.playing_id = "";
           LightLock_Unlock(&ctx.lock);
@@ -1115,7 +1044,6 @@ int main(int argc, char *argv[]) {
             ctx.current_track_idx = 0;
           } else {
             // LOOP_OFF: stop playback
-            VorbisPocPlayer::is_playing = false;
             OpusPocPlayer::is_playing = false;
             ctx.g_status_msg = "";
             ctx.playing_id = "";
@@ -1129,7 +1057,6 @@ int main(int argc, char *argv[]) {
           if (next_idx < 0 || next_idx >= (int)ctx.playing_tracks.size()) {
             ctx.play_queue.clear();
             ctx.current_track_idx = -1;
-            VorbisPocPlayer::is_playing = false;
             OpusPocPlayer::is_playing = false;
             LightLock_Unlock(&ctx.lock);
           } else {
@@ -1147,35 +1074,13 @@ int main(int argc, char *argv[]) {
     u32 kHeld = hidKeysHeld();
     u32 kRepeat = hidKeysDownRepeat();
 
-    if (ctx.current_state == STATE_HOME && (kDown & KEY_Y) && (kHeld & KEY_L) &&
-        (kHeld & KEY_R)) {
-      std::string status_msg;
-      start_vorbis_poc_playback(status_msg);
-      LightLock_Lock(&ctx.lock);
-      ctx.g_status_msg = status_msg;
-      LightLock_Unlock(&ctx.lock);
-      kDown &= ~KEY_Y;
-    }
-
-    if (ctx.current_state == STATE_HOME && (kDown & KEY_X) && (kHeld & KEY_L) &&
-        (kHeld & KEY_R)) {
-      std::string status_msg;
-      start_opus_poc_playback(status_msg);
-      LightLock_Lock(&ctx.lock);
-      ctx.g_status_msg = status_msg;
-      LightLock_Unlock(&ctx.lock);
-      kDown &= ~KEY_X;
-    }
-
     // D-pad held repeat (respects sensitivity setting)
     {
       static const u32 delays[] = {90, 75, 62, 52, 43, 35, 28, 22, 15, 8};
       static const u32 intervals[] = {35, 28, 22, 17, 13, 10, 7, 5, 4, 3};
       int spd_idx = ctx.config.dpad_speed - 1;
-      if (spd_idx < 0)
-        spd_idx = 0;
-      if (spd_idx > 9)
-        spd_idx = 9;
+      if (spd_idx < 0) spd_idx = 0;
+      if (spd_idx > 9) spd_idx = 9;
       u32 rep_delay = delays[spd_idx];
       u32 rep_interval = intervals[spd_idx];
 
@@ -1227,22 +1132,23 @@ int main(int argc, char *argv[]) {
         if (ctx.playing_id != "") {
           ctx.is_paused = !ctx.is_paused;
           ndspChnSetPaused(0, ctx.is_paused);
-          ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+          ctx.g_status_msg =
+              playback_status_message(ctx.is_paused, ctx.is_buffering);
           if (ctx.is_paused) {
-            ctx.pause_started_at = osGetTime();
+            if (!ctx.is_buffering) ctx.pause_started_at = osGetTime();
           } else {
-            if (ctx.pause_started_at > 0)
-              ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
-            ctx.pause_started_at = 0;
+            if (!ctx.is_buffering) {
+              if (ctx.pause_started_at > 0)
+                ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
+              ctx.pause_started_at = 0;
+            }
           }
         }
       }
       // LR_DISABLED: do nothing
     };
-    if (kDown & KEY_R)
-      handle_lr(ctx.config.r_action);
-    if (kDown & KEY_L)
-      handle_lr(ctx.config.l_action);
+    if (kDown & KEY_R) handle_lr(ctx.config.r_action);
+    if (kDown & KEY_L) handle_lr(ctx.config.l_action);
 
     if (kDown & KEY_START) {
       LightLock_Lock(&ctx.lock);
@@ -1292,14 +1198,7 @@ int main(int argc, char *argv[]) {
 
     if (kDown & KEY_B) {
       LightLock_Lock(&ctx.lock);
-      bool was_popup = (ctx.current_state == STATE_POPUP_PLAYLIST_ADD ||
-                        ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS ||
-                        ctx.current_state == STATE_POPUP_TRACK_OPTIONS ||
-                        ctx.current_state == STATE_POPUP_TRACK_DETAILS ||
-                        ctx.current_state == STATE_EXIT_CONFIRM ||
-                        ctx.current_state == STATE_POPUP_NAV ||
-                        ctx.current_state == STATE_POPUP_QA_ADD ||
-                        ctx.current_state == STATE_POPUP_QA_REMOVE);
+      bool was_popup = is_popup_state(ctx.current_state);
       if (was_popup) {
         ctx.current_state = ctx.previous_state;
       }
@@ -1320,11 +1219,11 @@ int main(int argc, char *argv[]) {
       if (ctx.playing_id != "") {
         ctx.is_paused = !ctx.is_paused;
         ndspChnSetPaused(0, ctx.is_paused);
-        ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+        ctx.g_status_msg =
+            playback_status_message(ctx.is_paused, ctx.is_buffering);
         if (ctx.is_paused) {
           // Start freeze only if not already frozen by buffering
-          if (!ctx.is_buffering)
-            ctx.pause_started_at = osGetTime();
+          if (!ctx.is_buffering) ctx.pause_started_at = osGetTime();
         } else {
           // End freeze only if buffering is also done
           if (!ctx.is_buffering) {
@@ -1408,10 +1307,10 @@ int main(int argc, char *argv[]) {
         if (!ctx.playing_id.empty()) {
           ctx.is_paused = !ctx.is_paused;
           ndspChnSetPaused(0, ctx.is_paused);
-          ctx.g_status_msg = ctx.is_paused ? "Paused" : "Playing";
+          ctx.g_status_msg =
+              playback_status_message(ctx.is_paused, ctx.is_buffering);
           if (ctx.is_paused) {
-            if (!ctx.is_buffering)
-              ctx.pause_started_at = osGetTime();
+            if (!ctx.is_buffering) ctx.pause_started_at = osGetTime();
           } else {
             if (!ctx.is_buffering) {
               if (ctx.pause_started_at > 0)
@@ -1535,9 +1434,11 @@ int main(int argc, char *argv[]) {
             ctx.play_queue.clear();
             for (size_t i = 0; i < ctx.playing_tracks.size(); ++i)
               ctx.play_queue.push_back(i);
-            for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
-              size_t j = rand() % (i + 1);
-              std::swap(ctx.play_queue[i], ctx.play_queue[j]);
+            if (ctx.play_queue.size() > 1) {
+              for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
+                size_t j = rand() % (i + 1);
+                std::swap(ctx.play_queue[i], ctx.play_queue[j]);
+              }
             }
             if (cur_playing >= 0) {
               for (size_t i = 0; i < ctx.play_queue.size(); ++i) {
@@ -1590,8 +1491,7 @@ int main(int argc, char *argv[]) {
           }
         }
         LightLock_Unlock(&ctx.lock);
-        if (valid)
-          start_playback(t);
+        if (valid) start_playback(t);
         kDown &= ~KEY_A;
       } else if (action == "start_playback_from_playlist") {
         // Remove MODE_BTN if present and adjust index
@@ -1600,8 +1500,7 @@ int main(int argc, char *argv[]) {
         if (!ctx.g_tracks.empty() && ctx.g_tracks[0].id == "MODE_BTN") {
           ctx.g_tracks.erase(ctx.g_tracks.begin());
           play_idx--; // Offset for removed MODE_BTN
-          if (play_idx < 0)
-            play_idx = 0;
+          if (play_idx < 0) play_idx = 0;
         }
         // Set active_playlist_id BEFORE start_playback so playing_meta omits
         // views
@@ -1620,7 +1519,7 @@ int main(int argc, char *argv[]) {
         ctx.play_queue.clear();
         for (size_t i = 0; i < ctx.playing_tracks.size(); ++i)
           ctx.play_queue.push_back(i);
-        if (ctx.shuffle_mode) {
+        if (ctx.shuffle_mode && ctx.play_queue.size() > 1) {
           for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
             size_t j = rand() % (i + 1);
             std::swap(ctx.play_queue[i], ctx.play_queue[j]);
@@ -1654,7 +1553,7 @@ int main(int argc, char *argv[]) {
           ctx.play_queue.clear();
           for (size_t i = 0; i < ctx.playing_tracks.size(); ++i)
             ctx.play_queue.push_back(i);
-          if (ctx.shuffle_mode) {
+          if (ctx.shuffle_mode && ctx.play_queue.size() > 1) {
             for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
               size_t j = rand() % (i + 1);
               std::swap(ctx.play_queue[i], ctx.play_queue[j]);
@@ -1674,15 +1573,7 @@ int main(int argc, char *argv[]) {
     }
 
     // --- Common popup touch handling ---
-    bool is_popup_state = (ctx.current_state == STATE_POPUP_PLAYLIST_ADD ||
-                           ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS ||
-                           ctx.current_state == STATE_POPUP_TRACK_OPTIONS ||
-                           ctx.current_state == STATE_POPUP_TRACK_DETAILS ||
-                           ctx.current_state == STATE_EXIT_CONFIRM ||
-                           ctx.current_state == STATE_POPUP_NAV ||
-                           ctx.current_state == STATE_POPUP_QA_ADD ||
-                           ctx.current_state == STATE_POPUP_QA_REMOVE);
-    if (is_popup_state) {
+    if (is_popup_state(ctx.current_state)) {
       touchPosition touch;
       hidTouchRead(&touch);
 
@@ -1726,10 +1617,8 @@ int main(int argc, char *argv[]) {
                 std::string id = (p == std::string::npos)
                                      ? csv.substr(s)
                                      : csv.substr(s, p - s);
-                if (!id.empty())
-                  qa_ids_tmp.push_back(id);
-                if (p == std::string::npos)
-                  break;
+                if (!id.empty()) qa_ids_tmp.push_back(id);
+                if (p == std::string::npos) break;
                 s = p + 1;
               }
             }
@@ -1741,16 +1630,14 @@ int main(int argc, char *argv[]) {
                   break;
                 }
               }
-              if (!already)
-                popup_item_count++;
+              if (!already) popup_item_count++;
             }
           } else if (ctx.current_state == STATE_POPUP_QA_REMOVE)
             popup_item_count = 2;
 
           int box_h =
               (int)(POPUP_HEADER_H + 8 + popup_item_count * POPUP_ITEM_H);
-          if (box_h > POPUP_MAX_H)
-            box_h = POPUP_MAX_H;
+          if (box_h > POPUP_MAX_H) box_h = POPUP_MAX_H;
           int box_y = (240 - box_h) / 2;
 
           // Tap outside popup -> close (same as B)
@@ -1772,8 +1659,7 @@ int main(int argc, char *argv[]) {
               start_idx = ctx.popup_selected_index - max_items / 2;
             if (start_idx + max_items > popup_item_count)
               start_idx = popup_item_count - max_items;
-            if (start_idx < 0)
-              start_idx = 0;
+            if (start_idx < 0) start_idx = 0;
 
             float items_y = box_y + POPUP_HEADER_H + 4;
             if (tap_y >= (int)items_y) {
@@ -1829,8 +1715,7 @@ int main(int argc, char *argv[]) {
                 return false;
               };
               f(ctx.playing_tracks) || f(ctx.search_tracks) || f(ctx.g_tracks);
-              if (!t.id.empty())
-                playlist_manager.add_track(new_pl_id, t);
+              if (!t.id.empty()) playlist_manager.add_track(new_pl_id, t);
             }
             ctx.playlists = playlist_manager.get_playlists();
           }
@@ -1847,8 +1732,7 @@ int main(int argc, char *argv[]) {
               return false;
             };
             f(ctx.playing_tracks) || f(ctx.search_tracks) || f(ctx.g_tracks);
-            if (!t.id.empty())
-              playlist_manager.add_track(pl_id, t);
+            if (!t.id.empty()) playlist_manager.add_track(pl_id, t);
           }
           ctx.playlists = playlist_manager.get_playlists();
         }
@@ -1891,10 +1775,8 @@ int main(int argc, char *argv[]) {
               size_t p = csv.find(',', s);
               std::string id = (p == std::string::npos) ? csv.substr(s)
                                                         : csv.substr(s, p - s);
-              if (!id.empty())
-                qa_ids.push_back(id);
-              if (p == std::string::npos)
-                break;
+              if (!id.empty()) qa_ids.push_back(id);
+              if (p == std::string::npos) break;
               s = p + 1;
             }
           }
@@ -1912,8 +1794,7 @@ int main(int argc, char *argv[]) {
           // join back
           std::string joined;
           for (size_t i = 0; i < qa_ids.size(); ++i) {
-            if (i > 0)
-              joined += ',';
+            if (i > 0) joined += ',';
             joined += qa_ids[i];
           }
           ctx.config.quick_access_ids = joined;
@@ -1930,14 +1811,12 @@ int main(int argc, char *argv[]) {
                                                         : csv.substr(s, p - s);
               if (!id.empty() && id != ctx.selected_playlist_id)
                 qa_ids.push_back(id);
-              if (p == std::string::npos)
-                break;
+              if (p == std::string::npos) break;
               s = p + 1;
             }
             std::string joined;
             for (size_t i = 0; i < qa_ids.size(); ++i) {
-              if (i > 0)
-                joined += ',';
+              if (i > 0) joined += ',';
               joined += qa_ids[i];
             }
             if (joined != ctx.config.quick_access_ids) {
@@ -2021,8 +1900,7 @@ int main(int argc, char *argv[]) {
               }
             }
             bool need_title_update = (ctx.playing_id == ctx.selected_track_id);
-            if (need_title_update)
-              ctx.playing_title = new_title;
+            if (need_title_update) ctx.playing_title = new_title;
             LightLock_Unlock(&ctx.lock);
             if (need_title_update)
               update_playing_title_lines(ui_mgr.get_text_buf());
@@ -2054,9 +1932,11 @@ int main(int argc, char *argv[]) {
             for (size_t i = 0; i < ctx.playing_tracks.size(); ++i)
               ctx.play_queue.push_back(i);
             if (ctx.shuffle_mode) {
-              for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
-                size_t j = rand() % (i + 1);
-                std::swap(ctx.play_queue[i], ctx.play_queue[j]);
+              if (ctx.play_queue.size() > 1) {
+                for (size_t i = ctx.play_queue.size() - 1; i > 0; --i) {
+                  size_t j = rand() % (i + 1);
+                  std::swap(ctx.play_queue[i], ctx.play_queue[j]);
+                }
               }
               if (cur_playing_idx >= 0) {
                 for (size_t i = 0; i < ctx.play_queue.size(); ++i) {
@@ -2074,12 +1954,10 @@ int main(int argc, char *argv[]) {
             // Adjust selected_index
             if (ctx.selected_index >= (int)ctx.playing_tracks.size())
               ctx.selected_index = (int)ctx.playing_tracks.size() - 1;
-            if (ctx.selected_index < 0)
-              ctx.selected_index = 0;
+            if (ctx.selected_index < 0) ctx.selected_index = 0;
             // Stop if the currently playing track was removed
             if (ctx.playing_id == ctx.selected_track_id) {
               ctx.playing_id = "";
-              VorbisPocPlayer::is_playing = false;
               OpusPocPlayer::is_playing = false;
               ctx.active_audio_path = ctx.config.audio_path;
               ctx.opus_pending_decode_start = false;
@@ -2097,8 +1975,7 @@ int main(int argc, char *argv[]) {
             }
             if (ctx.selected_index >= (int)ctx.g_tracks.size())
               ctx.selected_index = ctx.g_tracks.size() - 1;
-            if (ctx.selected_index < 0)
-              ctx.selected_index = 0;
+            if (ctx.selected_index < 0) ctx.selected_index = 0;
           }
           ctx.current_state = ctx.previous_state;
         } else { // Add to playlist (Search:idx1, PL/Playing:idx3)
@@ -2200,10 +2077,8 @@ int main(int argc, char *argv[]) {
           size_t p = csv.find(',', s);
           std::string id =
               (p == std::string::npos) ? csv.substr(s) : csv.substr(s, p - s);
-          if (!id.empty())
-            qa_ids.push_back(id);
-          if (p == std::string::npos)
-            break;
+          if (!id.empty()) qa_ids.push_back(id);
+          if (p == std::string::npos) break;
           s = p + 1;
         }
       }
@@ -2216,8 +2091,7 @@ int main(int argc, char *argv[]) {
             break;
           }
         }
-        if (!already)
-          filtered_indices.push_back(i);
+        if (!already) filtered_indices.push_back(i);
       }
       int item_count = (int)filtered_indices.size();
 
@@ -2240,8 +2114,7 @@ int main(int argc, char *argv[]) {
             qa_ids.push_back(pl_id);
             std::string joined;
             for (size_t i = 0; i < qa_ids.size(); ++i) {
-              if (i > 0)
-                joined += ',';
+              if (i > 0) joined += ',';
               joined += qa_ids[i];
             }
             ctx.config.quick_access_ids = joined;
@@ -2274,14 +2147,12 @@ int main(int argc, char *argv[]) {
                 (p == std::string::npos) ? csv.substr(s) : csv.substr(s, p - s);
             if (!id.empty() && id != ctx.selected_playlist_id)
               qa_ids.push_back(id);
-            if (p == std::string::npos)
-              break;
+            if (p == std::string::npos) break;
             s = p + 1;
           }
           std::string joined;
           for (size_t i = 0; i < qa_ids.size(); ++i) {
-            if (i > 0)
-              joined += ',';
+            if (i > 0) joined += ',';
             joined += qa_ids[i];
           }
           ctx.config.quick_access_ids = joined;
@@ -2310,16 +2181,13 @@ int main(int argc, char *argv[]) {
           LightLock_Lock(&ctx.lock);
           bool still_dl = ctx.is_downloading;
           LightLock_Unlock(&ctx.lock);
-          if (!still_dl)
-            break;
+          if (!still_dl) break;
           svcSleepThread(50 * 1000 * 1000); // Check every 50ms
           timeout_ms -= 50;
         }
 
-        vorbis_player.stop();
         opus_player.stop();
-        if (g_stream_buffer_ptr)
-          g_stream_buffer_ptr->clear();
+        if (g_stream_buffer_ptr) g_stream_buffer_ptr->clear();
         YouTubeAPI::should_cancel = false;
         ctx.active_audio_path = ctx.config.audio_path;
         ctx.opus_pending_decode_start = false;
@@ -2396,10 +2264,9 @@ int main(int argc, char *argv[]) {
         ctx.opus_pending_decode_start && OpusPocPlayer::is_playing;
     LightLock_Unlock(&ctx.lock);
     if (opus_decode_pending) {
-      LightLock_Lock(&stream_lock);
-      opus_buffer_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
-      opus_download_complete = g_stream_download_complete;
-      LightLock_Unlock(&stream_lock);
+      const OpusPipelineState pipeline_state = collect_opus_pipeline_state();
+      opus_buffer_size = pipeline_state.stream_buffer_bytes;
+      opus_download_complete = pipeline_state.download_complete;
       should_start_opus_decoder =
           opus_buffer_size >= OPUS_STREAM_START_BYTES ||
           (opus_download_complete && opus_buffer_size > 0);
@@ -2407,7 +2274,8 @@ int main(int argc, char *argv[]) {
 
     if (should_start_opus_decoder) {
       bool started = false;
-      append_opus_playback_perf_log("decoder-open-start", opus_buffer_size);
+      append_opus_playback_perf_log(OpusPerfEvent::DecoderOpenStart,
+                                    opus_buffer_size);
       if (g_stream_buffer_ptr) {
         if (opus_download_complete) {
           LightLock_Lock(&stream_lock);
@@ -2420,8 +2288,8 @@ int main(int argc, char *argv[]) {
                                                 &g_stream_download_complete);
         }
       }
-      append_opus_playback_perf_log(started ? "decoder-open-ok"
-                                            : "decoder-open-failed",
+      append_opus_playback_perf_log(started ? OpusPerfEvent::DecoderOpenOk
+                                            : OpusPerfEvent::DecoderOpenFailed,
                                     opus_buffer_size);
 
       LightLock_Lock(&ctx.lock);
@@ -2431,35 +2299,58 @@ int main(int argc, char *argv[]) {
         OpusPocPlayer::is_playing = false;
         ctx.playing_id = "";
       } else {
-        ctx.g_status_msg = "Opus decoding";
+        ndspChnSetPaused(0, ctx.is_paused);
+        ctx.g_status_msg =
+            playback_status_message(ctx.is_paused, ctx.is_buffering);
       }
       LightLock_Unlock(&ctx.lock);
     }
 
-    const bool use_vorbis_poc_for_update = VorbisPocPlayer::is_playing;
+    OpusPlayerUpdateStats opus_update_stats = {};
     const bool use_opus_poc_for_update = OpusPocPlayer::is_playing;
     if (use_opus_poc_for_update) {
-      opus_player.update();
-    } else if (use_vorbis_poc_for_update) {
-      vorbis_player.update();
+      opus_update_stats = opus_player.update_with_stats();
+      if (opus_update_stats.decoded_buffers >
+          g_opus_observed_max_decoded_buffers) {
+        g_opus_observed_max_decoded_buffers = opus_update_stats.decoded_buffers;
+      }
+      if (opus_update_stats.hit_decode_failure) {
+        g_opus_observed_decode_failure = true;
+      }
+      const u64 now_ms = osGetTime();
+      if (now_ms >= g_opus_last_frame_observe_ms + 1000ULL) {
+        const OpusPipelineState observed_state = collect_opus_pipeline_state();
+        OpusPlayerUpdateStats observed_update_stats = {};
+        observed_update_stats.decoded_buffers =
+            g_opus_observed_max_decoded_buffers;
+        observed_update_stats.hit_decode_failure =
+            g_opus_observed_decode_failure;
+        const OpusPerfSnapshot observed_snapshot =
+            make_opus_perf_snapshot(observed_state, observed_update_stats);
+        append_opus_playback_perf_log(OpusPerfEvent::FrameObserve,
+                                      observed_snapshot);
+        if (observed_update_stats.decoded_buffers > 0 ||
+            observed_update_stats.hit_decode_failure) {
+          append_opus_playback_perf_log(OpusPerfEvent::DecodeLoopFinish,
+                                        observed_snapshot);
+        }
+        g_opus_observed_max_decoded_buffers = 0;
+        g_opus_observed_decode_failure = false;
+        g_opus_last_frame_observe_ms = now_ms;
+      }
     }
 
     if (use_opus_poc_for_update && opus_player.has_decode_failed()) {
       LightLock_Lock(&ctx.lock);
-      if (ctx.playing_id != "opus_poc") {
-        ctx.g_status_msg = "Opus failed";
-        ctx.playing_id = "";
-        OpusPocPlayer::is_playing = false;
-      }
+      ctx.g_status_msg = "Opus failed";
+      ctx.playing_id = "";
+      OpusPocPlayer::is_playing = false;
       LightLock_Unlock(&ctx.lock);
     }
 
     // Clear buffering flag once audio actually starts playing
     bool has_started_playing =
-        use_opus_poc_for_update
-            ? opus_player.has_started_playing()
-            : (use_vorbis_poc_for_update ? vorbis_player.has_started_playing()
-                                         : false);
+        use_opus_poc_for_update && opus_player.has_started_playing();
     if (use_opus_poc_for_update && has_started_playing &&
         !g_opus_audio_started_logged) {
       size_t logged_opus_buffer_size = 0;
@@ -2467,7 +2358,8 @@ int main(int argc, char *argv[]) {
       logged_opus_buffer_size =
           g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
       LightLock_Unlock(&stream_lock);
-      append_opus_playback_perf_log("audio-started", logged_opus_buffer_size);
+      append_opus_playback_perf_log(OpusPerfEvent::AudioStarted,
+                                    logged_opus_buffer_size);
       g_opus_audio_started_logged = true;
     }
     if (ctx.is_buffering && has_started_playing) {
@@ -2481,16 +2373,16 @@ int main(int argc, char *argv[]) {
     }
 
     bool active_is_playing =
-        use_opus_poc_for_update
-            ? OpusPocPlayer::is_playing
-            : (use_vorbis_poc_for_update ? VorbisPocPlayer::is_playing : false);
+        use_opus_poc_for_update && OpusPocPlayer::is_playing;
     if (active_is_playing && has_started_playing && !ctx.is_paused) {
       LightLock_Lock(&ctx.lock);
-      ctx.g_status_msg = "Playing";
+      ctx.g_status_msg =
+          playback_status_message(ctx.is_paused, ctx.is_buffering);
       LightLock_Unlock(&ctx.lock);
     }
 
     // --- Rendering (MVC: View) ---
+    clamp_scroll_x_for_current_screen(ctx, ui_mgr);
     LightLock_Lock(&ctx.lock);
     RenderContext render_ctx = ctx; // Slicing copy for safe, fast data snapshot
     LightLock_Unlock(&ctx.lock);
@@ -2498,14 +2390,7 @@ int main(int argc, char *argv[]) {
     // Draw without holding the lock
     // If it's a popup, UIRenderer needs to draw the overlay on top of whatever
     // screen was behind it.
-    bool is_popup = (render_ctx.current_state == STATE_POPUP_PLAYLIST_ADD ||
-                     render_ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS ||
-                     render_ctx.current_state == STATE_POPUP_TRACK_OPTIONS ||
-                     render_ctx.current_state == STATE_POPUP_TRACK_DETAILS ||
-                     render_ctx.current_state == STATE_EXIT_CONFIRM ||
-                     render_ctx.current_state == STATE_POPUP_QA_ADD ||
-                     render_ctx.current_state == STATE_POPUP_QA_REMOVE ||
-                     render_ctx.current_state == STATE_POPUP_NAV);
+    bool is_popup = is_popup_state(render_ctx.current_state);
 
     AppState bg_state =
         is_popup ? render_ctx.previous_state : render_ctx.current_state;
@@ -2550,7 +2435,6 @@ int main(int argc, char *argv[]) {
   }
 
   // 2. Safely stop player
-  vorbis_player.stop();
   opus_player.stop();
 
   // 3. Clean up network library before socExit
@@ -2563,7 +2447,6 @@ int main(int argc, char *argv[]) {
     g_stream_buffer_ptr.reset();
   }
 
-  g_vorbis_player_ptr.reset();
   g_opus_player_ptr.reset();
   g_playlist_manager_ptr.reset();
   // Wait for thumbnail thread to finish (if running)
@@ -2573,8 +2456,7 @@ int main(int argc, char *argv[]) {
       LightLock_Lock(&ctx.lock);
       still_loading = ctx.thumbnail_loading;
       LightLock_Unlock(&ctx.lock);
-      if (still_loading)
-        svcSleepThread(10 * 1000 * 1000);
+      if (still_loading) svcSleepThread(10 * 1000 * 1000);
     } while (still_loading);
   }
   // Unload GPU textures stored in ctx before destroying ctx
@@ -2604,8 +2486,7 @@ int main(int argc, char *argv[]) {
   ptmuExit();
   socExit();
 
-  if (soc_buffer)
-    free(soc_buffer);
+  if (soc_buffer) free(soc_buffer);
 
   return 0;
 }

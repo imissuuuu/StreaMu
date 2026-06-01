@@ -140,14 +140,7 @@ void UIRenderer::draw_top_screen(const RenderContext &ctx) {
   // --- Section Title + Status (same line) ---
   // During popup, determine title from the underlying screen state
   AppState title_state = ctx.current_state;
-  bool is_popup =
-      (title_state == STATE_POPUP_PLAYLIST_ADD ||
-       title_state == STATE_POPUP_PLAYLIST_OPTIONS ||
-       title_state == STATE_POPUP_TRACK_OPTIONS ||
-       title_state == STATE_POPUP_TRACK_DETAILS ||
-       title_state == STATE_EXIT_CONFIRM || title_state == STATE_POPUP_NAV ||
-       title_state == STATE_POPUP_QA_ADD ||
-       title_state == STATE_POPUP_QA_REMOVE);
+  bool is_popup = is_popup_state(title_state);
   if (is_popup)
     title_state = ctx.previous_state;
 
@@ -253,14 +246,7 @@ void UIRenderer::draw_top_screen(const RenderContext &ctx) {
 }
 
 void UIRenderer::draw_popup_overlay(const RenderContext &ctx) {
-  bool is_popup = (ctx.current_state == STATE_POPUP_PLAYLIST_ADD ||
-                   ctx.current_state == STATE_POPUP_PLAYLIST_OPTIONS ||
-                   ctx.current_state == STATE_POPUP_TRACK_OPTIONS ||
-                   ctx.current_state == STATE_POPUP_TRACK_DETAILS ||
-                   ctx.current_state == STATE_EXIT_CONFIRM ||
-                   ctx.current_state == STATE_POPUP_NAV ||
-                   ctx.current_state == STATE_POPUP_QA_ADD ||
-                   ctx.current_state == STATE_POPUP_QA_REMOVE);
+  bool is_popup = is_popup_state(ctx.current_state);
 
   if (!is_popup)
     return;

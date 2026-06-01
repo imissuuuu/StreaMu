@@ -1,4 +1,5 @@
 #include "../../include/network/youtube_api.h"
+#include "../audio/opus_perf_metrics.h"
 #include <3ds.h>
 #include <curl/curl.h>
 #include <memory>
@@ -16,8 +17,11 @@ static bool g_opus_perf_first_byte_logged = false;
 static bool g_opus_perf_start_bytes_logged = false;
 static size_t g_opus_perf_bytes = 0;
 static u64 g_opus_perf_start_ms = 0;
+static u64 g_opus_perf_last_buffer_observe_ms = 0;
 
-static void append_opus_perf_log(const char *event, size_t bytes) {
+static void append_opus_perf_log(const char *event, size_t bytes,
+                                 size_t stream_buffer_bytes,
+                                 size_t chunk_bytes) {
   if (!event || !g_opus_perf_active) {
     return;
   }
@@ -30,10 +34,19 @@ static void append_opus_perf_log(const char *event, size_t bytes) {
       (g_opus_perf_start_ms > 0 && now_ms >= g_opus_perf_start_ms)
           ? now_ms - g_opus_perf_start_ms
           : 0;
-  fprintf(f, "[opus-perf] +%llums %s bytes=%lu\n",
+  fprintf(f, "[opus-perf] +%llums %s bytes=%lu buffer=%lu chunk=%lu\n",
           static_cast<unsigned long long>(elapsed_ms), event,
-          static_cast<unsigned long>(bytes));
+          static_cast<unsigned long>(bytes),
+          static_cast<unsigned long>(stream_buffer_bytes),
+          static_cast<unsigned long>(chunk_bytes));
   fclose(f);
+}
+
+static void append_opus_perf_log(OpusPerfEvent event, size_t bytes,
+                                 size_t stream_buffer_bytes,
+                                 size_t chunk_bytes) {
+  append_opus_perf_log(opus_perf_event_name(event), bytes, stream_buffer_bytes,
+                       chunk_bytes);
 }
 #endif
 
@@ -45,26 +58,39 @@ static int progress_callback(void *p, curl_off_t dltotal, curl_off_t dlnow,
 static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
                                      void *userp) {
   size_t total_size = size * nmemb;
+  size_t stream_buffer_size = 0;
+  if (!YouTubeAPI::should_cancel && g_stream_buffer_ptr && total_size > 0) {
+    uint8_t *data = (uint8_t *)contents;
+    LightLock_Lock(&stream_lock);
+    g_stream_buffer_ptr->insert(g_stream_buffer_ptr->end(), data,
+                                data + total_size);
+    stream_buffer_size = g_stream_buffer_ptr->size();
+    LightLock_Unlock(&stream_lock);
+  }
 #if STREAMU_ENABLE_OPUS_PERF_LOG
   if (g_opus_perf_active && total_size > 0) {
     g_opus_perf_bytes += total_size;
     if (!g_opus_perf_first_byte_logged) {
       g_opus_perf_first_byte_logged = true;
-      append_opus_perf_log("first-byte", g_opus_perf_bytes);
+      append_opus_perf_log(OpusPerfEvent::FirstByte, g_opus_perf_bytes,
+                           stream_buffer_size, total_size);
     }
     if (!g_opus_perf_start_bytes_logged && g_opus_perf_bytes >= 16U * 1024U) {
       g_opus_perf_start_bytes_logged = true;
-      append_opus_perf_log("received-16kb", g_opus_perf_bytes);
+      append_opus_perf_log(OpusPerfEvent::Received16Kb, g_opus_perf_bytes,
+                           stream_buffer_size, total_size);
+    }
+    const u64 now_ms = osGetTime();
+    if (g_opus_perf_last_buffer_observe_ms == 0 ||
+        now_ms >= g_opus_perf_last_buffer_observe_ms + 1000ULL) {
+      append_opus_perf_log(OpusPerfEvent::StreamBufferObserve,
+                           g_opus_perf_bytes, stream_buffer_size, total_size);
+      g_opus_perf_last_buffer_observe_ms = now_ms;
     }
   }
+#else
+  (void)stream_buffer_size;
 #endif
-  if (!YouTubeAPI::should_cancel && g_stream_buffer_ptr) {
-    uint8_t *data = (uint8_t *)contents;
-    LightLock_Lock(&stream_lock);
-    g_stream_buffer_ptr->insert(g_stream_buffer_ptr->end(), data,
-                                data + total_size);
-    LightLock_Unlock(&stream_lock);
-  }
   return total_size;
 }
 
@@ -100,8 +126,9 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   g_opus_perf_start_bytes_logged = false;
   g_opus_perf_bytes = 0;
   g_opus_perf_start_ms = is_opus_ogg ? osGetTime() : 0;
+  g_opus_perf_last_buffer_observe_ms = 0;
   if (is_opus_ogg) {
-    append_opus_perf_log("stream-request-start", 0);
+    append_opus_perf_log(OpusPerfEvent::StreamRequestStart, 0, 0, 0);
   }
 #else
   (void)is_opus_ogg;
@@ -128,8 +155,13 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   LightLock_Unlock(&stream_lock);
 #if STREAMU_ENABLE_OPUS_PERF_LOG
   if (is_opus_ogg) {
-    append_opus_perf_log(success ? "stream-complete" : "stream-failed",
-                         g_opus_perf_bytes);
+    size_t final_buffer_size = 0;
+    LightLock_Lock(&stream_lock);
+    final_buffer_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
+    LightLock_Unlock(&stream_lock);
+    append_opus_perf_log(success ? OpusPerfEvent::StreamComplete
+                                 : OpusPerfEvent::StreamFailed,
+                         g_opus_perf_bytes, final_buffer_size, 0);
   }
   g_opus_perf_active = false;
 #endif
@@ -161,9 +193,32 @@ std::string YouTubeAPI::http_get(const std::string &url, long timeout_sec) {
   return readBuffer;
 }
 
-bool YouTubeAPI::check_connection() {
-  std::string url = get_base_url() + "/api/logs";
-  std::string res = http_get(url, 1L); // 1s timeout to avoid startup delay
+std::string YouTubeAPI::http_get_ms(const std::string &url, long timeout_ms) {
+  CURL *curl = curl_easy_init();
+  std::string readBuffer;
+  if (curl) {
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+      readBuffer = "";
+    }
+    curl_easy_cleanup(curl);
+  }
+  return readBuffer;
+}
+
+bool YouTubeAPI::check_connection(long timeout_ms) {
+  std::string url = get_base_url() + "/healthz";
+  std::string res = http_get_ms(url, timeout_ms);
   return !res.empty();
 }
 
@@ -183,8 +238,7 @@ void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
   // Delegate WebM->Ogg remuxing to the proxy; 3DS decodes Opus directly.
   std::string url = get_base_url();
   url += "/stream_opus_ogg?i=" + video_id;
-  if (seek_seconds > 0)
-    url += "&t=" + std::to_string(seek_seconds);
+  if (seek_seconds > 0) url += "&t=" + std::to_string(seek_seconds);
   callback(url, true);
 }
 std::vector<Track> YouTubeAPI::parse_search_results(const std::string &data) {
@@ -216,8 +270,7 @@ bool YouTubeAPI::download_thumbnail(const std::string &video_id,
                                     std::vector<uint8_t> &data) {
   std::string url = get_base_url() + "/thumbnail?id=" + video_id;
   std::string raw = http_get(url, 8L);
-  if (raw.empty())
-    return false;
+  if (raw.empty()) return false;
   if (raw.size() > 512 * 1024)
     return false; // Reject unexpectedly large responses (>512KB)
   data.assign(raw.begin(), raw.end());

@@ -3,6 +3,30 @@
 #include "ui_constants.h"
 #include "ui_manager.h"
 
+namespace {
+
+int compute_title_scroll_limit(const Track &track, const RenderContext &ctx,
+                               UIManager &ui_mgr) {
+  if (track.id == "MODE_BTN")
+    return 0;
+
+  std::string display_title = track.title;
+  if (track.id == ctx.playing_id && ctx.playing_id != "SEARCH_BTN")
+    display_title = ">> " + display_title;
+
+  C2D_Text text;
+  C2D_TextParse(&text, ui_mgr.get_text_buf(), display_title.c_str());
+
+  const float text_w = text.width * FONT_SM;
+  const float display_w = 320.0f - BTM_MARGIN_X * 2;
+  if (text_w <= display_w)
+    return 0;
+
+  return static_cast<int>(text_w - display_w);
+}
+
+} // namespace
+
 // ============================================================
 // Shared helper: track list drawing for STATE_SEARCH / STATE_PLAYLIST_DETAIL
 // ============================================================
@@ -267,6 +291,50 @@ void navigate_track_list(AppContext &ctx, u32 kRepeat) {
         ctx.scroll_x = 0;
     }
   }
+  LightLock_Unlock(&ctx.lock);
+}
+
+void clamp_scroll_x_for_current_screen(AppContext &ctx, UIManager &ui_mgr) {
+  LightLock_Lock(&ctx.lock);
+
+  int max_scroll_x = 0;
+  const AppState effective_state =
+      is_popup_state(ctx.current_state) ? ctx.previous_state : ctx.current_state;
+
+  switch (effective_state) {
+  case STATE_SEARCH:
+    if (ctx.selected_index >= 0 &&
+        ctx.selected_index < (int)ctx.search_tracks.size()) {
+      max_scroll_x = compute_title_scroll_limit(ctx.search_tracks[ctx.selected_index],
+                                                ctx, ui_mgr);
+    }
+    break;
+  case STATE_PLAYLIST_DETAIL:
+    if (ctx.selected_index >= 0 &&
+        ctx.selected_index < (int)ctx.g_tracks.size()) {
+      max_scroll_x = compute_title_scroll_limit(ctx.g_tracks[ctx.selected_index],
+                                                ctx, ui_mgr);
+    }
+    break;
+  case STATE_PLAYING_UI:
+    if (ctx.selected_index >= 0 &&
+        ctx.selected_index < (int)ctx.playing_tracks.size()) {
+      max_scroll_x =
+          compute_title_scroll_limit(ctx.playing_tracks[ctx.selected_index], ctx,
+                                     ui_mgr);
+    }
+    break;
+  default:
+    ctx.scroll_x = 0;
+    LightLock_Unlock(&ctx.lock);
+    return;
+  }
+
+  if (ctx.scroll_x < 0)
+    ctx.scroll_x = 0;
+  else if (ctx.scroll_x > max_scroll_x)
+    ctx.scroll_x = max_scroll_x;
+
   LightLock_Unlock(&ctx.lock);
 }
 
