@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import time
 from typing import Any
 
 import yt_dlp  # type: ignore
@@ -36,6 +37,21 @@ class OpusFormatInfo:
         return data
 
 
+@dataclass(frozen=True)
+class OpusExtractMetrics:
+    ydl_init_ms: int
+    extract_info_ms: int
+    postprocess_ms: int
+    total_ms: int
+
+
+@dataclass(frozen=True)
+class OpusFormatLookup:
+    info: OpusFormatInfo | None
+    metrics: OpusExtractMetrics
+    failure_stage: str | None
+
+
 def _as_float_or_none(value: Any) -> float | None:
     if value is None:
         return None
@@ -68,7 +84,7 @@ def _fragments_from_info(info: dict[str, Any]) -> list[dict[str, Any]]:
     return [fragment for fragment in fragments if isinstance(fragment, dict)]
 
 
-def extract_opus_format(video_id: str) -> OpusFormatInfo | None:
+def extract_opus_format_lookup(video_id: str) -> OpusFormatLookup:
     yt_url = f"https://www.youtube.com/watch?v={video_id}"
     ydl_opts: dict[str, Any] = {
         "format": OPUS_FORMAT_SELECTOR,
@@ -76,15 +92,44 @@ def extract_opus_format(video_id: str) -> OpusFormatInfo | None:
         "no_warnings": True,
         "socket_timeout": 10,
     }
+    total_start = time.monotonic()
+    ydl_init_ms = 0
+    extract_info_ms = 0
 
     try:
+        ydl_init_start = time.monotonic()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl_init_ms = int((time.monotonic() - ydl_init_start) * 1000)
+            extract_start = time.monotonic()
             raw_info = ydl.extract_info(yt_url, download=False)
+            extract_info_ms = int((time.monotonic() - extract_start) * 1000)
     except (yt_dlp.utils.DownloadError, OSError, ValueError):
-        return None
+        total_ms = int((time.monotonic() - total_start) * 1000)
+        return OpusFormatLookup(
+            info=None,
+            metrics=OpusExtractMetrics(
+                ydl_init_ms=ydl_init_ms,
+                extract_info_ms=extract_info_ms,
+                postprocess_ms=0,
+                total_ms=total_ms,
+            ),
+            failure_stage="extract_info",
+        )
 
+    postprocess_start = time.monotonic()
     if not isinstance(raw_info, dict):
-        return None
+        postprocess_ms = int((time.monotonic() - postprocess_start) * 1000)
+        total_ms = int((time.monotonic() - total_start) * 1000)
+        return OpusFormatLookup(
+            info=None,
+            metrics=OpusExtractMetrics(
+                ydl_init_ms=ydl_init_ms,
+                extract_info_ms=extract_info_ms,
+                postprocess_ms=postprocess_ms,
+                total_ms=total_ms,
+            ),
+            failure_stage="raw_info_type",
+        )
 
     direct_url = str(raw_info.get("url", ""))
     fragments = _fragments_from_info(raw_info)
@@ -93,11 +138,33 @@ def extract_opus_format(video_id: str) -> OpusFormatInfo | None:
     container = str(raw_info.get("container", raw_info.get("protocol", "")))
 
     if not direct_url and not fragments:
-        return None
+        postprocess_ms = int((time.monotonic() - postprocess_start) * 1000)
+        total_ms = int((time.monotonic() - total_start) * 1000)
+        return OpusFormatLookup(
+            info=None,
+            metrics=OpusExtractMetrics(
+                ydl_init_ms=ydl_init_ms,
+                extract_info_ms=extract_info_ms,
+                postprocess_ms=postprocess_ms,
+                total_ms=total_ms,
+            ),
+            failure_stage="missing_stream_url",
+        )
     if "opus" not in acodec.lower():
-        return None
+        postprocess_ms = int((time.monotonic() - postprocess_start) * 1000)
+        total_ms = int((time.monotonic() - total_start) * 1000)
+        return OpusFormatLookup(
+            info=None,
+            metrics=OpusExtractMetrics(
+                ydl_init_ms=ydl_init_ms,
+                extract_info_ms=extract_info_ms,
+                postprocess_ms=postprocess_ms,
+                total_ms=total_ms,
+            ),
+            failure_stage="non_opus_format",
+        )
 
-    return OpusFormatInfo(
+    info = OpusFormatInfo(
         video_id=video_id,
         direct_url=direct_url,
         fragments=fragments,
@@ -114,3 +181,19 @@ def extract_opus_format(video_id: str) -> OpusFormatInfo | None:
         ),
         duration=_as_float_or_none(raw_info.get("duration")),
     )
+    postprocess_ms = int((time.monotonic() - postprocess_start) * 1000)
+    total_ms = int((time.monotonic() - total_start) * 1000)
+    return OpusFormatLookup(
+        info=info,
+        metrics=OpusExtractMetrics(
+            ydl_init_ms=ydl_init_ms,
+            extract_info_ms=extract_info_ms,
+            postprocess_ms=postprocess_ms,
+            total_ms=total_ms,
+        ),
+        failure_stage=None,
+    )
+
+
+def extract_opus_format(video_id: str) -> OpusFormatInfo | None:
+    return extract_opus_format_lookup(video_id).info
