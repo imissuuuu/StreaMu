@@ -27,6 +27,8 @@ jobs:
       - name: Inspect version and notes
         id: inspect
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           version="$(grep -E '^VERSION[[:space:]]*:=' Makefile | head -n 1 | sed -E 's/^VERSION[[:space:]]*:=[[:space:]]*//')"
           if [[ -z "$version" ]]; then
@@ -41,7 +43,7 @@ jobs:
           echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
           echo "notes_file=${notes_file}" >> "$GITHUB_OUTPUT"
 
-          if git rev-parse "${tag_name}" >/dev/null 2>&1; then
+          if gh release view "${tag_name}" >/dev/null 2>&1; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
