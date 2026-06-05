@@ -27,6 +27,7 @@ LightLock stream_lock;   // Mutex protecting stream_buffer access
 bool g_stream_download_complete = true;
 static u64 g_opus_playback_perf_start_ms = 0;
 static bool g_opus_audio_started_logged = false;
+static bool g_webm_audio_started_logged = false;
 static u64 g_opus_last_frame_observe_ms = 0;
 static int g_opus_observed_max_decoded_buffers = 0;
 static bool g_opus_observed_decode_failure = false;
@@ -40,6 +41,53 @@ static const char *playback_status_message(bool is_paused, bool is_buffering) {
     return "Buffering...";
   }
   return "Playing";
+}
+
+static OpusPlaybackFailure webm_error_to_failure(WebmRemuxError error) {
+  switch (error) {
+    case WebmRemuxError::UnsupportedChannels:
+    case WebmRemuxError::UnsupportedTrackCount:
+    case WebmRemuxError::UnsupportedFeature:
+      return OpusPlaybackFailure::WebmUnsupported;
+    case WebmRemuxError::None:
+      return OpusPlaybackFailure::None;
+    default:
+      return OpusPlaybackFailure::WebmParse;
+  }
+}
+
+static const char *playback_failure_message(OpusPlaybackFailure failure) {
+  switch (failure) {
+    case OpusPlaybackFailure::None:
+      return "";
+    case OpusPlaybackFailure::Network:
+      return "Stream Error";
+    case OpusPlaybackFailure::WebmParse:
+      return "WebM parse failed";
+    case OpusPlaybackFailure::WebmUnsupported:
+      return "WebM unsupported";
+    case OpusPlaybackFailure::Decoder:
+      return "Opus failed";
+  }
+  return "Playback failed";
+}
+
+static void append_webm_playback_log(const char *event, size_t bytes) {
+  if (!event) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms = now_ms >= g_opus_playback_perf_start_ms
+                             ? now_ms - g_opus_playback_perf_start_ms
+                             : 0;
+  fprintf(f, "[webm-perf] +%llums %s bytes=%lu\n",
+          static_cast<unsigned long long>(elapsed_ms), event,
+          static_cast<unsigned long>(bytes));
+  fclose(f);
 }
 
 static void append_opus_playback_perf_log(const char *event, size_t bytes) {
@@ -132,6 +180,13 @@ static void append_startup_perf_log(const char *event, const char *detail) {
   fclose(f);
 }
 
+static void append_startup_result_log(const char *event, Result rc) {
+  char detail[64];
+  snprintf(detail, sizeof(detail), "rc=0x%08lX",
+           static_cast<unsigned long>(rc));
+  append_startup_perf_log(event, detail);
+}
+
 #include "app_context.h"
 #include "config_manager.h"
 #include "stb_image.h"
@@ -199,6 +254,9 @@ static std::string show_ip_keyboard(const std::string &initial) {
 }
 
 static constexpr size_t OPUS_STREAM_START_BYTES = 16U * 1024U;
+static constexpr size_t WEBM_DECODER_START_BYTES = 64U * 1024U;
+static constexpr size_t WEBM_PLAYBACK_RELEASE_BYTES = 64U * 1024U;
+static constexpr int WEBM_INITIAL_WAVEBUF_TARGET = 3;
 
 ThemeColors g_theme_colors;
 std::unique_ptr<AppContext> g_ctx_ptr;
@@ -428,12 +486,14 @@ void download_thread(void *arg) {
         ctx.is_server_connected = is_online;
         if (!success) {
           ctx.is_buffering = false;
+          ctx.opus_playback_failure = OpusPlaybackFailure::Network;
           if (!ctx.is_paused && ctx.pause_started_at > 0) {
             ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
             ctx.pause_started_at = 0;
           }
-          ctx.g_status_msg = is_online ? "Opus Error (Check Proxy)"
-                                       : "Stream Error (Offline?)";
+          ctx.g_status_msg =
+              is_online ? "Opus Error (Check Proxy)"
+                        : playback_failure_message(ctx.opus_playback_failure);
           OpusPocPlayer::is_playing = false;
           ctx.opus_pending_decode_start = false;
           ctx.playing_id = "";
@@ -532,21 +592,30 @@ int main(int argc, char *argv[]) {
   g_opus_player_ptr = std::make_unique<OpusPocPlayer>();
   g_playlist_manager_ptr = std::make_unique<PlaylistManager>();
   g_stream_buffer_ptr = std::make_unique<std::vector<uint8_t>>();
+  append_startup_perf_log("alloc-core-state", "");
 
   LightLock_Init(&ctx.lock);
   LightLock_Init(&stream_lock);
+  append_startup_perf_log("locks-ready", "");
 
   srand(time(NULL));
+  append_startup_perf_log("rng-ready", "");
 
   // Dynamically allocated for manual destruction before system exit
   auto g_ui_mgr_ptr = std::make_unique<UIManager>();
   UIManager &ui_mgr = *g_ui_mgr_ptr;
-  ui_mgr.init();
+  append_startup_perf_log("ui-init-begin", "");
+  if (!ui_mgr.init()) {
+    append_startup_perf_log("ui-init-failed", "");
+    return 1;
+  }
+  append_startup_perf_log("ui-init-ok", "");
 
   // Load and apply theme settings
   ConfigManager::load(ctx.config);
   apply_theme(ctx.config, g_theme_colors);
   ctx.theme = &g_theme_colors;
+  append_startup_perf_log("config-theme-ready", "");
   auto g_renderer_ptr = std::make_unique<UIRenderer>(ui_mgr, g_theme_colors);
   UIRenderer &renderer = *g_renderer_ptr;
 
@@ -562,21 +631,37 @@ int main(int argc, char *argv[]) {
   const u64 step1_start_ms = osGetTime();
 
   aptSetSleepAllowed(false);
+  append_startup_perf_log("apt-sleep-disabled", "");
   osSetSpeedupEnable(
       true); // Enable New 3DS 804MHz CPU + L2 cache (no-op on Old 3DS)
-  romfsInit();
-  ndspInit();
-  ndmuInit();
-  NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
+  append_startup_perf_log("cpu-speedup-requested", "");
+  const Result romfs_rc = romfsInit();
+  append_startup_result_log("romfs-init", romfs_rc);
+  const Result ndsp_rc = ndspInit();
+  append_startup_result_log("ndsp-init", ndsp_rc);
+  const Result ndmu_rc = ndmuInit();
+  append_startup_result_log("ndmu-init", ndmu_rc);
+  const Result ndmu_state_rc =
+      NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
+  append_startup_result_log("ndmu-exclusive", ndmu_state_rc);
   bool opus_ready = opus_player.init();
+  append_startup_perf_log(
+      opus_ready ? "opus-player-init-ok" : "opus-player-init-failed", "");
   ctx.active_audio_path = ctx.config.audio_path;
-  ptmuInit();
+  const Result ptmu_rc = ptmuInit();
+  append_startup_result_log("ptmu-init", ptmu_rc);
   u32 *soc_buffer = (u32 *)memalign(0x1000, 0x100000);
-  if (soc_buffer) socInit(soc_buffer, 0x100000);
+  append_startup_perf_log(
+      soc_buffer ? "soc-buffer-alloc-ok" : "soc-buffer-alloc-failed", "");
+  if (soc_buffer) {
+    const Result soc_rc = socInit(soc_buffer, 0x100000);
+    append_startup_result_log("soc-init", soc_rc);
+  }
 
   auto g_api_ptr = std::make_unique<YouTubeAPI>();
   YouTubeAPI &api = *g_api_ptr;
   api.init();
+  append_startup_perf_log("youtube-api-init-ok", "");
   ctx.api = &api;
   {
     char detail[64];
@@ -954,9 +1039,15 @@ int main(int argc, char *argv[]) {
     ctx.playing_meta = meta;
 
     update_playing_title_lines(ui_mgr.get_text_buf());
+    const StreamContainerMode stream_mode =
+        ctx.opus_webm_poc_enabled ? StreamContainerMode::ProxyWebmOpus
+                                  : StreamContainerMode::ProxyOggOpus;
     ctx.active_audio_path = AudioPathConfig::OPUS_DIRECT;
+    ctx.opus_playback_failure = OpusPlaybackFailure::None;
     ctx.opus_pending_decode_start = opus_ready;
+    ctx.opus_webm_prebuffer_pending = false;
     OpusPocPlayer::is_playing = opus_ready;
+    g_webm_audio_started_logged = false;
     if (opus_ready) {
       ctx.g_status_msg =
           playback_status_message(ctx.is_paused, ctx.is_buffering);
@@ -971,14 +1062,17 @@ int main(int argc, char *argv[]) {
       return;
     }
 
-    api.get_audio_stream_url(ctx.playing_id, seek_secs,
+    api.get_audio_stream_url(ctx.playing_id, seek_secs, stream_mode,
                              [&, seek_secs](const std::string &url, bool ok) {
                                LightLock_Lock(&ctx.lock);
                                if (ok && !url.empty()) {
                                  ctx.current_stream_url = url;
                                  ctx.is_downloading = true;
                                } else {
-                                 ctx.g_status_msg = "Stream Error";
+                                 ctx.opus_playback_failure =
+                                     OpusPlaybackFailure::Network;
+                                 ctx.g_status_msg = playback_failure_message(
+                                     ctx.opus_playback_failure);
                                  OpusPocPlayer::is_playing = false;
                                  ctx.opus_pending_decode_start = false;
                                  ctx.seek_target_seconds = -1;
@@ -1073,6 +1167,15 @@ int main(int argc, char *argv[]) {
     u32 kDown = hidKeysDown();
     u32 kHeld = hidKeysHeld();
     u32 kRepeat = hidKeysDownRepeat();
+
+    if ((kDown & KEY_X) && (kHeld & KEY_L) && (kHeld & KEY_R)) {
+      LightLock_Lock(&ctx.lock);
+      ctx.opus_webm_poc_enabled = !ctx.opus_webm_poc_enabled;
+      ctx.g_status_msg =
+          ctx.opus_webm_poc_enabled ? "WebM PoC ON" : "WebM PoC OFF";
+      LightLock_Unlock(&ctx.lock);
+      kDown &= ~(KEY_X | KEY_L | KEY_R);
+    }
 
     // D-pad held repeat (respects sensitivity setting)
     {
@@ -2191,6 +2294,7 @@ int main(int argc, char *argv[]) {
         YouTubeAPI::should_cancel = false;
         ctx.active_audio_path = ctx.config.audio_path;
         ctx.opus_pending_decode_start = false;
+        ctx.opus_webm_prebuffer_pending = false;
         ctx.playing_id = "";
         ctx.playing_title = "";
         ctx.playing_title_lines.clear();
@@ -2267,17 +2371,31 @@ int main(int argc, char *argv[]) {
       const OpusPipelineState pipeline_state = collect_opus_pipeline_state();
       opus_buffer_size = pipeline_state.stream_buffer_bytes;
       opus_download_complete = pipeline_state.download_complete;
+      bool use_webm_poc = false;
+      LightLock_Lock(&ctx.lock);
+      use_webm_poc = ctx.opus_webm_poc_enabled;
+      LightLock_Unlock(&ctx.lock);
+      const size_t start_threshold =
+          use_webm_poc ? WEBM_DECODER_START_BYTES : OPUS_STREAM_START_BYTES;
       should_start_opus_decoder =
-          opus_buffer_size >= OPUS_STREAM_START_BYTES ||
+          opus_buffer_size >= start_threshold ||
           (opus_download_complete && opus_buffer_size > 0);
     }
 
     if (should_start_opus_decoder) {
       bool started = false;
+      bool use_webm_poc = false;
+      LightLock_Lock(&ctx.lock);
+      use_webm_poc = ctx.opus_webm_poc_enabled;
+      LightLock_Unlock(&ctx.lock);
       append_opus_playback_perf_log(OpusPerfEvent::DecoderOpenStart,
                                     opus_buffer_size);
       if (g_stream_buffer_ptr) {
-        if (opus_download_complete) {
+        if (use_webm_poc) {
+          started = opus_player.start_webm_streaming(
+              g_stream_buffer_ptr.get(), &stream_lock,
+              &g_stream_download_complete);
+        } else if (opus_download_complete) {
           LightLock_Lock(&stream_lock);
           started = opus_player.start(g_stream_buffer_ptr->data(),
                                       g_stream_buffer_ptr->size());
@@ -2295,11 +2413,19 @@ int main(int argc, char *argv[]) {
       LightLock_Lock(&ctx.lock);
       ctx.opus_pending_decode_start = false;
       if (!started) {
-        ctx.g_status_msg = "Opus failed";
+        ctx.opus_webm_prebuffer_pending = false;
+        ctx.opus_playback_failure =
+            use_webm_poc ? webm_error_to_failure(opus_player.webm_remux_error())
+                         : OpusPlaybackFailure::Decoder;
+        if (ctx.opus_playback_failure == OpusPlaybackFailure::None) {
+          ctx.opus_playback_failure = OpusPlaybackFailure::Decoder;
+        }
+        ctx.g_status_msg = playback_failure_message(ctx.opus_playback_failure);
         OpusPocPlayer::is_playing = false;
         ctx.playing_id = "";
       } else {
-        ndspChnSetPaused(0, ctx.is_paused);
+        ctx.opus_webm_prebuffer_pending = use_webm_poc;
+        ndspChnSetPaused(0, use_webm_poc ? true : ctx.is_paused);
         ctx.g_status_msg =
             playback_status_message(ctx.is_paused, ctx.is_buffering);
       }
@@ -2340,17 +2466,51 @@ int main(int argc, char *argv[]) {
       }
     }
 
+    if (use_opus_poc_for_update) {
+      bool release_webm_prebuffer = false;
+      size_t webm_buffer_size = 0;
+      LightLock_Lock(&stream_lock);
+      webm_buffer_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
+      LightLock_Unlock(&stream_lock);
+      LightLock_Lock(&ctx.lock);
+      release_webm_prebuffer =
+          ctx.opus_webm_prebuffer_pending &&
+          opus_player.queued_wavebuf_count() >= WEBM_INITIAL_WAVEBUF_TARGET &&
+          (webm_buffer_size >= WEBM_PLAYBACK_RELEASE_BYTES ||
+           g_stream_download_complete);
+      if (release_webm_prebuffer) {
+        ctx.opus_webm_prebuffer_pending = false;
+      }
+      const bool should_unpause = release_webm_prebuffer && !ctx.is_paused;
+      LightLock_Unlock(&ctx.lock);
+      if (should_unpause) {
+        ndspChnSetPaused(0, false);
+      }
+    }
+
     if (use_opus_poc_for_update && opus_player.has_decode_failed()) {
       LightLock_Lock(&ctx.lock);
-      ctx.g_status_msg = "Opus failed";
+      ctx.opus_playback_failure =
+          ctx.opus_webm_poc_enabled
+              ? webm_error_to_failure(opus_player.webm_remux_error())
+              : OpusPlaybackFailure::Decoder;
+      if (ctx.opus_playback_failure == OpusPlaybackFailure::None) {
+        ctx.opus_playback_failure = OpusPlaybackFailure::Decoder;
+      }
+      ctx.g_status_msg = playback_failure_message(ctx.opus_playback_failure);
       ctx.playing_id = "";
       OpusPocPlayer::is_playing = false;
       LightLock_Unlock(&ctx.lock);
     }
 
     // Clear buffering flag once audio actually starts playing
-    bool has_started_playing =
-        use_opus_poc_for_update && opus_player.has_started_playing();
+    bool webm_prebuffer_pending = false;
+    LightLock_Lock(&ctx.lock);
+    webm_prebuffer_pending = ctx.opus_webm_prebuffer_pending;
+    LightLock_Unlock(&ctx.lock);
+    bool has_started_playing = use_opus_poc_for_update &&
+                               opus_player.has_started_playing() &&
+                               !webm_prebuffer_pending;
     if (use_opus_poc_for_update && has_started_playing &&
         !g_opus_audio_started_logged) {
       size_t logged_opus_buffer_size = 0;
@@ -2361,6 +2521,11 @@ int main(int argc, char *argv[]) {
       append_opus_playback_perf_log(OpusPerfEvent::AudioStarted,
                                     logged_opus_buffer_size);
       g_opus_audio_started_logged = true;
+    }
+    if (use_opus_poc_for_update && ctx.opus_webm_poc_enabled &&
+        has_started_playing && !g_webm_audio_started_logged) {
+      append_webm_playback_log("first_pcm_queued", opus_buffer_size);
+      g_webm_audio_started_logged = true;
     }
     if (ctx.is_buffering && has_started_playing) {
       LightLock_Lock(&ctx.lock);

@@ -17,8 +17,8 @@ LD      := $(PREFIX)g++
 
 TARGET      := streamu
 VERSION     := 1.5.1
-SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens
-INCLUDES    := include include/network include/ui
+SOURCES     := source source/network source/audio source/ui source/playlist source/ui/screens third_party/nestegg/src
+INCLUDES    := include include/network include/ui third_party/nestegg/include
 ENABLE_OPUS_PERF_LOG ?= 0
 
 DEVKITPRO_LIB := $(DEVKITPRO)/libctru/lib

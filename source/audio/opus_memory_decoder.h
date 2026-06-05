@@ -8,6 +8,8 @@
 #include <opusfile.h>
 #include <vector>
 
+typedef bool (*OpusStreamPumpCallback)(void *user_data);
+
 struct OpusDecodeResult {
   bool ok;
   int samples_per_channel;
@@ -23,7 +25,9 @@ public:
 
   bool open(const uint8_t *data, size_t size);
   bool open_streaming(const std::vector<uint8_t> *buffer, LightLock *lock,
-                      const bool *download_complete);
+                      const bool *download_complete,
+                      OpusStreamPumpCallback pump_callback = NULL,
+                      void *pump_user_data = NULL);
   void reset();
   OpusDecodeResult decode(int16_t *pcm_out, size_t pcm_capacity_samples);
   bool is_open() const;
@@ -35,6 +39,8 @@ public:
     LightLock *lock;
     const bool *download_complete;
     size_t offset;
+    OpusStreamPumpCallback pump_callback;
+    void *pump_user_data;
   };
 
 private:

@@ -17,12 +17,19 @@ struct Track {
 typedef std::function<void(const std::vector<Track> &, bool)> SearchCallback;
 typedef std::function<void(const std::string &, bool)> StreamCallback;
 
+enum class StreamContainerMode {
+  ProxyOggOpus,
+  ProxyWebmOpus,
+};
+
 class YouTubeAPI {
 public:
   void init();
   void cleanup();
   void search(const std::string &query, const std::string &lang,
               SearchCallback callback);
+  void get_audio_stream_url(const std::string &video_id, int seek_seconds,
+                            StreamContainerMode mode, StreamCallback callback);
   void get_audio_stream_url(const std::string &video_id, int seek_seconds,
                             StreamCallback callback);
   bool start_streaming(const std::string &url);

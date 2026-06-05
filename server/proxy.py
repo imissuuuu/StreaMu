@@ -404,7 +404,7 @@ def _fetch_url_range(fetch_url: str, headers: dict[str, str], start: int,
         return resp.read()
 
 
-async def opus_webm_generator(v_id: str) -> AsyncGenerator[bytes, None]:
+async def opus_webm_generator(request: Request, v_id: str) -> AsyncGenerator[bytes, None]:
     info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
     if info is None:
         add_log(f"Opus WebM extraction failed: {v_id}")
@@ -418,13 +418,16 @@ async def opus_webm_generator(v_id: str) -> AsyncGenerator[bytes, None]:
         req = urllib.request.Request(info.direct_url, headers=info.http_headers)
         with urllib.request.urlopen(req, timeout=300) as resp:
             while True:
+                if await request.is_disconnected():
+                    add_log(f"Opus WebM stream disconnected: {v_id}")
+                    break
                 chunk = resp.read(32768)
                 if not chunk:
                     break
                 yield chunk
     except asyncio.CancelledError:
         add_log(f"Opus WebM stream disconnected: {v_id}")
-    except OSError as e:
+    except (BrokenPipeError, ConnectionResetError, OSError) as e:
         add_log(f"Opus WebM stream error: {e}")
 
 async def stream_opus(request: Request) -> StreamingResponse | PlainTextResponse:
@@ -439,7 +442,7 @@ async def stream_opus(request: Request) -> StreamingResponse | PlainTextResponse
     if not info.direct_url:
         return PlainTextResponse("Opus fragmented stream unsupported", status_code=501)
     _opus_info_cache[v_id] = (info, time.time())
-    return StreamingResponse(opus_webm_generator(v_id), media_type="audio/webm")
+    return StreamingResponse(opus_webm_generator(request, v_id), media_type="audio/webm")
 
 
 def _next_ogg_page_batch_or_none(iterator: Iterator[bytes]) -> list[bytes] | None:

@@ -6,10 +6,18 @@
 #include <vector>
 
 #include "opus_memory_decoder.h"
+#include "webm_opus_streaming_decoder.h"
 
 struct OpusPlayerUpdateStats {
   int decoded_buffers;
   bool hit_decode_failure;
+};
+
+enum class OpusInputKind {
+  None,
+  OggBytes,
+  OggStream,
+  WebmStream,
 };
 
 class OpusPocPlayer {
@@ -20,12 +28,15 @@ public:
   bool start(const uint8_t *data, size_t size);
   bool start_streaming(const std::vector<uint8_t> *buffer, LightLock *lock,
                        const bool *download_complete);
+  bool start_webm_streaming(const std::vector<uint8_t> *buffer, LightLock *lock,
+                            const bool *download_complete);
   void update();
   OpusPlayerUpdateStats update_with_stats();
   void stop();
   bool is_track_finished() const;
   bool has_started_playing() const;
   bool has_decode_failed() const;
+  WebmRemuxError webm_remux_error() const;
   int queued_wavebuf_count() const;
   int free_wavebuf_count() const;
 
@@ -33,9 +44,12 @@ public:
 
 private:
   OpusMemoryDecoder decoder_;
+  WebmOpusStreamingDecoder webm_decoder_;
+  OpusInputKind input_kind_;
   ndspWaveBuf waveBuf[8];
   int16_t *audioBuffer;
   bool decode_failed_;
+  bool ndsp_format_initialized_;
 };
 
 #endif

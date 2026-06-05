@@ -11,6 +11,14 @@
 // playlist_manager.h)
 class YouTubeAPI;
 
+enum class OpusPlaybackFailure {
+  None,
+  Network,
+  WebmParse,
+  WebmUnsupported,
+  Decoder,
+};
+
 struct AppContext : public RenderContext {
   std::string search_query = "";
   bool is_downloading = false;
@@ -20,6 +28,9 @@ struct AppContext : public RenderContext {
   std::string current_stream_url = "";
   AudioPathConfig active_audio_path = AudioPathConfig::OPUS_DIRECT;
   bool opus_pending_decode_start = false;
+  bool opus_webm_poc_enabled = false;
+  bool opus_webm_prebuffer_pending = false;
+  OpusPlaybackFailure opus_playback_failure = OpusPlaybackFailure::None;
   LightLock lock; // Mutex for thread synchronization
   // touch_state inherited from RenderContext (no shadowing)
 

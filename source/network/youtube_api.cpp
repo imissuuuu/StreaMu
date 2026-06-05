@@ -10,6 +10,33 @@ extern std::unique_ptr<std::vector<uint8_t>> g_stream_buffer_ptr;
 extern LightLock stream_lock;
 extern bool g_stream_download_complete;
 bool YouTubeAPI::should_cancel = false;
+static bool g_webm_perf_active = false;
+static bool g_webm_perf_first_byte_logged = false;
+static size_t g_webm_perf_bytes = 0;
+static u64 g_webm_perf_start_ms = 0;
+
+static void append_webm_perf_log(const char *event, size_t bytes,
+                                 size_t stream_buffer_bytes,
+                                 size_t chunk_bytes) {
+  if (!event || !g_webm_perf_active) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms =
+      (g_webm_perf_start_ms > 0 && now_ms >= g_webm_perf_start_ms)
+          ? now_ms - g_webm_perf_start_ms
+          : 0;
+  fprintf(f, "[webm-perf] +%llums %s bytes=%lu buffer=%lu chunk=%lu\n",
+          static_cast<unsigned long long>(elapsed_ms), event,
+          static_cast<unsigned long>(bytes),
+          static_cast<unsigned long>(stream_buffer_bytes),
+          static_cast<unsigned long>(chunk_bytes));
+  fclose(f);
+}
 
 #if STREAMU_ENABLE_OPUS_PERF_LOG
 static bool g_opus_perf_active = false;
@@ -91,6 +118,14 @@ static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
 #else
   (void)stream_buffer_size;
 #endif
+  if (g_webm_perf_active && total_size > 0) {
+    g_webm_perf_bytes += total_size;
+    if (!g_webm_perf_first_byte_logged) {
+      g_webm_perf_first_byte_logged = true;
+      append_webm_perf_log("first_byte", g_webm_perf_bytes, stream_buffer_size,
+                           total_size);
+    }
+  }
   return total_size;
 }
 
@@ -120,6 +155,7 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   LightLock_Unlock(&stream_lock);
 
   const bool is_opus_ogg = url.find("/stream_opus_ogg?") != std::string::npos;
+  const bool is_webm_opus = url.find("/stream_opus?") != std::string::npos;
 #if STREAMU_ENABLE_OPUS_PERF_LOG
   g_opus_perf_active = is_opus_ogg;
   g_opus_perf_first_byte_logged = false;
@@ -133,6 +169,13 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
 #else
   (void)is_opus_ogg;
 #endif
+  g_webm_perf_active = is_webm_opus;
+  g_webm_perf_first_byte_logged = false;
+  g_webm_perf_bytes = 0;
+  g_webm_perf_start_ms = is_webm_opus ? osGetTime() : 0;
+  if (is_webm_opus) {
+    append_webm_perf_log("stream_request_start", 0, 0, 0);
+  }
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamingWriteCallback);
@@ -165,6 +208,15 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   }
   g_opus_perf_active = false;
 #endif
+  if (is_webm_opus) {
+    size_t final_buffer_size = 0;
+    LightLock_Lock(&stream_lock);
+    final_buffer_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
+    LightLock_Unlock(&stream_lock);
+    append_webm_perf_log(success ? "stream_complete" : "stream_failed",
+                         g_webm_perf_bytes, final_buffer_size, 0);
+  }
+  g_webm_perf_active = false;
   curl_easy_cleanup(curl);
   return success;
 }
@@ -234,12 +286,24 @@ void YouTubeAPI::search(const std::string &query, const std::string &lang,
 
 void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
                                       int seek_seconds,
+                                      StreamContainerMode mode,
                                       StreamCallback callback) {
-  // Delegate WebM->Ogg remuxing to the proxy; 3DS decodes Opus directly.
   std::string url = get_base_url();
-  url += "/stream_opus_ogg?i=" + video_id;
-  if (seek_seconds > 0) url += "&t=" + std::to_string(seek_seconds);
+  if (mode == StreamContainerMode::ProxyWebmOpus) {
+    url += "/stream_opus?i=" + video_id;
+  } else {
+    // Delegate WebM->Ogg remuxing to the proxy; 3DS decodes Opus directly.
+    url += "/stream_opus_ogg?i=" + video_id;
+    if (seek_seconds > 0) url += "&t=" + std::to_string(seek_seconds);
+  }
   callback(url, true);
+}
+
+void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
+                                      int seek_seconds,
+                                      StreamCallback callback) {
+  get_audio_stream_url(video_id, seek_seconds,
+                       StreamContainerMode::ProxyOggOpus, callback);
 }
 std::vector<Track> YouTubeAPI::parse_search_results(const std::string &data) {
   std::vector<Track> results;

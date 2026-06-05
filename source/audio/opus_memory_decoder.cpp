@@ -29,12 +29,16 @@ static int opus_stream_read(void *stream, unsigned char *ptr, int nbytes) {
     if (complete) {
       return 0;
     }
+    if (source->pump_callback &&
+        source->pump_callback(source->pump_user_data)) {
+      continue;
+    }
     svcSleepThread(10 * 1000 * 1000);
   }
 }
 
 OpusMemoryDecoder::OpusMemoryDecoder()
-    : file_(NULL), stream_source_{NULL, NULL, NULL, 0}, eof_(false),
+    : file_(NULL), stream_source_{NULL, NULL, NULL, 0, NULL, NULL}, eof_(false),
       failed_(false) {}
 
 OpusMemoryDecoder::~OpusMemoryDecoder() { reset(); }
@@ -68,7 +72,9 @@ bool OpusMemoryDecoder::open(const uint8_t *data, size_t size) {
 
 bool OpusMemoryDecoder::open_streaming(const std::vector<uint8_t> *buffer,
                                        LightLock *lock,
-                                       const bool *download_complete) {
+                                       const bool *download_complete,
+                                       OpusStreamPumpCallback pump_callback,
+                                       void *pump_user_data) {
   reset();
   if (!buffer || !lock || !download_complete) {
     failed_ = true;
@@ -79,6 +85,8 @@ bool OpusMemoryDecoder::open_streaming(const std::vector<uint8_t> *buffer,
   stream_source_.lock = lock;
   stream_source_.download_complete = download_complete;
   stream_source_.offset = 0;
+  stream_source_.pump_callback = pump_callback;
+  stream_source_.pump_user_data = pump_user_data;
 
   OpusFileCallbacks callbacks = {};
   callbacks.read = opus_stream_read;

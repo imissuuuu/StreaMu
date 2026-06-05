@@ -31,7 +31,7 @@ public:
   UIManager();
   ~UIManager();
 
-  void init();
+  bool init();
   void cleanup();
 
   // Clear screen buffer and begin drawing

@@ -5,7 +5,7 @@ UIManager::UIManager()
 
 UIManager::~UIManager() { cleanup(); }
 
-void UIManager::init() {
+bool UIManager::init() {
   gfxInitDefault();
   C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
   C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
@@ -14,11 +14,15 @@ void UIManager::init() {
   m_topScreen = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
   m_bottomScreen = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
   m_textBuf = C2D_TextBufNew(8192); // Large enough for text cache
+  if (!m_topScreen || !m_bottomScreen || !m_textBuf) {
+    cleanup();
+    return false;
+  }
+  return true;
 }
 
 void UIManager::cleanup() {
-  if (m_cleaned_up)
-    return;
+  if (m_cleaned_up) return;
 
   if (m_textBuf) {
     C2D_TextBufDelete(m_textBuf);

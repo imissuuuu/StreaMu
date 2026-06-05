@@ -40,6 +40,7 @@ The 3DS app is built with devkitPro and links against the following libraries.
 | libogg | Ogg container library | BSD-style | https://github.com/xiph/ogg |
 | libopus | Opus audio codec library | BSD 3-Clause | https://github.com/xiph/opus |
 | opusfile | Ogg Opus decoder helper library | BSD 3-Clause | https://github.com/xiph/opusfile |
+| nestegg | WebM demuxer library | ISC | https://github.com/mozilla/nestegg |
 | nlohmann/json | Header-only JSON library | MIT | https://github.com/nlohmann/json |
 | stb_image | Header-only image loading library | MIT or Public Domain | https://github.com/nothings/stb |
 
