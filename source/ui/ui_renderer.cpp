@@ -17,6 +17,12 @@ UIRenderer::~UIRenderer() {}
 
 void UIRenderer::draw_top_screen(const RenderContext &ctx) {
   C2D_Text text;
+  static std::string s_cached_title_badge_text;
+  static float s_cached_title_badge_width = 0.0f;
+  static float s_cached_title_badge_height = 0.0f;
+  static std::string s_cached_status_badge_text;
+  static float s_cached_status_badge_width = 0.0f;
+  static float s_cached_status_badge_height = 0.0f;
 
   // --- Wallpaper (drawn over solid background) ---
   if (m_wallpaper && m_wallpaper->is_loaded()) {
@@ -161,10 +167,17 @@ void UIRenderer::draw_top_screen(const RenderContext &ctx) {
   // --- Title Badge (semi-transparent black, text-fitted) ---
   C2D_TextParse(&text, m_ui.get_text_buf(), top_title.c_str());
   if (top_title.size() > 0) {
-    float tw = 0, th = 0;
-    C2D_TextGetDimensions(&text, FONT_LG, FONT_LG, &tw, &th);
+    if (s_cached_title_badge_text != top_title) {
+      float tw = 0.0f;
+      float th = 0.0f;
+      s_cached_title_badge_text = top_title;
+      C2D_TextGetDimensions(&text, FONT_LG, FONT_LG, &tw, &th);
+      s_cached_title_badge_width = tw;
+      s_cached_title_badge_height = th;
+    }
     float pad_x = 6.0f, pad_y = 2.0f;
-    C2D_DrawRectSolid(0, 20.0f, 0, pad_x + tw + pad_x, th + pad_y * 2,
+    C2D_DrawRectSolid(0, 20.0f, 0, pad_x + s_cached_title_badge_width + pad_x,
+                      s_cached_title_badge_height + pad_y * 2,
                       C2D_Color32(30, 30, 30, 160));
   }
   C2D_DrawText(&text, C2D_WithColor, 6.0f, 20.0f + 2.0f, 0, FONT_LG, FONT_LG,
@@ -180,8 +193,16 @@ void UIRenderer::draw_top_screen(const RenderContext &ctx) {
       display_msg = std::string(get_spinner(s_cached_time)) + " " + display_msg;
     }
     C2D_TextParse(&text, m_ui.get_text_buf(), display_msg.c_str());
-    float msg_w = 0, msg_h = 0;
-    C2D_TextGetDimensions(&text, FONT_SM, FONT_SM, &msg_w, &msg_h);
+    if (s_cached_status_badge_text != display_msg) {
+      float msg_w = 0.0f;
+      float msg_h = 0.0f;
+      s_cached_status_badge_text = display_msg;
+      C2D_TextGetDimensions(&text, FONT_SM, FONT_SM, &msg_w, &msg_h);
+      s_cached_status_badge_width = msg_w;
+      s_cached_status_badge_height = msg_h;
+    }
+    const float msg_w = s_cached_status_badge_width;
+    const float msg_h = s_cached_status_badge_height;
 
     float pad_x = 6.0f;
     float pad_y = 2.0f;

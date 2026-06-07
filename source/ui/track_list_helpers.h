@@ -1,6 +1,7 @@
 #pragma once
 #include <3ds.h>
 #include "ui_renderer.h"
+#include "ui_icon_cache.h"
 #include "ui_constants.h"
 #include "../app_context.h"
 
@@ -53,6 +54,10 @@ inline void draw_item_bg(float x, float y, float w, float h, u32 bg_bottom) {
 // Dashed horizontal line (citro2d has no dashed API, so we draw short rects)
 inline void draw_dashed_line_h(float x, float y, float width, u32 color,
                                 float dash_len = 3.0f, float gap_len = 3.0f) {
+    if (dash_len == 3.0f && gap_len == 3.0f) {
+        draw_ui_separator(x, y, width, color);
+        return;
+    }
     for (float dx = 0; dx < width; dx += dash_len + gap_len) {
         float seg = dash_len;
         if (dx + seg > width) seg = width - dx;

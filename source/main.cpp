@@ -13,12 +13,14 @@
 #include "audio/opus_decode_tuning.h"
 #include "audio/opus_perf_metrics.h"
 #include "audio/opus_poc_player.h"
+#include "audio/non_audio_interference_gate.h"
 #include "audio/playback_observer.h"
 #include "audio/opus_stream_pipeline.h"
 #include "audio/webm_playback_controller.h"
 #include "network/youtube_api.h"
 #include "playlist_manager.h"
 #include "ui/ui_constants.h"
+#include "ui/ui_icon_cache.h"
 #include "ui/ui_manager.h"
 #include "ui/ui_renderer.h"
 #include "ui/track_list_helpers.h"
@@ -117,6 +119,93 @@ make_webm_controller_input(const PlaybackCoreSnapshot &core_snapshot,
   input.decode_failed = player.has_decode_failed();
   input.user_paused = context.is_paused;
   return input;
+}
+
+static NonAudioInterferenceInput make_non_audio_interference_input(
+    size_t stream_buffer_size, bool stream_download_complete,
+    const OpusPocPlayer &player, const AppContext &context) {
+  NonAudioInterferenceInput input = {};
+  input.stream_mode = context.active_stream_mode;
+  input.webm_stage = context.webm_playback_stage;
+  input.is_opus_direct =
+      context.active_audio_path == AudioPathConfig::OPUS_DIRECT;
+  input.download_complete = stream_download_complete;
+  input.stream_buffer_bytes = stream_buffer_size;
+  input.queued_wavebufs = OpusPocPlayer::is_playing ? player.queued_wavebuf_count() : 0;
+  input.audio_started =
+      OpusPocPlayer::is_playing && player.has_started_playing();
+  return input;
+}
+
+static RenderContext make_render_snapshot_locked(const AppContext &context) {
+  RenderContext snapshot = {};
+
+  snapshot.current_state = context.current_state;
+  snapshot.previous_state = context.previous_state;
+  snapshot.g_status_msg = context.g_status_msg;
+  snapshot.is_server_connected = context.is_server_connected;
+  snapshot.playing_title_lines = context.playing_title_lines;
+  snapshot.home_selected_index = context.home_selected_index;
+  snapshot.selected_index = context.selected_index;
+  snapshot.scroll_x = context.scroll_x;
+  snapshot.popup_selected_index = context.popup_selected_index;
+  snapshot.selected_playlist_id = context.selected_playlist_id;
+  snapshot.selected_track_id = context.selected_track_id;
+  snapshot.playing_id = context.playing_id;
+  snapshot.playing_duration = context.playing_duration;
+  snapshot.playing_meta = context.playing_meta;
+  snapshot.is_paused = context.is_paused;
+  snapshot.active_playlist_id = context.active_playlist_id;
+  snapshot.active_playlist_name = context.active_playlist_name;
+  snapshot.current_track_idx = context.current_track_idx;
+  snapshot.play_queue = context.play_queue;
+  snapshot.shuffle_mode = context.shuffle_mode;
+  snapshot.loop_mode = context.loop_mode;
+  snapshot.mode_btn_focus = context.mode_btn_focus;
+  snapshot.playback_start_time = context.playback_start_time;
+  snapshot.pause_accumulated_ms = context.pause_accumulated_ms;
+  snapshot.pause_started_at = context.pause_started_at;
+  snapshot.is_buffering = context.is_buffering;
+  snapshot.touch_state = context.touch_state;
+  snapshot.scroll_offset_y = context.scroll_offset_y;
+  snapshot.config = context.config;
+  snapshot.theme = context.theme;
+
+  const AppState active_state =
+      is_popup_state(context.current_state) ? context.previous_state
+                                            : context.current_state;
+
+  const bool need_playlists =
+      active_state == STATE_HOME || active_state == STATE_PLAYLISTS ||
+      context.current_state == STATE_POPUP_PLAYLIST_ADD ||
+      context.current_state == STATE_POPUP_PLAYLIST_OPTIONS ||
+      context.current_state == STATE_POPUP_QA_ADD;
+  const bool need_g_tracks =
+      active_state == STATE_PLAYLIST_DETAIL ||
+      (context.current_state == STATE_POPUP_TRACK_DETAILS &&
+       context.previous_state == STATE_PLAYLIST_DETAIL);
+  const bool need_search_tracks =
+      active_state == STATE_SEARCH ||
+      (context.current_state == STATE_POPUP_TRACK_DETAILS &&
+       context.previous_state == STATE_SEARCH);
+  const bool need_playing_tracks =
+      active_state == STATE_PLAYING_UI ||
+      context.current_state == STATE_POPUP_TRACK_DETAILS;
+
+  if (need_playlists) {
+    snapshot.playlists = context.playlists;
+  }
+  if (need_g_tracks) {
+    snapshot.g_tracks = context.g_tracks;
+  }
+  if (need_search_tracks) {
+    snapshot.search_tracks = context.search_tracks;
+  }
+  if (need_playing_tracks) {
+    snapshot.playing_tracks = context.playing_tracks;
+  }
+
+  return snapshot;
 }
 
 static void append_opus_playback_perf_log(const char *event, size_t bytes) {
@@ -283,7 +372,6 @@ static std::string show_ip_keyboard(const std::string &initial) {
 }
 
 static constexpr size_t OPUS_STREAM_START_BYTES = 16U * 1024U;
-static constexpr size_t THUMBNAIL_FETCH_SAFE_BUFFER_BYTES = 192U * 1024U;
 static const WebmPlaybackControllerConfig kWebmPlaybackControllerConfig =
     webm_playback_controller_default_config();
 
@@ -641,6 +729,10 @@ int main(int argc, char *argv[]) {
   append_startup_perf_log("ui-init-begin", "");
   if (!ui_mgr.init()) {
     append_startup_perf_log("ui-init-failed", "");
+    return 1;
+  }
+  if (!init_ui_icon_cache()) {
+    append_startup_perf_log("ui-icon-cache-init-failed", "");
     return 1;
   }
   append_startup_perf_log("ui-init-ok", "");
@@ -2421,18 +2513,12 @@ int main(int argc, char *argv[]) {
       bool track_changed = !ctx.playing_id.empty() &&
                            ctx.playing_id != ctx.thumbnail_vid_id &&
                            !ctx.thumbnail_loading;
-      const bool using_opus_direct =
-          ctx.active_audio_path == AudioPathConfig::OPUS_DIRECT;
-      const bool direct_playback_not_steady =
-          OpusPocPlayer::is_playing &&
-          ctx.webm_playback_stage != WebmPlaybackStage::Idle &&
-          ctx.webm_playback_stage != WebmPlaybackStage::Steady;
-      const bool opus_stream_still_shallow =
-          using_opus_direct && !stream_download_complete &&
-          stream_buffer_size < THUMBNAIL_FETCH_SAFE_BUFFER_BYTES;
-      bool defer_thumb_for_opus =
-          using_opus_direct &&
-          (direct_playback_not_steady || opus_stream_still_shallow);
+      const NonAudioInterferenceInput non_audio_input =
+          make_non_audio_interference_input(stream_buffer_size,
+                                           stream_download_complete,
+                                           opus_player, ctx);
+      const bool defer_thumb_for_opus =
+          should_defer_thumbnail_fetch(non_audio_input);
       bool need_fetch = track_changed && !defer_thumb_for_opus &&
                         (osGetTime() - ctx.playback_start_time) > 3000;
       if (need_fetch) {
@@ -2471,18 +2557,36 @@ int main(int argc, char *argv[]) {
 
     // --- Thumbnail GPU upload (main thread only) ---
     {
+      size_t stream_buffer_size = 0;
+      bool stream_download_complete = true;
+      LightLock_Lock(&stream_lock);
+      if (g_stream_buffer_ptr) {
+        stream_buffer_size = g_stream_buffer_ptr->size();
+      }
+      stream_download_complete = g_stream_download_complete;
+      LightLock_Unlock(&stream_lock);
+
+      bool allow_upload = false;
+      LightLock_Lock(&ctx.lock);
+      const NonAudioInterferenceInput non_audio_input =
+          make_non_audio_interference_input(stream_buffer_size,
+                                           stream_download_complete,
+                                           opus_player, ctx);
+      allow_upload = !should_defer_thumbnail_upload(non_audio_input);
+      LightLock_Unlock(&ctx.lock);
+
       LightLock_Lock(&ctx.lock);
       bool ready = ctx.thumbnail_ready;
       bool thumbnail_done_logged = ctx.compare_thumbnail_done_logged;
+      if (ready && !ctx.compare_thumbnail_done_logged) {
+        ctx.compare_thumbnail_done_logged = true;
+      }
       std::vector<uint8_t> pixels;
       int crop_size = 0;
-      if (ready) {
+      if (ready && allow_upload) {
         pixels = std::move(ctx.thumbnail_pixels);
         crop_size = ctx.thumbnail_crop_size;
         ctx.thumbnail_ready = false;
-        if (!ctx.compare_thumbnail_done_logged) {
-          ctx.compare_thumbnail_done_logged = true;
-        }
       }
       LightLock_Unlock(&ctx.lock);
 
@@ -2491,7 +2595,7 @@ int main(int argc, char *argv[]) {
                                    PlaybackCompareEvent::ThumbnailFetchDone,
                                    OpusPlayerUpdateStats{});
       }
-      if (ready) {
+      if (ready && allow_upload) {
         ctx.thumbnail_tex.unload();
         ctx.thumbnail_tex.load_from_pixels(pixels.data(), crop_size, crop_size);
         bool should_log_upload = false;
@@ -2756,7 +2860,7 @@ int main(int argc, char *argv[]) {
     // --- Rendering (MVC: View) ---
     clamp_scroll_x_for_current_screen(ctx, ui_mgr);
     LightLock_Lock(&ctx.lock);
-    RenderContext render_ctx = ctx; // Slicing copy for safe, fast data snapshot
+    RenderContext render_ctx = make_render_snapshot_locked(ctx);
     LightLock_Unlock(&ctx.lock);
 
     // Draw without holding the lock
@@ -2846,6 +2950,7 @@ int main(int argc, char *argv[]) {
   g_wallpaper.unload();
   // Destroy ScreenManager first (HomeScreen holds TouchButton vector)
   screen_mgr.clear();
+  cleanup_ui_icon_cache();
   // Destroy UIRenderer first (holds reference to UIManager)
   g_renderer_ptr.reset();
   // UIManager's cleanup() calls C2D_Fini/C3D_Fini/gfxExit

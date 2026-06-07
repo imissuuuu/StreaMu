@@ -1,6 +1,7 @@
 #include "playing_screen.h"
 #include "../track_list_helpers.h"
 #include "../ui_constants.h"
+#include "../ui_icon_cache.h"
 #include <time.h>
 
 void PlayingScreen::on_enter(AppContext &ctx) {
@@ -39,36 +40,8 @@ void PlayingScreen::draw_bottom(const RenderContext &ctx, UIManager &ui_mgr) {
   // HOME button: bottom=play bar top(y=170), right=screen edge(x=280), 40x30
   C2D_DrawRectSolid(HOME_BTN_X, HOME_BTN_Y, 0, MENU_BTN_W, MENU_BTN_H,
                     ctx.theme->text_dim & 0xC0FFFFFF);
-  // Home icon (16x16 grid scaled 2x → 32x32, centered in 40x30 button)
-  {
-    u32 ic = ctx.theme->text_dim;
-    float ix = HOME_BTN_X + 4.0f; // (40-32)/2
-    float iy = HOME_BTN_Y - 1.0f; // (30-32)/2
-    // Row 1: chimney tip
-    C2D_DrawRectSolid(ix + 26, iy + 2, 0, 2, 2, ic);
-    // Row 2: roof peak + chimney
-    C2D_DrawRectSolid(ix + 14, iy + 4, 0, 4, 2, ic);
-    C2D_DrawRectSolid(ix + 24, iy + 4, 0, 4, 2, ic);
-    // Row 3: roof wider + chimney
-    C2D_DrawRectSolid(ix + 12, iy + 6, 0, 8, 2, ic);
-    C2D_DrawRectSolid(ix + 24, iy + 6, 0, 4, 2, ic);
-    // Row 4: roof wider + chimney
-    C2D_DrawRectSolid(ix + 10, iy + 8, 0, 12, 2, ic);
-    C2D_DrawRectSolid(ix + 24, iy + 8, 0, 4, 2, ic);
-    // Row 5: roof connects chimney
-    C2D_DrawRectSolid(ix + 8, iy + 10, 0, 20, 2, ic);
-    // Row 6
-    C2D_DrawRectSolid(ix + 6, iy + 12, 0, 22, 2, ic);
-    // Row 7
-    C2D_DrawRectSolid(ix + 4, iy + 14, 0, 26, 2, ic);
-    // Row 8: roof base
-    C2D_DrawRectSolid(ix + 2, iy + 16, 0, 28, 2, ic);
-    // Row 9: wall top
-    C2D_DrawRectSolid(ix + 6, iy + 18, 0, 20, 2, ic);
-    // Rows 10-14: left wall + right wall
-    C2D_DrawRectSolid(ix + 6, iy + 20, 0, 6, 10, ic);
-    C2D_DrawRectSolid(ix + 20, iy + 20, 0, 6, 10, ic);
-  }
+  draw_ui_icon_centered(UiIconId::Home, HOME_BTN_X + 20.0f,
+                        HOME_BTN_Y + 14.0f, ctx.theme->text_dim);
 }
 
 // ============================================================

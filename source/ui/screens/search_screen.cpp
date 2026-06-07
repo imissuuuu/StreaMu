@@ -1,6 +1,7 @@
 #include "search_screen.h"
 #include "../play_bar.h"
 #include "../track_list_helpers.h"
+#include "../ui_icon_cache.h"
 #include "../ui_constants.h"
 
 void SearchScreen::on_enter(AppContext &ctx) {
@@ -171,9 +172,6 @@ void SearchScreen::draw_bottom(const RenderContext &ctx, UIManager &ui_mgr) {
     float ix =
         PlayBar::ZONE_1 * 0.5f - 16.0f + 4.0f; // center of zone - icon offset
     float iy = cy - 16.0f - 1.0f;
-    u32 ic = ctx.theme->text_dim;
-    C2D_DrawRectSolid(ix + 4, iy + 6, 0, 24, 4, ic);
-    C2D_DrawRectSolid(ix + 4, iy + 14, 0, 24, 4, ic);
-    C2D_DrawRectSolid(ix + 4, iy + 22, 0, 24, 4, ic);
+    draw_ui_icon(UiIconId::Menu, ix, iy, ctx.theme->text_dim);
   }
 }

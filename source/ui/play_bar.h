@@ -1,5 +1,6 @@
 #pragma once
 #include "ui_constants.h"
+#include "ui_icon_cache.h"
 #include "ui_manager.h"
 #include "ui_renderer.h"
 #include <string>
@@ -43,6 +44,10 @@ inline int parse_duration_secs(const std::string &dur) {
 inline void draw(const RenderContext &ctx, UIManager &ui_mgr) {
   C2D_TextBuf buf = ui_mgr.get_text_buf();
   C2D_Text text;
+  constexpr float FONT_TIME = 0.44f;
+  static std::string s_cached_duration_text;
+  static int s_cached_total_secs = 0;
+  static float s_cached_duration_width = 0.0f;
 
   u32 bar_bg = (ctx.config.mode == THEME_DARK)
                    ? C2D_Color32(55, 55, 55, 255)
@@ -56,7 +61,18 @@ inline void draw(const RenderContext &ctx, UIManager &ui_mgr) {
 
   // === Seek bar (top 8px of play bar) ===
   {
-    int total_secs = parse_duration_secs(ctx.playing_duration);
+    if (s_cached_duration_text != ctx.playing_duration) {
+      s_cached_duration_text = ctx.playing_duration;
+      s_cached_total_secs = parse_duration_secs(ctx.playing_duration);
+      if (!ctx.playing_duration.empty() && ctx.playing_duration != "?") {
+        C2D_Text dur_text;
+        C2D_TextParse(&dur_text, buf, ctx.playing_duration.c_str());
+        s_cached_duration_width = dur_text.width * FONT_TIME;
+      } else {
+        s_cached_duration_width = 0.0f;
+      }
+    }
+    const int total_secs = s_cached_total_secs;
     if (total_secs > 0) {
       // Check if user is currently dragging on the seek bar
       const TouchState &ts = ctx.touch_state;
@@ -105,9 +121,6 @@ inline void draw(const RenderContext &ctx, UIManager &ui_mgr) {
         head_x = 0.0f;
       C2D_DrawRectSolid(head_x, BAR_Y, 0, 4.0f, SEEK_H, head_color);
 
-      // Font size: max that fits within SEEK_H=14px (30pt * 0.44 ≈ 13.2px)
-      constexpr float FONT_TIME = 0.44f;
-
       // Elapsed time — left side
       char el_buf[16];
       int el_m = elapsed / 60, el_s = elapsed % 60;
@@ -120,10 +133,9 @@ inline void draw(const RenderContext &ctx, UIManager &ui_mgr) {
       // Total duration — right side (fixed string from ctx)
       if (!ctx.playing_duration.empty() && ctx.playing_duration != "?") {
         C2D_Text dur_text;
-        float tw = 0, th = 0;
         C2D_TextParse(&dur_text, buf, ctx.playing_duration.c_str());
-        C2D_TextGetDimensions(&dur_text, FONT_TIME, FONT_TIME, &tw, &th);
-        C2D_DrawText(&dur_text, C2D_WithColor, 320.0f - tw - 2.0f, BAR_Y, 0,
+        C2D_DrawText(&dur_text, C2D_WithColor,
+                     320.0f - s_cached_duration_width - 2.0f, BAR_Y, 0,
                      FONT_TIME, FONT_TIME, bar_text & 0xA0FFFFFF);
       }
     }
@@ -141,48 +153,12 @@ inline void draw(const RenderContext &ctx, UIManager &ui_mgr) {
 
   float cy = BAR_Y + SEEK_H + (BAR_H - SEEK_H) / 2.0f; // center of button area
 
-  // === Helper: equilateral-looking triangle (width ≈ height) ===
-  // half_h = half of total height. Width = half_h * 2 (1px columns)
-
-  // ▶ right-pointing: flat base on left, point on right
-  auto draw_tri_right = [&](float cx, float cy, int half_h, u32 c) {
-    int w = half_h * 2;
-    for (int i = 0; i < w; i++) {
-      float h = half_h * (1.0f - (float)i / w);
-      if (h < 1)
-        h = 1;
-      C2D_DrawRectSolid(cx - half_h + i, cy - h, 0, 1, h * 2, c);
-    }
-  };
-
-  // ◀ left-pointing: point on left, flat base on right (exact mirror)
-  auto draw_tri_left = [&](float cx, float cy, int half_h, u32 c) {
-    int w = half_h * 2;
-    for (int i = 0; i < w; i++) {
-      float h = half_h * ((float)(i + 1) / w);
-      if (h < 1)
-        h = 1;
-      C2D_DrawRectSolid(cx - half_h + i, cy - h, 0, 1, h * 2, c);
-    }
-  };
-
   // --- LOOP icon (0-55, center=27.5) ---
   {
     u32 lc = (ctx.play_queue.empty() || ctx.loop_mode == LOOP_OFF) ? dim_color
                                                                    : bar_text;
     float lx = 27.5f;
-    float w = 22.0f, h = 16.0f;
-    float x0 = lx - w / 2, y0 = cy - h / 2;
-    C2D_DrawRectSolid(x0, y0, 0, w - 2, 2, lc);             // top
-    C2D_DrawRectSolid(x0 + w - 2, y0, 0, 2, h, lc);         // right
-    C2D_DrawRectSolid(x0 + 2, y0 + h - 2, 0, w - 2, 2, lc); // bottom
-    C2D_DrawRectSolid(x0, y0, 0, 2, h, lc);                 // left
-    // Arrow top-right →
-    C2D_DrawRectSolid(x0 + w - 6, y0 - 3, 0, 2, 3, lc);
-    C2D_DrawRectSolid(x0 + w - 4, y0 - 2, 0, 2, 2, lc);
-    // Arrow bottom-left ←
-    C2D_DrawRectSolid(x0 + 4, y0 + h, 0, 2, 3, lc);
-    C2D_DrawRectSolid(x0 + 2, y0 + h, 0, 2, 2, lc);
+    draw_ui_icon(UiIconId::Loop, lx - 11.0f, cy - 11.0f, lc);
 
     if (ctx.loop_mode == LOOP_ONE) {
       C2D_TextParse(&text, buf, "1");
@@ -194,83 +170,30 @@ inline void draw(const RenderContext &ctx, UIManager &ui_mgr) {
   // --- PREV icon (55-118, center=86.5): |◀ ---
   {
     float px = 86.5f;
-    C2D_DrawRectSolid(px - 13, cy - 9, 0, 3, 18, skip_color);
-    draw_tri_left(px + 3, cy, 9, skip_color);
+    draw_ui_icon(UiIconId::Prev, px - 13.0f, cy - 9.0f, skip_color);
   }
 
   // --- PLAY/PAUSE icon (118-202, center=160) ---
   {
     float px = 160.0f;
     if (ctx.is_paused) {
-      // ▶ large: half_h=12 → 24x24px
-      draw_tri_right(px, cy, 12, bar_text);
+      draw_ui_icon_centered(UiIconId::Play, px, cy, bar_text);
     } else {
-      // || large
-      C2D_DrawRectSolid(px - 9, cy - 10, 0, 5, 20, bar_text);
-      C2D_DrawRectSolid(px + 4, cy - 10, 0, 5, 20, bar_text);
+      draw_ui_icon_centered(UiIconId::Pause, px, cy, bar_text);
     }
   }
 
   // --- NEXT icon (202-265, center=233.5): ▶| ---
   {
     float nx = 233.5f;
-    draw_tri_right(nx - 3, cy, 9, skip_color);
-    C2D_DrawRectSolid(nx + 10, cy - 9, 0, 3, 18, skip_color);
+    draw_ui_icon(UiIconId::Next, nx - 12.0f, cy - 9.0f, skip_color);
   }
 
   // --- SHUF icon (265-320, center=292.5) ---
   // 32x32 pixel art, 1px per dot
   {
     u32 sc = has_queue ? (ctx.shuffle_mode ? bar_text : dim_color) : dim_color;
-    float x0 = 292.5f - 16; // center 32px icon
-    float y0 = cy - 16;
-    // Arrow tip top-right
-    C2D_DrawRectSolid(x0 + 25, y0 + 5, 0, 1, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 6, 0, 2, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 7, 0, 3, 1, sc);
-    // Top arms
-    C2D_DrawRectSolid(x0 + 2, y0 + 8, 0, 7, 1, sc);
-    C2D_DrawRectSolid(x0 + 20, y0 + 8, 0, 9, 1, sc);
-    C2D_DrawRectSolid(x0 + 2, y0 + 9, 0, 8, 1, sc);
-    C2D_DrawRectSolid(x0 + 19, y0 + 9, 0, 11, 1, sc);
-    C2D_DrawRectSolid(x0 + 2, y0 + 10, 0, 9, 1, sc);
-    C2D_DrawRectSolid(x0 + 18, y0 + 10, 0, 12, 1, sc);
-    C2D_DrawRectSolid(x0 + 2, y0 + 11, 0, 10, 1, sc);
-    C2D_DrawRectSolid(x0 + 17, y0 + 11, 0, 12, 1, sc);
-    // Cross upper
-    C2D_DrawRectSolid(x0 + 9, y0 + 12, 0, 4, 1, sc);
-    C2D_DrawRectSolid(x0 + 16, y0 + 12, 0, 4, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 12, 0, 3, 1, sc);
-    C2D_DrawRectSolid(x0 + 10, y0 + 13, 0, 4, 1, sc);
-    C2D_DrawRectSolid(x0 + 15, y0 + 13, 0, 4, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 13, 0, 2, 1, sc);
-    C2D_DrawRectSolid(x0 + 11, y0 + 14, 0, 7, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 14, 0, 1, 1, sc);
-    // Center
-    C2D_DrawRectSolid(x0 + 12, y0 + 15, 0, 5, 1, sc);
-    C2D_DrawRectSolid(x0 + 12, y0 + 16, 0, 5, 1, sc);
-    // Cross lower
-    C2D_DrawRectSolid(x0 + 11, y0 + 17, 0, 7, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 17, 0, 1, 1, sc);
-    C2D_DrawRectSolid(x0 + 10, y0 + 18, 0, 4, 1, sc);
-    C2D_DrawRectSolid(x0 + 15, y0 + 18, 0, 4, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 18, 0, 2, 1, sc);
-    C2D_DrawRectSolid(x0 + 9, y0 + 19, 0, 4, 1, sc);
-    C2D_DrawRectSolid(x0 + 16, y0 + 19, 0, 4, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 19, 0, 3, 1, sc);
-    // Bottom arms
-    C2D_DrawRectSolid(x0 + 2, y0 + 20, 0, 10, 1, sc);
-    C2D_DrawRectSolid(x0 + 17, y0 + 20, 0, 12, 1, sc);
-    C2D_DrawRectSolid(x0 + 2, y0 + 21, 0, 9, 1, sc);
-    C2D_DrawRectSolid(x0 + 18, y0 + 21, 0, 12, 1, sc);
-    C2D_DrawRectSolid(x0 + 2, y0 + 22, 0, 8, 1, sc);
-    C2D_DrawRectSolid(x0 + 19, y0 + 22, 0, 11, 1, sc);
-    C2D_DrawRectSolid(x0 + 2, y0 + 23, 0, 7, 1, sc);
-    C2D_DrawRectSolid(x0 + 20, y0 + 23, 0, 9, 1, sc);
-    // Arrow tip bottom-right
-    C2D_DrawRectSolid(x0 + 25, y0 + 24, 0, 3, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 25, 0, 2, 1, sc);
-    C2D_DrawRectSolid(x0 + 25, y0 + 26, 0, 1, 1, sc);
+    draw_ui_icon_centered(UiIconId::Shuffle, 292.5f, cy, sc);
   }
 }
 

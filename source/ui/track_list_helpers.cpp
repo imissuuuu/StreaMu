@@ -1,23 +1,147 @@
 #include "track_list_helpers.h"
 #include "play_bar.h"
+#include "ui_icon_cache.h"
 #include "ui_constants.h"
 #include "ui_manager.h"
 
 namespace {
+
+struct TextWidthCacheEntry {
+  std::string text;
+  float scale = 0.0f;
+  float width = 0.0f;
+  u32 last_used_tick = 0;
+};
+
+struct FormattedTrackTextCacheEntry {
+  std::string track_id;
+  std::string title;
+  std::string duration;
+  std::string views;
+  std::string upload_date;
+  bool is_playing = false;
+  bool show_views = false;
+  std::string display_title;
+  std::string meta_line;
+  u32 last_used_tick = 0;
+};
+
+FormattedTrackTextCacheEntry &find_or_build_track_text_cache(
+    const Track &track, bool is_playing, bool show_views) {
+  static std::vector<FormattedTrackTextCacheEntry> cache;
+  static u32 usage_tick = 0;
+  static bool cache_initialized = false;
+  if (!cache_initialized) {
+    cache.reserve(128);
+    cache_initialized = true;
+  }
+
+  ++usage_tick;
+  for (auto &entry : cache) {
+    if (entry.track_id == track.id && entry.title == track.title &&
+        entry.duration == track.duration && entry.views == track.views &&
+        entry.upload_date == track.upload_date &&
+        entry.is_playing == is_playing && entry.show_views == show_views) {
+      entry.last_used_tick = usage_tick;
+      return entry;
+    }
+  }
+
+  FormattedTrackTextCacheEntry new_entry = {};
+  new_entry.track_id = track.id;
+  new_entry.title = track.title;
+  new_entry.duration = track.duration;
+  new_entry.views = track.views;
+  new_entry.upload_date = track.upload_date;
+  new_entry.is_playing = is_playing;
+  new_entry.show_views = show_views;
+  new_entry.display_title = is_playing ? (">> " + track.title) : track.title;
+  if (!track.duration.empty() && track.duration != "?") {
+    new_entry.meta_line += track.duration;
+  }
+  if (show_views && !track.views.empty() && track.views != "?") {
+    if (!new_entry.meta_line.empty()) {
+      new_entry.meta_line += " \xC2\xB7 ";
+    }
+    new_entry.meta_line += track.views;
+  }
+  if (!track.upload_date.empty() && track.upload_date != "?") {
+    if (!new_entry.meta_line.empty()) {
+      new_entry.meta_line += " \xC2\xB7 ";
+    }
+    new_entry.meta_line += track.upload_date;
+  }
+  new_entry.last_used_tick = usage_tick;
+
+  if (cache.size() < 128) {
+    cache.push_back(std::move(new_entry));
+    return cache.back();
+  }
+
+  size_t replace_index = 0;
+  for (size_t i = 1; i < cache.size(); ++i) {
+    if (cache[i].last_used_tick < cache[replace_index].last_used_tick) {
+      replace_index = i;
+    }
+  }
+  cache[replace_index] = std::move(new_entry);
+  return cache[replace_index];
+}
+
+float measure_text_width_cached(const std::string &text, float scale,
+                                UIManager &ui_mgr) {
+  static std::vector<TextWidthCacheEntry> cache;
+  static u32 usage_tick = 0;
+  static bool cache_initialized = false;
+  if (!cache_initialized) {
+    cache.reserve(96);
+    cache_initialized = true;
+  }
+
+  ++usage_tick;
+  for (auto &entry : cache) {
+    if (entry.scale == scale && entry.text == text) {
+      entry.last_used_tick = usage_tick;
+      return entry.width;
+    }
+  }
+
+  C2D_Text measured_text;
+  C2D_TextParse(&measured_text, ui_mgr.get_text_buf(), text.c_str());
+  const float measured_width = measured_text.width * scale;
+
+  TextWidthCacheEntry new_entry = {};
+  new_entry.text = text;
+  new_entry.scale = scale;
+  new_entry.width = measured_width;
+  new_entry.last_used_tick = usage_tick;
+
+  if (cache.size() < 96) {
+    cache.push_back(std::move(new_entry));
+  } else {
+    size_t replace_index = 0;
+    for (size_t i = 1; i < cache.size(); ++i) {
+      if (cache[i].last_used_tick < cache[replace_index].last_used_tick) {
+        replace_index = i;
+      }
+    }
+    cache[replace_index] = std::move(new_entry);
+  }
+
+  return measured_width;
+}
 
 int compute_title_scroll_limit(const Track &track, const RenderContext &ctx,
                                UIManager &ui_mgr) {
   if (track.id == "MODE_BTN")
     return 0;
 
-  std::string display_title = track.title;
-  if (track.id == ctx.playing_id && ctx.playing_id != "SEARCH_BTN")
-    display_title = ">> " + display_title;
+  const auto &formatted = find_or_build_track_text_cache(
+      track, track.id == ctx.playing_id && ctx.playing_id != "SEARCH_BTN",
+      false);
 
-  C2D_Text text;
-  C2D_TextParse(&text, ui_mgr.get_text_buf(), display_title.c_str());
-
-  const float text_w = text.width * FONT_SM;
+  const float text_w =
+      measure_text_width_cached(formatted.display_title, FONT_SM, ui_mgr);
   const float display_w = 320.0f - BTM_MARGIN_X * 2;
   if (text_w <= display_w)
     return 0;
@@ -93,55 +217,7 @@ void draw_track_list_bottom(const RenderContext &ctx, UIManager &ui_mgr,
         u32 sc = (i == ctx.selected_index && ctx.mode_btn_focus == 0)
                      ? ctx.theme->accent_text
                      : ctx.theme->text_body;
-        float x0 = 80.0f - 16;
-        float y0 = btn_cy - 11;
-        // Arrow tip top-right
-        C2D_DrawRectSolid(x0 + 25, y0 + 0, 0, 1, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 1, 0, 2, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 2, 0, 3, 1, sc);
-        // Top arms
-        C2D_DrawRectSolid(x0 + 2, y0 + 3, 0, 7, 1, sc);
-        C2D_DrawRectSolid(x0 + 20, y0 + 3, 0, 9, 1, sc);
-        C2D_DrawRectSolid(x0 + 2, y0 + 4, 0, 8, 1, sc);
-        C2D_DrawRectSolid(x0 + 19, y0 + 4, 0, 11, 1, sc);
-        C2D_DrawRectSolid(x0 + 2, y0 + 5, 0, 9, 1, sc);
-        C2D_DrawRectSolid(x0 + 18, y0 + 5, 0, 12, 1, sc);
-        C2D_DrawRectSolid(x0 + 2, y0 + 6, 0, 10, 1, sc);
-        C2D_DrawRectSolid(x0 + 17, y0 + 6, 0, 12, 1, sc);
-        // Cross upper
-        C2D_DrawRectSolid(x0 + 9, y0 + 7, 0, 4, 1, sc);
-        C2D_DrawRectSolid(x0 + 16, y0 + 7, 0, 4, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 7, 0, 3, 1, sc);
-        C2D_DrawRectSolid(x0 + 10, y0 + 8, 0, 4, 1, sc);
-        C2D_DrawRectSolid(x0 + 15, y0 + 8, 0, 4, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 8, 0, 2, 1, sc);
-        C2D_DrawRectSolid(x0 + 11, y0 + 9, 0, 7, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 9, 0, 1, 1, sc);
-        // Center
-        C2D_DrawRectSolid(x0 + 12, y0 + 10, 0, 5, 1, sc);
-        C2D_DrawRectSolid(x0 + 12, y0 + 11, 0, 5, 1, sc);
-        // Cross lower
-        C2D_DrawRectSolid(x0 + 11, y0 + 12, 0, 7, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 12, 0, 1, 1, sc);
-        C2D_DrawRectSolid(x0 + 10, y0 + 13, 0, 4, 1, sc);
-        C2D_DrawRectSolid(x0 + 15, y0 + 13, 0, 4, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 13, 0, 2, 1, sc);
-        C2D_DrawRectSolid(x0 + 9, y0 + 14, 0, 4, 1, sc);
-        C2D_DrawRectSolid(x0 + 16, y0 + 14, 0, 4, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 14, 0, 3, 1, sc);
-        // Bottom arms
-        C2D_DrawRectSolid(x0 + 2, y0 + 15, 0, 10, 1, sc);
-        C2D_DrawRectSolid(x0 + 17, y0 + 15, 0, 12, 1, sc);
-        C2D_DrawRectSolid(x0 + 2, y0 + 16, 0, 9, 1, sc);
-        C2D_DrawRectSolid(x0 + 18, y0 + 16, 0, 12, 1, sc);
-        C2D_DrawRectSolid(x0 + 2, y0 + 17, 0, 8, 1, sc);
-        C2D_DrawRectSolid(x0 + 19, y0 + 17, 0, 11, 1, sc);
-        C2D_DrawRectSolid(x0 + 2, y0 + 18, 0, 7, 1, sc);
-        C2D_DrawRectSolid(x0 + 20, y0 + 18, 0, 9, 1, sc);
-        // Arrow tip bottom-right
-        C2D_DrawRectSolid(x0 + 25, y0 + 19, 0, 3, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 20, 0, 2, 1, sc);
-        C2D_DrawRectSolid(x0 + 25, y0 + 21, 0, 1, 1, sc);
+        draw_ui_icon_centered(UiIconId::Shuffle, 80.0f, btn_cy, sc);
       }
 
       // --- ORDER play icon (right half, center=240) ---
@@ -150,15 +226,7 @@ void draw_track_list_bottom(const RenderContext &ctx, UIManager &ui_mgr,
         u32 oc = (i == ctx.selected_index && ctx.mode_btn_focus == 1)
                      ? ctx.theme->accent_text
                      : ctx.theme->text_body;
-        float px = 240.0f;
-        int half_h = 12;
-        int w = half_h * 2;
-        for (int j = 0; j < w; j++) {
-          float h = half_h * (1.0f - (float)j / w);
-          if (h < 1)
-            h = 1;
-          C2D_DrawRectSolid(px - half_h + j, btn_cy - h, 0, 1, h * 2, oc);
-        }
+        draw_ui_icon_centered(UiIconId::Play, 240.0f, btn_cy, oc);
       }
 
       rendered++;
@@ -182,17 +250,18 @@ void draw_track_list_bottom(const RenderContext &ctx, UIManager &ui_mgr,
     }
 
     // Row 1: Title
-    std::string display_title = ctx.g_tracks[i].title;
-    if (is_playing)
-      display_title = ">> " + display_title;
+    const auto &formatted =
+        find_or_build_track_text_cache(ctx.g_tracks[i], is_playing, show_views);
 
     u32 color = (i == ctx.selected_index) ? ctx.theme->accent_text
                 : is_playing              ? ctx.theme->accent_text
                                           : ctx.theme->text_body;
-    C2D_TextParse(&text, ui_mgr.get_text_buf(), display_title.c_str());
+    C2D_TextParse(&text, ui_mgr.get_text_buf(),
+                  formatted.display_title.c_str());
     float draw_x = BTM_MARGIN_X;
     if (i == ctx.selected_index) {
-      float text_w = text.width * FONT_SM;
+      const float text_w =
+          measure_text_width_cached(formatted.display_title, FONT_SM, ui_mgr);
       float display_w = 320.0f - BTM_MARGIN_X * 2;
       float eff_scroll = (text_w > display_w)
                              ? std::min((float)ctx.scroll_x, text_w - display_w)
@@ -204,26 +273,12 @@ void draw_track_list_bottom(const RenderContext &ctx, UIManager &ui_mgr,
 
     // Row 2: Metadata
     {
-      std::string meta;
-      if (!ctx.g_tracks[i].duration.empty() && ctx.g_tracks[i].duration != "?")
-        meta += ctx.g_tracks[i].duration;
-      if (show_views && !ctx.g_tracks[i].views.empty() &&
-          ctx.g_tracks[i].views != "?") {
-        if (!meta.empty())
-          meta += " \xC2\xB7 ";
-        meta += ctx.g_tracks[i].views;
-      }
-      if (!ctx.g_tracks[i].upload_date.empty() &&
-          ctx.g_tracks[i].upload_date != "?") {
-        if (!meta.empty())
-          meta += " \xC2\xB7 ";
-        meta += ctx.g_tracks[i].upload_date;
-      }
-      if (!meta.empty()) {
+      if (!formatted.meta_line.empty()) {
         u32 meta_color = (i == ctx.selected_index || is_playing)
                              ? ctx.theme->accent_text
                              : ctx.theme->text_body;
-        C2D_TextParse(&text, ui_mgr.get_text_buf(), meta.c_str());
+        C2D_TextParse(&text, ui_mgr.get_text_buf(),
+                      formatted.meta_line.c_str());
         C2D_DrawText(&text, C2D_WithColor, BTM_MARGIN_X + 8,
                      y_pos + BTM_META_OFFSET, 0, FONT_XS, FONT_XS, meta_color);
       }
@@ -252,16 +307,12 @@ void draw_track_list_bottom(const RenderContext &ctx, UIManager &ui_mgr,
 // screens)
 // ============================================================
 void draw_menu_button(const RenderContext &ctx, UIManager &ui_mgr) {
+  (void)ui_mgr;
   MenuBtnRect btn = get_menu_btn_rect(ctx.config);
   u32 bg = ctx.theme->text_dim & 0xC0FFFFFF;
   C2D_DrawRectSolid(btn.x, btn.y, 0, btn.w, btn.h, bg);
-  // ☰ icon (16x16 grid scaled 2x → 32x32, centered in 40x30 button)
-  u32 ic = ctx.theme->text_dim;
-  float ix = btn.x + 4.0f; // (40-32)/2 = 4
-  float iy = btn.y - 1.0f; // (30-32)/2 = -1
-  C2D_DrawRectSolid(ix + 4, iy + 6, 0, 24, 4, ic);
-  C2D_DrawRectSolid(ix + 4, iy + 14, 0, 24, 4, ic);
-  C2D_DrawRectSolid(ix + 4, iy + 22, 0, 24, 4, ic);
+  draw_ui_icon(UiIconId::Menu, btn.x + 4.0f, btn.y - 1.0f,
+               ctx.theme->text_dim);
 }
 
 // ============================================================
@@ -383,12 +434,14 @@ void draw_playing_style_list(const std::vector<Track> &tracks,
     u32 title_color = (is_selected || is_playing) ? ctx.theme->accent_text
                                                   : ctx.theme->text_body;
 
-    std::string display_title = is_playing ? (">> " + tr.title) : tr.title;
-    C2D_TextParse(&text, buf, display_title.c_str());
+    const auto &formatted =
+        find_or_build_track_text_cache(tr, is_playing, false);
+    C2D_TextParse(&text, buf, formatted.display_title.c_str());
     {
       float draw_x = BTM_MARGIN_X;
       if (is_selected) {
-        float text_w = text.width * FONT_SM;
+        const float text_w =
+            measure_text_width_cached(formatted.display_title, FONT_SM, ui_mgr);
         float display_w = 320.0f - BTM_MARGIN_X * 2;
         float eff_scroll = (text_w > display_w) ? std::min((float)ctx.scroll_x,
                                                            text_w - display_w)
@@ -398,8 +451,8 @@ void draw_playing_style_list(const std::vector<Track> &tracks,
       C2D_DrawText(&text, C2D_WithColor, draw_x, y_item, 0, FONT_SM, FONT_SM,
                    title_color);
     }
-    if (!tr.duration.empty()) {
-      C2D_TextParse(&text, buf, tr.duration.c_str());
+    if (!formatted.meta_line.empty()) {
+      C2D_TextParse(&text, buf, formatted.meta_line.c_str());
       C2D_DrawText(&text, C2D_WithColor, BTM_MARGIN_X + 8,
                    y_item + BTM_META_OFFSET, 0, FONT_XS, FONT_XS, title_color);
     }
