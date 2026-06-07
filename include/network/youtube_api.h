@@ -32,7 +32,7 @@ public:
                             StreamContainerMode mode, StreamCallback callback);
   void get_audio_stream_url(const std::string &video_id, int seek_seconds,
                             StreamCallback callback);
-  bool start_streaming(const std::string &url);
+  bool start_streaming(const std::string &url, StreamContainerMode mode);
   std::string http_get(const std::string &url, long timeout_sec = 15L);
   std::string http_get_ms(const std::string &url, long timeout_ms);
   bool check_connection(long timeout_ms);

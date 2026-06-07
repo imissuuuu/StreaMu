@@ -8,14 +8,10 @@ bool OpusPocPlayer::is_playing = false;
 
 static constexpr size_t OPUS_PCM_CAPACITY_SAMPLES = 8192;
 static constexpr int OPUS_WAVE_BUF_COUNT = 8;
-static constexpr int OPUS_STEADY_TARGET_QUEUED_WAVEBUFS = 7;
-static constexpr int OPUS_STEADY_MAX_DECODE_BUFFERS_PER_UPDATE = 2;
-static constexpr int OPUS_REFILL_DECODE_BUFFERS_PER_UPDATE = 6;
-static constexpr int OPUS_LOW_QUEUE_WAVEBUF_THRESHOLD = 4;
-
 OpusPocPlayer::OpusPocPlayer()
     : input_kind_(OpusInputKind::None), audioBuffer(NULL),
-      decode_failed_(false), ndsp_format_initialized_(false) {
+      decode_failed_(false), ndsp_format_initialized_(false),
+      decode_tuning_(default_opus_decode_tuning()) {
   memset(waveBuf, 0, sizeof(waveBuf));
 }
 
@@ -37,6 +33,10 @@ bool OpusPocPlayer::init() {
     waveBuf[i].status = NDSP_WBUF_FREE;
   }
   return true;
+}
+
+void OpusPocPlayer::set_decode_tuning(const OpusDecodeTuning &tuning) {
+  decode_tuning_ = tuning;
 }
 
 bool OpusPocPlayer::start(const uint8_t *data, size_t size) {
@@ -104,16 +104,17 @@ OpusPlayerUpdateStats OpusPocPlayer::update_with_stats() {
   if (!is_playing || !audioBuffer || !decoder_ready) {
     return stats;
   }
+  const u64 tick_start = svcGetSystemTick();
 
   const int queued_before_update = queued_wavebuf_count();
   const bool low_queue_refill =
-      queued_before_update <= OPUS_LOW_QUEUE_WAVEBUF_THRESHOLD;
+      queued_before_update <= decode_tuning_.low_queue_wavebuf_threshold;
   const int max_decode_buffers =
-      low_queue_refill ? OPUS_REFILL_DECODE_BUFFERS_PER_UPDATE
-                       : OPUS_STEADY_MAX_DECODE_BUFFERS_PER_UPDATE;
+      low_queue_refill ? decode_tuning_.refill_decode_buffers_per_update
+                       : decode_tuning_.steady_max_decode_buffers_per_update;
   const int target_queued_wavebufs = low_queue_refill
-                                         ? OPUS_WAVE_BUF_COUNT
-                                         : OPUS_STEADY_TARGET_QUEUED_WAVEBUFS;
+                                          ? decode_tuning_.refill_target_queued_wavebufs
+                                          : decode_tuning_.steady_target_queued_wavebufs;
 
   for (int i = 0; i < OPUS_WAVE_BUF_COUNT; i++) {
     if (stats.decoded_buffers >= max_decode_buffers ||
@@ -154,6 +155,8 @@ OpusPlayerUpdateStats OpusPocPlayer::update_with_stats() {
       }
     }
   }
+  const u64 tick_end = svcGetSystemTick();
+  stats.decode_ticks = (tick_end >= tick_start) ? (tick_end - tick_start) : 0;
   return stats;
 }
 

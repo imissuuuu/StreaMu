@@ -1,7 +1,11 @@
 #include "opus_stream_pipeline.h"
 
+#include "device_profile.h"
 #include "opus_poc_player.h"
 
+#include <3ds/allocator/linear.h>
+#include <3ds/env.h>
+#include <malloc.h>
 #include <memory>
 #include <stdint.h>
 #include <vector>
@@ -26,4 +30,40 @@ OpusPipelineState collect_opus_pipeline_state() {
   }
 
   return state;
+}
+
+PlaybackCoreSnapshot collect_playback_core_snapshot() {
+  const OpusPipelineState pipeline_state = collect_opus_pipeline_state();
+  const struct mallinfo heap_info = mallinfo();
+
+  PlaybackCoreSnapshot snapshot = {};
+  snapshot.stream_buffer_bytes = pipeline_state.stream_buffer_bytes;
+  snapshot.download_complete = pipeline_state.download_complete;
+  snapshot.queued_wavebufs = pipeline_state.queued_wavebufs;
+  snapshot.free_wavebufs = pipeline_state.free_wavebufs;
+  snapshot.heap_free_bytes = heap_info.fordblks;
+  snapshot.linear_free_bytes = linearSpaceFree();
+  return snapshot;
+}
+
+PlaybackCompareSnapshot collect_playback_compare_snapshot(
+    StreamContainerMode stream_mode,
+    const OpusPlayerUpdateStats &update_stats) {
+  const OpusPipelineState pipeline_state = collect_opus_pipeline_state();
+  const struct mallinfo heap_info = mallinfo();
+
+  PlaybackCompareSnapshot snapshot = {};
+  snapshot.stream_mode = stream_mode;
+  snapshot.is_old3ds_baseline = is_old3ds_baseline_device();
+  snapshot.download_complete = pipeline_state.download_complete;
+  snapshot.stream_buffer_bytes = pipeline_state.stream_buffer_bytes;
+  snapshot.queued_wavebufs = pipeline_state.queued_wavebufs;
+  snapshot.free_wavebufs = pipeline_state.free_wavebufs;
+  snapshot.decoded_buffers_in_update = update_stats.decoded_buffers;
+  snapshot.update_decode_ticks = update_stats.decode_ticks;
+  snapshot.app_heap_size_bytes = envGetHeapSize();
+  snapshot.app_heap_used_bytes = heap_info.uordblks;
+  snapshot.app_heap_free_bytes = heap_info.fordblks;
+  snapshot.linear_free_bytes = linearSpaceFree();
+  return snapshot;
 }

@@ -1,5 +1,6 @@
 #include "../../include/network/youtube_api.h"
 #include "../audio/opus_perf_metrics.h"
+#include "../audio/playback_observer.h"
 #include <3ds.h>
 #include <curl/curl.h>
 #include <memory>
@@ -101,6 +102,9 @@ static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
       g_opus_perf_first_byte_logged = true;
       append_opus_perf_log(OpusPerfEvent::FirstByte, g_opus_perf_bytes,
                            stream_buffer_size, total_size);
+      playback_observer_log_simple(PlaybackCompareEvent::FirstByte,
+                                   StreamContainerMode::ProxyOggOpus,
+                                   stream_buffer_size);
     }
     if (!g_opus_perf_start_bytes_logged && g_opus_perf_bytes >= 16U * 1024U) {
       g_opus_perf_start_bytes_logged = true;
@@ -124,6 +128,9 @@ static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
       g_webm_perf_first_byte_logged = true;
       append_webm_perf_log("first_byte", g_webm_perf_bytes, stream_buffer_size,
                            total_size);
+      playback_observer_log_simple(PlaybackCompareEvent::FirstByte,
+                                   StreamContainerMode::ProxyWebmOpus,
+                                   stream_buffer_size);
     }
   }
   return total_size;
@@ -141,9 +148,11 @@ void YouTubeAPI::init() {
 }
 void YouTubeAPI::cleanup() { curl_global_cleanup(); }
 
-bool YouTubeAPI::start_streaming(const std::string &url) {
+bool YouTubeAPI::start_streaming(const std::string &url,
+                                 StreamContainerMode mode) {
   CURL *curl = curl_easy_init();
   bool success = false;
+  bool cancelled = false;
   if (!curl) {
     LightLock_Lock(&stream_lock);
     g_stream_download_complete = true;
@@ -154,8 +163,8 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   g_stream_download_complete = false;
   LightLock_Unlock(&stream_lock);
 
-  const bool is_opus_ogg = url.find("/stream_opus_ogg?") != std::string::npos;
-  const bool is_webm_opus = url.find("/stream_opus?") != std::string::npos;
+  const bool is_opus_ogg = mode == StreamContainerMode::ProxyOggOpus;
+  const bool is_webm_opus = mode == StreamContainerMode::ProxyWebmOpus;
 #if STREAMU_ENABLE_OPUS_PERF_LOG
   g_opus_perf_active = is_opus_ogg;
   g_opus_perf_first_byte_logged = false;
@@ -169,6 +178,7 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
 #else
   (void)is_opus_ogg;
 #endif
+  playback_observer_log_simple(PlaybackCompareEvent::RequestStart, mode, 0);
   g_webm_perf_active = is_webm_opus;
   g_webm_perf_first_byte_logged = false;
   g_webm_perf_bytes = 0;
@@ -190,6 +200,7 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, is_opus_ogg ? 180L : 60L);
 
   CURLcode res = curl_easy_perform(curl);
+  cancelled = should_cancel || res == CURLE_ABORTED_BY_CALLBACK;
   if (res == CURLE_OK && !should_cancel) {
     success = true;
   }
@@ -208,14 +219,26 @@ bool YouTubeAPI::start_streaming(const std::string &url) {
   }
   g_opus_perf_active = false;
 #endif
+  size_t final_buffer_size = 0;
   if (is_webm_opus) {
-    size_t final_buffer_size = 0;
     LightLock_Lock(&stream_lock);
     final_buffer_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
     LightLock_Unlock(&stream_lock);
-    append_webm_perf_log(success ? "stream_complete" : "stream_failed",
+    append_webm_perf_log(success ? "stream_complete"
+                                 : (cancelled ? "stream_cancelled"
+                                              : "stream_failed"),
                          g_webm_perf_bytes, final_buffer_size, 0);
   }
+  if (!is_webm_opus) {
+    LightLock_Lock(&stream_lock);
+    final_buffer_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
+    LightLock_Unlock(&stream_lock);
+  }
+  playback_observer_log_simple(
+      success ? PlaybackCompareEvent::StreamComplete
+              : (cancelled ? PlaybackCompareEvent::StreamCancelled
+                           : PlaybackCompareEvent::StreamFailed),
+      mode, final_buffer_size);
   g_webm_perf_active = false;
   curl_easy_cleanup(curl);
   return success;

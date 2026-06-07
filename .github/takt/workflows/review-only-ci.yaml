@@ -43,17 +43,16 @@ steps:
     edit: false
     model: gpt-5.5
     instruction: |
-      Perform the final high-signal review on the current pull request diff.
-      Confirm whether the change is safe to release.
-      Only raise issues that are truly blocking, operationally unsafe, or missing evidence.
-      If you find a required fix, classify it as:
-      - AUTO_FIXABLE when it is mechanical and safe.
-      - NEEDS_DECISION when user judgment is required.
-      - REJECT when maintainer changes are needed without user judgment.
+      Perform the final high-cost review pass on the current pull request diff.
+      Confirm release safety and look for subtle regressions, integration risks, and missing evidence.
+      Raise only blocking issues.
+      If a required fix is purely mechanical and low risk, classify it as AUTO_FIXABLE.
+      If a user behavior/product decision is required, classify it as NEEDS_DECISION.
+      If maintainer changes are required without user choice, classify it as REJECT.
       Otherwise conclude APPROVE.
     output_contracts:
       report:
-        - name: targeted-review.md
+        - name: advanced-review.md
           format: review_step
     rules:
       - condition: APPROVE

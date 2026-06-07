@@ -1,4 +1,6 @@
 #pragma once
+#include "audio/webm_playback_controller.h"
+#include "network/youtube_api.h"
 #include "ui/theme.h"
 #include "ui/touch_state.h"
 #include "ui/ui_renderer.h"
@@ -27,9 +29,9 @@ struct AppContext : public RenderContext {
   // is_paused inherited from RenderContext (no shadowing)
   std::string current_stream_url = "";
   AudioPathConfig active_audio_path = AudioPathConfig::OPUS_DIRECT;
-  bool opus_pending_decode_start = false;
+  StreamContainerMode active_stream_mode = StreamContainerMode::ProxyOggOpus;
   bool opus_webm_poc_enabled = false;
-  bool opus_webm_prebuffer_pending = false;
+  WebmPlaybackStage webm_playback_stage = WebmPlaybackStage::Idle;
   OpusPlaybackFailure opus_playback_failure = OpusPlaybackFailure::None;
   LightLock lock; // Mutex for thread synchronization
   // touch_state inherited from RenderContext (no shadowing)
@@ -49,4 +51,8 @@ struct AppContext : public RenderContext {
   bool thumbnail_ready = false;   // true when raw data is ready for GPU upload
   std::vector<uint8_t> thumbnail_pixels; // cropped RGBA pixels (set by thread)
   int thumbnail_crop_size = 0;           // side length of cropped square
+  bool compare_thumbnail_fetch_logged = false;
+  bool compare_thumbnail_done_logged = false;
+  bool compare_thumbnail_upload_logged = false;
+  bool compare_audio_audible_logged = false;
 };

@@ -11,8 +11,8 @@ namespace {
 
 static const uint32_t OGG_SERIAL = 0x5354524DU;
 static const size_t MAX_OGG_PAGE_SEGMENTS = 255U;
-static const size_t OGG_AUDIO_PAGE_TARGET_BYTES = 2048U;
-static const size_t WEBM_PACKET_PUMP_LIMIT = 8U;
+static constexpr size_t kDefaultOggAudioPageTargetBytes = 2048U;
+static constexpr size_t kDefaultWebmPacketPumpLimit = 8U;
 
 static void append_webm_perf_log(const char *event, size_t raw_bytes,
                                  size_t ogg_bytes, WebmRemuxError error,
@@ -525,7 +525,7 @@ bool WebmOpusStreamingDecoder::append_audio_packet(const OggPagePacket &packet) 
   audio_page_packets_.push_back(packet);
   audio_page_bytes_ += packet.data.size();
   audio_page_segments_ += static_cast<size_t>(segment_count);
-  if (audio_page_bytes_ >= OGG_AUDIO_PAGE_TARGET_BYTES) {
+  if (audio_page_bytes_ >= kDefaultOggAudioPageTargetBytes) {
     if (!flush_audio_page(0x00U)) {
       return false;
     }
@@ -601,7 +601,7 @@ bool WebmOpusStreamingDecoder::pump_more_data() {
   }
 
   size_t processed_packets = 0;
-  while (processed_packets < WEBM_PACKET_PUMP_LIMIT) {
+  while (processed_packets < kDefaultWebmPacketPumpLimit) {
     nestegg_packet *packet = NULL;
     const int result = nestegg_read_packet(nestegg_ctx_, &packet);
     if (result == 1) {
