@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Set up proxy server development dependencies."""
 
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from setup_common import ensure_python_version, ensure_venv, install_requirements
 

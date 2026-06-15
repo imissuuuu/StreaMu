@@ -26,6 +26,8 @@ config.json
 # Logs & dumps
 logs/
 dumps/
+playback_compare.log
+webm_perf.log
 
 # IDE / AI workspace
 .claude/
@@ -41,6 +43,7 @@ pyproject.toml
 
 # Working design / review docs
 docs/
+tmp/
 
 # OS files
 .DS_Store

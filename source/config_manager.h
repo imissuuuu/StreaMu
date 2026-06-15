@@ -16,8 +16,7 @@ public:
     out = AppConfig{}; // Init with defaults
 
     FILE *f = fopen(CONFIG_PATH, "r");
-    if (!f)
-      return false;
+    if (!f) return false;
 
     char buf[1024];
     size_t len = fread(buf, 1, sizeof(buf) - 1, f);
@@ -37,23 +36,17 @@ public:
     out.wallpaper_file = parse_string(json, "wallpaper_file", "");
     out.server_ip = parse_string(json, "server_ip", "");
     out.language = parse_string(json, "language", "en");
-    std::string audio_path = parse_string(json, "audio_path", "opus_direct");
+    std::string audio_path = parse_string(json, "audio_path", "proxy_ogg_opus");
     out.accent_saturation = parse_float(json, "accent_saturation", 0.75f);
     out.accent_brightness = parse_float(json, "accent_brightness", 0.78f);
 
     // Validation
-    if (out.accent_hue < 0 || out.accent_hue > 360)
-      out.accent_hue = 220;
-    if ((int)out.mode > 1)
-      out.mode = THEME_LIGHT;
-    if ((int)out.l_action > 3)
-      out.l_action = LR_SKIP_BACK;
-    if ((int)out.r_action > 3)
-      out.r_action = LR_SKIP_FORWARD;
-    if (out.dpad_speed < 1 || out.dpad_speed > 10)
-      out.dpad_speed = 5;
-    if (out.language != "ja")
-      out.language = "en";
+    if (out.accent_hue < 0 || out.accent_hue > 360) out.accent_hue = 220;
+    if ((int)out.mode > 1) out.mode = THEME_LIGHT;
+    if ((int)out.l_action > 3) out.l_action = LR_SKIP_BACK;
+    if ((int)out.r_action > 3) out.r_action = LR_SKIP_FORWARD;
+    if (out.dpad_speed < 1 || out.dpad_speed > 10) out.dpad_speed = 5;
+    if (out.language != "ja") out.language = "en";
     out.audio_path = parse_audio_path(audio_path);
     if (out.accent_saturation < 0.0f || out.accent_saturation > 1.0f)
       out.accent_saturation = 0.75f;
@@ -70,8 +63,7 @@ public:
     mkdir(CONFIG_DIR, 0777);
 
     FILE *f = fopen(CONFIG_PATH, "w");
-    if (!f)
-      return false;
+    if (!f) return false;
 
     // Manual JSON serialize (clarity first)
     fprintf(f, "{\n");
@@ -98,16 +90,22 @@ public:
 
 private:
   static AudioPathConfig parse_audio_path(const std::string &audio_path) {
-    (void)audio_path;
-    return AudioPathConfig::OPUS_DIRECT;
+    if (audio_path == "direct_webm_opus") {
+      return AudioPathConfig::DIRECT_WEBM_OPUS;
+    }
+    // Older builds stored only a single "opus_direct" value. Keep that on the
+    // stable relay path instead of silently enabling the experimental direct
+    // WebM route.
+    return AudioPathConfig::PROXY_OGG_OPUS;
   }
 
   static const char *audio_path_to_string(AudioPathConfig audio_path) {
-    (void)audio_path;
     switch (audio_path) {
-    case AudioPathConfig::OPUS_DIRECT:
-    default:
-      return "opus_direct";
+      case AudioPathConfig::DIRECT_WEBM_OPUS:
+        return "direct_webm_opus";
+      case AudioPathConfig::PROXY_OGG_OPUS:
+      default:
+        return "proxy_ogg_opus";
     }
   }
 
@@ -117,20 +115,15 @@ private:
                                   const std::string &default_val) {
     std::string search = std::string("\"") + key + "\"";
     size_t pos = json.find(search);
-    if (pos == std::string::npos)
-      return default_val;
+    if (pos == std::string::npos) return default_val;
     pos = json.find(':', pos);
-    if (pos == std::string::npos)
-      return default_val;
+    if (pos == std::string::npos) return default_val;
     pos++;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'))
-      pos++;
-    if (pos >= json.size() || json[pos] != '"')
-      return default_val;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+    if (pos >= json.size() || json[pos] != '"') return default_val;
     pos++; // Skip opening quote
     std::string result;
-    while (pos < json.size() && json[pos] != '"')
-      result += json[pos++];
+    while (pos < json.size() && json[pos] != '"') result += json[pos++];
     return result;
   }
 
@@ -139,14 +132,11 @@ private:
                            float default_val) {
     std::string search = std::string("\"") + key + "\"";
     size_t pos = json.find(search);
-    if (pos == std::string::npos)
-      return default_val;
+    if (pos == std::string::npos) return default_val;
     pos = json.find(':', pos);
-    if (pos == std::string::npos)
-      return default_val;
+    if (pos == std::string::npos) return default_val;
     pos++;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'))
-      pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
 
     bool negative = false;
     if (pos < json.size() && json[pos] == '-') {
@@ -171,8 +161,7 @@ private:
         pos++;
       }
     }
-    if (!found_digit)
-      return default_val;
+    if (!found_digit) return default_val;
     return negative ? -val : val;
   }
 
@@ -182,17 +171,14 @@ private:
                        int default_val) {
     std::string search = std::string("\"") + key + "\"";
     size_t pos = json.find(search);
-    if (pos == std::string::npos)
-      return default_val;
+    if (pos == std::string::npos) return default_val;
 
     pos = json.find(':', pos);
-    if (pos == std::string::npos)
-      return default_val;
+    if (pos == std::string::npos) return default_val;
     pos++; // After ':'
 
     // Skip whitespace
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'))
-      pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
 
     // Handle negative numbers
     bool negative = false;
@@ -209,8 +195,7 @@ private:
       pos++;
     }
 
-    if (!found_digit)
-      return default_val;
+    if (!found_digit) return default_val;
     return negative ? -val : val;
   }
 };

@@ -7,6 +7,8 @@ struct OpusDecodeTuning {
   int refill_target_queued_wavebufs = 8;
   int refill_decode_buffers_per_update = 6;
   int low_queue_wavebuf_threshold = 4;
+  int prestart_target_queued_wavebufs = 1;
+  int prestart_max_decode_buffers_per_update = 1;
 };
 
 inline OpusDecodeTuning default_opus_decode_tuning() {
@@ -15,11 +17,23 @@ inline OpusDecodeTuning default_opus_decode_tuning() {
 
 inline OpusDecodeTuning webm_startup_decode_tuning() {
   OpusDecodeTuning tuning = {};
-  tuning.steady_target_queued_wavebufs = 6;
-  tuning.steady_max_decode_buffers_per_update = 3;
-  tuning.refill_target_queued_wavebufs = 4;
-  tuning.refill_decode_buffers_per_update = 4;
-  tuning.low_queue_wavebuf_threshold = 3;
+  tuning.steady_target_queued_wavebufs = 1;
+  tuning.steady_max_decode_buffers_per_update = 1;
+  tuning.refill_target_queued_wavebufs = 1;
+  tuning.refill_decode_buffers_per_update = 1;
+  tuning.low_queue_wavebuf_threshold = 1;
+  return tuning;
+}
+
+inline OpusDecodeTuning webm_seek_decode_tuning() {
+  OpusDecodeTuning tuning = {};
+  tuning.steady_target_queued_wavebufs = 2;
+  tuning.steady_max_decode_buffers_per_update = 2;
+  tuning.refill_target_queued_wavebufs = 3;
+  tuning.refill_decode_buffers_per_update = 2;
+  tuning.low_queue_wavebuf_threshold = 1;
+  tuning.prestart_target_queued_wavebufs = 2;
+  tuning.prestart_max_decode_buffers_per_update = 2;
   return tuning;
 }
 

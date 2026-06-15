@@ -21,15 +21,16 @@ enum SettingsItem {
   ITEM_L_BUTTON = 5,
   ITEM_R_BUTTON = 6,
   ITEM_DPAD_SPEED = 7,
-  ITEM_WALLPAPER = 8,
-  ITEM_SERVER_IP = 9,
-  ITEM_LANGUAGE = 10,
-  ITEM_SEPARATOR = 11,
-  ITEM_SAVE = 12
+  ITEM_AUDIO_PATH = 8,
+  ITEM_WALLPAPER = 9,
+  ITEM_SERVER_IP = 10,
+  ITEM_LANGUAGE = 11,
+  ITEM_SEPARATOR = 12,
+  ITEM_SAVE = 13
 };
 
 SettingsScreen::SettingsScreen(ThemeColors &colors, Wallpaper *wallpaper)
-    : m_colors(colors), m_wallpaper(wallpaper) {}
+    : m_colors(colors), preview_colors_{}, m_wallpaper(wallpaper) {}
 
 void SettingsScreen::on_enter(AppContext &ctx) {
   ctx.current_state = STATE_SETTINGS;
@@ -48,8 +49,7 @@ void SettingsScreen::on_enter(AppContext &ctx) {
   if (editing_config_.palette_index >= 0) {
     palette_row_ = editing_config_.palette_index / COLOR_PALETTE_COLS;
     palette_col_ = editing_config_.palette_index % COLOR_PALETTE_COLS;
-    if (palette_row_ >= COLOR_PALETTE_ROWS)
-      palette_row_ = 0;
+    if (palette_row_ >= COLOR_PALETTE_ROWS) palette_row_ = 0;
   }
 }
 
@@ -57,131 +57,142 @@ void SettingsScreen::apply_preview() {
   apply_theme(editing_config_, preview_colors_);
 }
 
-std::string SettingsScreen::lr_action_name(LRAction action) const {
+std::string SettingsScreen::lr_action_name(LRAction action) {
   switch (action) {
-  case LR_DISABLED:
-    return "Disabled";
-  case LR_SKIP_BACK:
-    return "Skip Back";
-  case LR_SKIP_FORWARD:
-    return "Skip Fwd";
-  case LR_PLAY_PAUSE:
-    return "Play/Pause";
-  default:
-    return "???";
+    case LR_DISABLED:
+      return "Disabled";
+    case LR_SKIP_BACK:
+      return "Skip Back";
+    case LR_SKIP_FORWARD:
+      return "Skip Fwd";
+    case LR_PLAY_PAUSE:
+      return "Play/Pause";
+    default:
+      return "???";
   }
 }
 
-std::string SettingsScreen::get_item_label(int index) const {
+std::string SettingsScreen::get_item_label(int index) {
   switch (index) {
-  case ITEM_MODE:
-    return "Mode";
-  case ITEM_COLOR:
-    return "Color";
-  case ITEM_HUE:
-    return "Hue";
-  case ITEM_SATURATION:
-    return "Saturation";
-  case ITEM_BRIGHTNESS:
-    return "Brightness";
-  case ITEM_L_BUTTON:
-    return "L Button";
-  case ITEM_R_BUTTON:
-    return "R Button";
-  case ITEM_DPAD_SPEED:
-    return "D-Pad Speed";
-  case ITEM_WALLPAPER:
-    return "Wallpaper";
-  case ITEM_SERVER_IP:
-    return "Server IP";
-  case ITEM_LANGUAGE:
-    return "Language";
-  case ITEM_SEPARATOR:
-    return "";
-  case ITEM_SAVE:
-    return "Save & Back";
-  default:
-    return "";
+    case ITEM_MODE:
+      return "Mode";
+    case ITEM_COLOR:
+      return "Color";
+    case ITEM_HUE:
+      return "Hue";
+    case ITEM_SATURATION:
+      return "Saturation";
+    case ITEM_BRIGHTNESS:
+      return "Brightness";
+    case ITEM_L_BUTTON:
+      return "L Button";
+    case ITEM_R_BUTTON:
+      return "R Button";
+    case ITEM_DPAD_SPEED:
+      return "D-Pad Speed";
+    case ITEM_AUDIO_PATH:
+      return "Playback Mode";
+    case ITEM_WALLPAPER:
+      return "Wallpaper";
+    case ITEM_SERVER_IP:
+      return "Server IP";
+    case ITEM_LANGUAGE:
+      return "Language";
+    case ITEM_SEPARATOR:
+      return "";
+    case ITEM_SAVE:
+      return "Save & Back";
+    default:
+      return "";
   }
 }
 
 std::string SettingsScreen::get_item_value(int index) const {
   switch (index) {
-  case ITEM_MODE:
-    return editing_config_.mode == THEME_DARK ? "Dark" : "Light";
-  case ITEM_COLOR:
-    return editing_config_.palette_index >= 0 ? "Palette" : "Custom";
-  case ITEM_HUE: {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%d", editing_config_.accent_hue);
-    return std::string(buf);
-  }
-  case ITEM_SATURATION: {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%.2f", editing_config_.accent_saturation);
-    return std::string(buf);
-  }
-  case ITEM_BRIGHTNESS: {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%.2f", editing_config_.accent_brightness);
-    return std::string(buf);
-  }
-  case ITEM_L_BUTTON:
-    return lr_action_name(editing_config_.l_action);
-  case ITEM_R_BUTTON:
-    return lr_action_name(editing_config_.r_action);
-  case ITEM_DPAD_SPEED: {
-    char buf[4];
-    snprintf(buf, sizeof(buf), "%d", editing_config_.dpad_speed);
-    return std::string(buf);
-  }
-  case ITEM_WALLPAPER:
-    return editing_config_.wallpaper_file.empty()
-               ? "None"
-               : editing_config_.wallpaper_file;
-  case ITEM_SERVER_IP:
-    return editing_config_.server_ip.empty() ? "Not Set"
-                                             : editing_config_.server_ip;
-  case ITEM_LANGUAGE:
-    return editing_config_.language == "ja" ? "JA" : "EN";
-  default:
-    return "";
+    case ITEM_MODE:
+      return editing_config_.mode == THEME_DARK ? "Dark" : "Light";
+    case ITEM_COLOR:
+      return editing_config_.palette_index >= 0 ? "Palette" : "Custom";
+    case ITEM_HUE: {
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%d", editing_config_.accent_hue);
+      return std::string(buf);
+    }
+    case ITEM_SATURATION: {
+      char buf[8];
+      snprintf(buf, sizeof(buf), "%.2f", editing_config_.accent_saturation);
+      return std::string(buf);
+    }
+    case ITEM_BRIGHTNESS: {
+      char buf[8];
+      snprintf(buf, sizeof(buf), "%.2f", editing_config_.accent_brightness);
+      return std::string(buf);
+    }
+    case ITEM_L_BUTTON:
+      return lr_action_name(editing_config_.l_action);
+    case ITEM_R_BUTTON:
+      return lr_action_name(editing_config_.r_action);
+    case ITEM_DPAD_SPEED: {
+      char buf[4];
+      snprintf(buf, sizeof(buf), "%d", editing_config_.dpad_speed);
+      return std::string(buf);
+    }
+    case ITEM_AUDIO_PATH:
+      return audio_path_display_name(editing_config_.audio_path);
+    case ITEM_WALLPAPER:
+      return editing_config_.wallpaper_file.empty()
+                 ? "None"
+                 : editing_config_.wallpaper_file;
+    case ITEM_SERVER_IP:
+      return editing_config_.server_ip.empty() ? "Not Set"
+                                               : editing_config_.server_ip;
+    case ITEM_LANGUAGE:
+      return editing_config_.language == "ja" ? "JA" : "EN";
+    default:
+      return "";
   }
 }
 
-std::string SettingsScreen::get_item_description(int index) const {
+std::string SettingsScreen::get_item_description(int index) {
   switch (index) {
-  case ITEM_MODE:
-    return "Switch between Light and Dark mode.\nAffects background, text, and "
-           "popup colors.";
-  case ITEM_COLOR:
-    return "Press A to open the color palette.\nSelect a preset color for your "
-           "theme.";
-  case ITEM_HUE:
-    return "Fine-tune the accent color.\nUse Left/Right to adjust hue (0-360).";
-  case ITEM_SATURATION:
-    return "Adjust color saturation.\nLeft: muted/pastel  Right: vivid.";
-  case ITEM_BRIGHTNESS:
-    return "Adjust color brightness.\nLeft: dark  Right: bright.";
-  case ITEM_L_BUTTON:
-    return "Set L button behavior.\nDisabled / Skip Back / Skip Fwd / "
-           "Play-Pause";
-  case ITEM_R_BUTTON:
-    return "Set R button behavior.\nDisabled / Skip Back / Skip Fwd / "
-           "Play-Pause";
-  case ITEM_DPAD_SPEED:
-    return "D-pad repeat speed when held.\n1=Slow  5=Normal  10=Fast";
-  case ITEM_WALLPAPER:
-    return "Set a PNG wallpaper for the top screen.\nPlace files in wallpaper/ "
-           "folder on SD.";
-  case ITEM_SERVER_IP:
-    return "Server IP address and port.\nPress A to change.";
-  case ITEM_LANGUAGE:
-    return "Metadata language for search results.\nEN=English  JA=Japanese";
-  case ITEM_SAVE:
-    return "Save settings to SD card and return\nto the home screen.";
-  default:
-    return "";
+    case ITEM_MODE:
+      return "Switch between Light and Dark mode.\nAffects background, text, "
+             "and "
+             "popup colors.";
+    case ITEM_COLOR:
+      return "Press A to open the color palette.\nSelect a preset color for "
+             "your "
+             "theme.";
+    case ITEM_HUE:
+      return "Fine-tune the accent color.\nUse Left/Right to adjust hue "
+             "(0-360).";
+    case ITEM_SATURATION:
+      return "Adjust color saturation.\nLeft: muted/pastel  Right: vivid.";
+    case ITEM_BRIGHTNESS:
+      return "Adjust color brightness.\nLeft: dark  Right: bright.";
+    case ITEM_L_BUTTON:
+      return "Set L button behavior.\nDisabled / Skip Back / Skip Fwd / "
+             "Play-Pause";
+    case ITEM_R_BUTTON:
+      return "Set R button behavior.\nDisabled / Skip Back / Skip Fwd / "
+             "Play-Pause";
+    case ITEM_DPAD_SPEED:
+      return "D-pad repeat speed when held.\n1=Slow  5=Normal  10=Fast";
+    case ITEM_AUDIO_PATH:
+      return "Choose the playback route.\nProxy is stable; Direct WebM is for "
+             "seek testing.";
+    case ITEM_WALLPAPER:
+      return "Set a PNG wallpaper for the top screen.\nPlace files in "
+             "wallpaper/ "
+             "folder on SD.";
+    case ITEM_SERVER_IP:
+      return "Server IP address and port.\nPress A to change.";
+    case ITEM_LANGUAGE:
+      return "Metadata language for search results.\nEN=English  JA=Japanese";
+    case ITEM_SAVE:
+      return "Save settings to SD card and return\nto the home screen.";
+    default:
+      return "";
   }
 }
 
@@ -193,13 +204,11 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
 
     if (kRepeat & KEY_DUP) {
       wallpaper_selected_--;
-      if (wallpaper_selected_ < 0)
-        wallpaper_selected_ = item_count - 1;
+      if (wallpaper_selected_ < 0) wallpaper_selected_ = item_count - 1;
     }
     if (kRepeat & KEY_DDOWN) {
       wallpaper_selected_++;
-      if (wallpaper_selected_ >= item_count)
-        wallpaper_selected_ = 0;
+      if (wallpaper_selected_ >= item_count) wallpaper_selected_ = 0;
     }
 
     // Touch selection
@@ -215,8 +224,7 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
         start_idx = wallpaper_selected_ - max_visible / 2;
       if (start_idx + max_visible > item_count)
         start_idx = item_count - max_visible;
-      if (start_idx < 0)
-        start_idx = 0;
+      if (start_idx < 0) start_idx = 0;
       int tapped = (int)((touch.py - list_y) / item_h) + start_idx;
       if (tapped >= 0 && tapped < item_count) {
         wallpaper_selected_ = tapped;
@@ -354,7 +362,6 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
     touchPosition touch;
     hidTouchRead(&touch);
 
-    float bar_x = 100, bar_w = 180;
     float item_y = 8.0f + ITEM_DPAD_SPEED * 28.0f - scroll_offset_;
 
     // Tap outside slider -> exit edit mode
@@ -368,23 +375,21 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
     }
     // Snap to touch position
     if ((kDown & KEY_TOUCH) || (kHeld & KEY_TOUCH)) {
+      const float bar_x = 100.0f;
+      const float bar_w = 180.0f;
       if (touch.px >= (int)bar_x && touch.px <= (int)(bar_x + bar_w) &&
           touch.py >= (int)(item_y + 7) && touch.py <= (int)(item_y + 21)) {
         float ratio = (float)(touch.px - (int)bar_x) / bar_w;
         int step = (int)(ratio * 9.0f + 0.5f) + 1; // Round to 1-10
-        if (step > 10)
-          step = 10;
         editing_config_.dpad_speed = step;
       }
     }
     // D-pad left/right +/-1
     if (kRepeat & KEY_DRIGHT) {
-      if (editing_config_.dpad_speed < 10)
-        editing_config_.dpad_speed++;
+      if (editing_config_.dpad_speed < 10) editing_config_.dpad_speed++;
     }
     if (kRepeat & KEY_DLEFT) {
-      if (editing_config_.dpad_speed > 1)
-        editing_config_.dpad_speed--;
+      if (editing_config_.dpad_speed > 1) editing_config_.dpad_speed--;
     }
     if (kDown & KEY_A) {
       in_edit_mode_ = false;
@@ -419,10 +424,8 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
           touch.py >= (int)(item_y + 7) && touch.py <= (int)(item_y + 21)) {
         editing_config_.accent_hue =
             (int)(((float)(touch.px - (int)bar_x) / bar_w) * 360.0f);
-        if (editing_config_.accent_hue > 360)
-          editing_config_.accent_hue = 360;
-        if (editing_config_.accent_hue < 0)
-          editing_config_.accent_hue = 0;
+        if (editing_config_.accent_hue > 360) editing_config_.accent_hue = 360;
+        if (editing_config_.accent_hue < 0) editing_config_.accent_hue = 0;
         editing_config_.palette_index = -1;
         apply_preview();
       }
@@ -476,10 +479,8 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
       if (touch.px >= (int)bar_x && touch.px <= (int)(bar_x + bar_w) &&
           touch.py >= (int)(item_y + 7) && touch.py <= (int)(item_y + 21)) {
         *target = (float)(touch.px - (int)bar_x) / bar_w;
-        if (*target > 1.0f)
-          *target = 1.0f;
-        if (*target < 0.0f)
-          *target = 0.0f;
+        if (*target > 1.0f) *target = 1.0f;
+        if (*target < 0.0f) *target = 0.0f;
         editing_config_.palette_index = -1;
         apply_preview();
       }
@@ -487,15 +488,13 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
     // D-pad fine-tune
     if (kRepeat & KEY_DRIGHT) {
       *target += 0.05f;
-      if (*target > 1.0f)
-        *target = 1.0f;
+      if (*target > 1.0f) *target = 1.0f;
       editing_config_.palette_index = -1;
       apply_preview();
     }
     if (kRepeat & KEY_DLEFT) {
       *target -= 0.05f;
-      if (*target < 0.0f)
-        *target = 0.0f;
+      if (*target < 0.0f) *target = 0.0f;
       editing_config_.palette_index = -1;
       apply_preview();
     }
@@ -522,12 +521,10 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
       int delta_y = ctx.touch_state.update(touch.px, touch.py);
       if (ctx.touch_state.is_dragging) {
         scroll_offset_ += delta_y;
-        if (scroll_offset_ < 0.0f)
-          scroll_offset_ = 0.0f;
+        if (scroll_offset_ < 0.0f) scroll_offset_ = 0.0f;
         // Items 0..ITEM_SEPARATOR scroll into SAVE_Y; Save is pinned below
         float max_scroll = 8.0f + (ITEM_SAVE - 1) * 28.0f + 20.0f - SAVE_Y;
-        if (scroll_offset_ > max_scroll)
-          scroll_offset_ = max_scroll;
+        if (scroll_offset_ > max_scroll) scroll_offset_ = max_scroll;
         last_tapped_item_ = -1; // Reset two-tap during drag
       }
     }
@@ -562,7 +559,6 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
         // Settings item tap (two-tap: 1st=select, 2nd=execute)
         float y = 8 - scroll_offset_;
         float item_h = 28;
-        bool hit = false;
         for (int i = 0; i < ITEM_SAVE;
              i++) { // Save is pinned; loop excludes it
           if (i == ITEM_SEPARATOR) {
@@ -570,7 +566,6 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
             continue;
           }
           if (tap_y >= (int)y && tap_y < (int)(y + item_h)) {
-            hit = true;
             if (i == selected_item_ && i == last_tapped_item_) {
               // 2nd tap: execute
               last_tapped_item_ = -1;
@@ -592,6 +587,11 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
                     (LRAction)(((int)editing_config_.r_action + 1) % 4);
               } else if (i == ITEM_DPAD_SPEED) {
                 in_edit_mode_ = true;
+              } else if (i == ITEM_AUDIO_PATH) {
+                editing_config_.audio_path =
+                    audio_path_uses_webm_direct(editing_config_.audio_path)
+                        ? AudioPathConfig::PROXY_OGG_OPUS
+                        : AudioPathConfig::DIRECT_WEBM_OPUS;
               } else if (i == ITEM_WALLPAPER) {
                 wallpaper_files_ = list_wallpapers();
                 wallpaper_selected_ = 0;
@@ -609,8 +609,7 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
           }
           y += item_h;
         }
-        if (!hit)
-          last_tapped_item_ = -1; // Empty area: deselect
+        last_tapped_item_ = -1; // Empty area: deselect
       }
     }
   }
@@ -618,18 +617,14 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
   // ========== D-pad navigation ==========
   if (kRepeat & KEY_DUP) {
     selected_item_--;
-    if (selected_item_ == ITEM_SEPARATOR)
-      selected_item_--;
-    if (selected_item_ < 0)
-      selected_item_ = ITEM_COUNT - 1;
+    if (selected_item_ == ITEM_SEPARATOR) selected_item_--;
+    if (selected_item_ < 0) selected_item_ = ITEM_COUNT - 1;
     last_tapped_item_ = -1;
   }
   if (kRepeat & KEY_DDOWN) {
     selected_item_++;
-    if (selected_item_ == ITEM_SEPARATOR)
-      selected_item_++;
-    if (selected_item_ >= ITEM_COUNT)
-      selected_item_ = 0;
+    if (selected_item_ == ITEM_SEPARATOR) selected_item_++;
+    if (selected_item_ >= ITEM_COUNT) selected_item_ = 0;
     last_tapped_item_ = -1;
   }
 
@@ -645,86 +640,88 @@ std::string SettingsScreen::update(AppContext &ctx, u32 kDown, u32 kHeld,
     } else if (item_y + 28.0f > scroll_offset_ + SAVE_Y) {
       scroll_offset_ = item_y + 28.0f - SAVE_Y;
     }
-    if (scroll_offset_ < 0.0f)
-      scroll_offset_ = 0.0f;
+    if (scroll_offset_ < 0.0f) scroll_offset_ = 0.0f;
   }
 
   // KEY_A: direct action (MODE/L/R toggle, HUE/COLOR enter edit mode)
   if (kDown & KEY_A) {
     switch (selected_item_) {
-    case ITEM_MODE:
-      editing_config_.mode =
-          (editing_config_.mode == THEME_LIGHT) ? THEME_DARK : THEME_LIGHT;
-      apply_preview();
-      break;
-    case ITEM_HUE:
-    case ITEM_SATURATION:
-    case ITEM_BRIGHTNESS:
-      in_edit_mode_ = true;
-      break;
-    case ITEM_L_BUTTON:
-      editing_config_.l_action =
-          (LRAction)(((int)editing_config_.l_action + 1) % 4);
-      break;
-    case ITEM_R_BUTTON:
-      editing_config_.r_action =
-          (LRAction)(((int)editing_config_.r_action + 1) % 4);
-      break;
-    case ITEM_COLOR:
-      in_palette_mode_ = true;
-      break;
-    case ITEM_DPAD_SPEED:
-      in_edit_mode_ = true;
-      break;
-    case ITEM_WALLPAPER:
-      wallpaper_files_ = list_wallpapers();
-      wallpaper_selected_ = 0;
-      in_wallpaper_mode_ = true;
-      break;
-    case ITEM_LANGUAGE:
-      editing_config_.language =
-          (editing_config_.language == "en") ? "ja" : "en";
-      break;
-    case ITEM_SERVER_IP: {
-      std::string current = editing_config_.server_ip;
-      bool accepted = false;
-      while (!accepted) {
-        SwkbdState swkbd;
-        char buf[64] = {0};
-        swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 1, 63);
-        swkbdSetHintText(&swkbd, "IP:Port");
-        if (!current.empty())
-          swkbdSetInitialText(&swkbd, current.c_str());
-        SwkbdButton button = swkbdInputText(&swkbd, buf, sizeof(buf));
-        if (button != SWKBD_BUTTON_CONFIRM || strlen(buf) == 0)
-          break;
-        std::string input(buf);
-        // Simple validation: IP with '.' + ':' + digits-only port
-        size_t colon = input.rfind(':');
-        if (colon != std::string::npos && colon > 0 &&
-            colon < input.size() - 1 &&
-            input.substr(0, colon).find('.') != std::string::npos) {
-          bool port_ok = true;
-          for (size_t i = colon + 1; i < input.size(); ++i)
-            if (input[i] < '0' || input[i] > '9') {
-              port_ok = false;
-              break;
+      case ITEM_MODE:
+        editing_config_.mode =
+            (editing_config_.mode == THEME_LIGHT) ? THEME_DARK : THEME_LIGHT;
+        apply_preview();
+        break;
+      case ITEM_HUE:
+      case ITEM_SATURATION:
+      case ITEM_BRIGHTNESS:
+        in_edit_mode_ = true;
+        break;
+      case ITEM_L_BUTTON:
+        editing_config_.l_action =
+            (LRAction)(((int)editing_config_.l_action + 1) % 4);
+        break;
+      case ITEM_R_BUTTON:
+        editing_config_.r_action =
+            (LRAction)(((int)editing_config_.r_action + 1) % 4);
+        break;
+      case ITEM_COLOR:
+        in_palette_mode_ = true;
+        break;
+      case ITEM_DPAD_SPEED:
+        in_edit_mode_ = true;
+        break;
+      case ITEM_AUDIO_PATH:
+        editing_config_.audio_path =
+            audio_path_uses_webm_direct(editing_config_.audio_path)
+                ? AudioPathConfig::PROXY_OGG_OPUS
+                : AudioPathConfig::DIRECT_WEBM_OPUS;
+        break;
+      case ITEM_WALLPAPER:
+        wallpaper_files_ = list_wallpapers();
+        wallpaper_selected_ = 0;
+        in_wallpaper_mode_ = true;
+        break;
+      case ITEM_LANGUAGE:
+        editing_config_.language =
+            (editing_config_.language == "en") ? "ja" : "en";
+        break;
+      case ITEM_SERVER_IP: {
+        std::string current = editing_config_.server_ip;
+        bool accepted = false;
+        while (!accepted) {
+          SwkbdState swkbd;
+          char buf[64] = {0};
+          swkbdInit(&swkbd, SWKBD_TYPE_NORMAL, 1, 63);
+          swkbdSetHintText(&swkbd, "IP:Port");
+          if (!current.empty()) swkbdSetInitialText(&swkbd, current.c_str());
+          SwkbdButton button = swkbdInputText(&swkbd, buf, sizeof(buf));
+          if (button != SWKBD_BUTTON_CONFIRM || strlen(buf) == 0) break;
+          std::string input(buf);
+          // Simple validation: IP with '.' + ':' + digits-only port
+          size_t colon = input.rfind(':');
+          if (colon != std::string::npos && colon > 0 &&
+              colon < input.size() - 1 &&
+              input.substr(0, colon).find('.') != std::string::npos) {
+            bool port_ok = true;
+            for (size_t i = colon + 1; i < input.size(); ++i)
+              if (input[i] < '0' || input[i] > '9') {
+                port_ok = false;
+                break;
+              }
+            if (port_ok) {
+              editing_config_.server_ip = input;
+              accepted = true;
             }
-          if (port_ok) {
-            editing_config_.server_ip = input;
-            accepted = true;
           }
+          if (!accepted) current = input; // Re-display
         }
-        if (!accepted)
-          current = input; // Re-display
+        break;
       }
-      break;
-    }
-    case ITEM_SAVE:
-      ctx.config = editing_config_;
-      ConfigManager::save(editing_config_);
-      apply_theme(ctx.config, m_colors);
-      return "trigger_home";
+      case ITEM_SAVE:
+        ctx.config = editing_config_;
+        ConfigManager::save(editing_config_);
+        apply_theme(ctx.config, m_colors);
+        return "trigger_home";
     }
   }
 
@@ -790,8 +787,7 @@ void SettingsScreen::draw_top(const RenderContext &ctx, UIManager &ui_mgr) {
         C2D_DrawText(&text, C2D_WithColor, 8, dy, 0, 0.5f, 0.5f,
                      preview_colors_.text_body);
         dy += 16;
-        if (nl == std::string::npos)
-          break;
+        if (nl == std::string::npos) break;
         pos = nl + 1;
       }
     }
@@ -847,8 +843,7 @@ void SettingsScreen::draw_bottom(const RenderContext &ctx, UIManager &ui_mgr) {
       start_idx = wallpaper_selected_ - max_visible / 2;
     if (start_idx + max_visible > item_count)
       start_idx = item_count - max_visible;
-    if (start_idx < 0)
-      start_idx = 0;
+    if (start_idx < 0) start_idx = 0;
 
     for (int i = start_idx; i < item_count && i < start_idx + max_visible;
          i++) {
@@ -1096,14 +1091,13 @@ void SettingsScreen::draw_bottom(const RenderContext &ctx, UIManager &ui_mgr) {
   }
 }
 
-std::vector<std::string> SettingsScreen::list_wallpapers() const {
+std::vector<std::string> SettingsScreen::list_wallpapers() {
   std::vector<std::string> files;
   mkdir("sdmc:/3ds/StreaMu", 0777);
   mkdir(WALLPAPER_DIR, 0777);
   DIR *dir = opendir(WALLPAPER_DIR);
-  if (!dir)
-    return files;
-  struct dirent *ent;
+  if (!dir) return files;
+  const struct dirent *ent;
   while ((ent = readdir(dir)) != nullptr) {
     std::string name = ent->d_name;
     if (name.size() > 4) {

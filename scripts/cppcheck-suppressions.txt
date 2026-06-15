@@ -1,0 +1,13 @@
+*:*\devkitPro\libctru\include\*
+*:*\devkitPro\portlibs\3ds\include\*
+unusedStructMember:include\network\youtube_api.h
+unusedStructMember:source\app_context.h
+unusedStructMember:source\audio\opus_poc_player.h
+unusedStructMember:source\audio\webm_opus_streaming_decoder.h
+unusedStructMember:source\audio\webm_seek_runtime.h
+unusedStructMember:source\audio\webm_seek_types.h
+unusedStructMember:source\ui\screens\settings_screen.h
+variableScope:source\ui\play_bar.h
+duplicateCondition:source\main.cpp
+constParameterCallback:source\network\youtube_api.cpp
+knownConditionTrueFalse:source\audio\webm_opus_streaming_decoder.cpp

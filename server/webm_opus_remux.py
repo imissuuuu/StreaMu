@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import struct
+from dataclasses import dataclass
 from typing import Iterable, Iterator
-
 
 BytesLike = bytes | bytearray | memoryview
 
@@ -95,8 +94,7 @@ class WebmOpusRemuxError(ValueError):
     pass
 
 
-def _read_vint(data: BytesLike, offset: int, max_bytes: int,
-               mask_marker: bool) -> tuple[int, int]:
+def _read_vint(data: BytesLike, offset: int, max_bytes: int, mask_marker: bool) -> tuple[int, int]:
     if offset >= len(data):
         raise WebmOpusRemuxError("truncated EBML vint")
     first = data[offset]
@@ -116,8 +114,9 @@ def _read_vint(data: BytesLike, offset: int, max_bytes: int,
     return value, width
 
 
-def _try_read_vint(data: BytesLike, offset: int, max_bytes: int,
-                   mask_marker: bool) -> tuple[int, int] | None:
+def _try_read_vint(
+    data: BytesLike, offset: int, max_bytes: int, mask_marker: bool
+) -> tuple[int, int] | None:
     if offset >= len(data):
         return None
     first = data[offset]
@@ -137,17 +136,12 @@ def _try_read_vint(data: BytesLike, offset: int, max_bytes: int,
     return value, width
 
 
-def _try_read_element_header(data: BytesLike,
-                             offset: int) -> _EbmlElementHeader | None:
-    element_id_with_len = _try_read_vint(
-        data, offset, MAX_EBML_ID_BYTES, False
-    )
+def _try_read_element_header(data: BytesLike, offset: int) -> _EbmlElementHeader | None:
+    element_id_with_len = _try_read_vint(data, offset, MAX_EBML_ID_BYTES, False)
     if element_id_with_len is None:
         return None
     element_id, id_len = element_id_with_len
-    size_with_len = _try_read_vint(
-        data, offset + id_len, MAX_EBML_SIZE_BYTES, True
-    )
+    size_with_len = _try_read_vint(data, offset + id_len, MAX_EBML_SIZE_BYTES, True)
     if size_with_len is None:
         return None
     size, size_len = size_with_len
@@ -159,9 +153,7 @@ def _iter_elements(data: BytesLike, start: int, end: int) -> Iterator[EbmlElemen
     offset = start
     while offset < end:
         element_id, id_len = _read_vint(data, offset, MAX_EBML_ID_BYTES, False)
-        size, size_len = _read_vint(
-            data, offset + id_len, MAX_EBML_SIZE_BYTES, True
-        )
+        size, size_len = _read_vint(data, offset + id_len, MAX_EBML_SIZE_BYTES, True)
         data_start = offset + id_len + size_len
         data_end = data_start + size
         if data_end > end:
@@ -201,10 +193,9 @@ def _read_ascii(payload: BytesLike) -> str:
         raise WebmOpusRemuxError("invalid ASCII string") from exc
 
 
-def _parse_audio(data: BytesLike, start: int, end: int,
-                 track: _TrackCandidate) -> None:
+def _parse_audio(data: BytesLike, start: int, end: int, track: _TrackCandidate) -> None:
     for element in _iter_elements(data, start, end):
-        payload = data[element.data_start:element.data_end]
+        payload = data[element.data_start : element.data_end]
         if element.element_id == ID_SAMPLING_FREQUENCY:
             track.sample_rate = _read_float(payload)
         elif element.element_id == ID_CHANNELS:
@@ -214,7 +205,7 @@ def _parse_audio(data: BytesLike, start: int, end: int,
 def _parse_track_entry(data: BytesLike, start: int, end: int) -> _TrackCandidate:
     track = _TrackCandidate()
     for element in _iter_elements(data, start, end):
-        payload = data[element.data_start:element.data_end]
+        payload = data[element.data_start : element.data_end]
         if element.element_id == ID_TRACK_NUMBER:
             track.track_number = _read_uint(payload)
         elif element.element_id == ID_TRACK_TYPE:
@@ -232,8 +223,7 @@ def _parse_track_entry(data: BytesLike, start: int, end: int) -> _TrackCandidate
     return track
 
 
-def _find_opus_track(data: BytesLike, start: int,
-                     end: int) -> _TrackCandidate:
+def _find_opus_track(data: BytesLike, start: int, end: int) -> _TrackCandidate:
     candidates: list[_TrackCandidate] = []
     for element in _iter_elements(data, start, end):
         if element.element_id != ID_TRACK_ENTRY:
@@ -254,29 +244,27 @@ def _find_opus_track(data: BytesLike, start: int,
     return track
 
 
-def _parse_simple_block(payload: BytesLike,
-                        expected_track: int) -> tuple[int, bytes]:
+def _parse_simple_block(payload: BytesLike, expected_track: int) -> tuple[int, bytes]:
     track_number, track_len = _read_vint(payload, 0, MAX_EBML_SIZE_BYTES, True)
     if track_number != expected_track:
         raise WebmOpusRemuxError("unexpected track in SimpleBlock")
     if track_len + 3 > len(payload):
         raise WebmOpusRemuxError("truncated SimpleBlock")
-    rel_time = int.from_bytes(
-        payload[track_len:track_len + 2], "big", signed=True
-    )
+    rel_time = int.from_bytes(payload[track_len : track_len + 2], "big", signed=True)
     flags = payload[track_len + 2]
     if flags & 0x06:
         raise WebmOpusRemuxError("laced SimpleBlock is unsupported")
-    return rel_time, bytes(payload[track_len + 3:])
+    return rel_time, bytes(payload[track_len + 3 :])
 
 
-def _parse_block_group(data: BytesLike, start: int, end: int,
-                       expected_track: int) -> tuple[int, bytes, int]:
+def _parse_block_group(
+    data: BytesLike, start: int, end: int, expected_track: int
+) -> tuple[int, bytes, int]:
     block_time = 0
     block_data = b""
     discard_padding_ns = 0
     for element in _iter_elements(data, start, end):
-        payload = data[element.data_start:element.data_end]
+        payload = data[element.data_start : element.data_end]
         if element.element_id == ID_BLOCK:
             block_time, block_data = _parse_simple_block(payload, expected_track)
         elif element.element_id == ID_DISCARD_PADDING:
@@ -288,12 +276,13 @@ def _parse_block_group(data: BytesLike, start: int, end: int,
     return block_time, block_data, discard_padding_ns
 
 
-def _parse_cluster(data: BytesLike, start: int, end: int,
-                   expected_track: int) -> list[WebmOpusPacket]:
+def _parse_cluster(
+    data: BytesLike, start: int, end: int, expected_track: int
+) -> list[WebmOpusPacket]:
     cluster_time_ms = 0
     packets: list[WebmOpusPacket] = []
     for element in _iter_elements(data, start, end):
-        payload = data[element.data_start:element.data_end]
+        payload = data[element.data_start : element.data_end]
         if element.element_id == ID_TIMESTAMP:
             cluster_time_ms = _read_uint(payload)
         elif element.element_id == ID_SIMPLE_BLOCK:
@@ -330,7 +319,7 @@ def extract_webm_opus(data: bytes) -> WebmOpusTrack:
         if element.element_id == ID_INFO:
             for child in _iter_elements(data, element.data_start, element.data_end):
                 if child.element_id == ID_TIMECODE_SCALE:
-                    payload = data[child.data_start:child.data_end]
+                    payload = data[child.data_start : child.data_end]
                     timecode_scale_ns = _read_uint(payload)
         elif element.element_id == ID_TRACKS:
             opus_track = _find_opus_track(data, element.data_start, element.data_end)
@@ -338,10 +327,7 @@ def extract_webm_opus(data: bytes) -> WebmOpusTrack:
             if opus_track is None:
                 raise WebmOpusRemuxError("Cluster before Tracks")
             packets.extend(
-                _parse_cluster(
-                    data, element.data_start, element.data_end,
-                    opus_track.track_number
-                )
+                _parse_cluster(data, element.data_start, element.data_end, opus_track.track_number)
             )
 
     if opus_track is None:
@@ -404,9 +390,7 @@ def _ogg_crc_entry(index: int) -> int:
     return value
 
 
-_OGG_CRC_TABLE: tuple[int, ...] = tuple(
-    _ogg_crc_entry(index) for index in range(256)
-)
+_OGG_CRC_TABLE: tuple[int, ...] = tuple(_ogg_crc_entry(index) for index in range(256))
 
 
 def _ogg_crc(data: bytes) -> int:
@@ -423,8 +407,7 @@ def _packet_segments(packet: bytes) -> bytes:
     return bytes(segments)
 
 
-def _ogg_page_from_packets(packets: list[_OggPagePacket], header_type: int,
-                           sequence: int) -> bytes:
+def _ogg_page_from_packets(packets: list[_OggPagePacket], header_type: int, sequence: int) -> bytes:
     if not packets:
         raise WebmOpusRemuxError("cannot write empty Ogg page")
     segments = bytearray()
@@ -455,11 +438,8 @@ def _ogg_page_from_packets(packets: list[_OggPagePacket], header_type: int,
     return page[:22] + crc.to_bytes(4, "little") + page[26:]
 
 
-def _ogg_page(packet: bytes, header_type: int, granule_position: int,
-              sequence: int) -> bytes:
-    return _ogg_page_from_packets(
-        [_OggPagePacket(packet, granule_position)], header_type, sequence
-    )
+def _ogg_page(packet: bytes, header_type: int, granule_position: int, sequence: int) -> bytes:
+    return _ogg_page_from_packets([_OggPagePacket(packet, granule_position)], header_type, sequence)
 
 
 def _opus_tags(vendor: bytes) -> bytes:
@@ -470,8 +450,7 @@ def _packet_segment_count(packet: bytes) -> int:
     return len(_packet_segments(packet))
 
 
-def build_ogg_opus(track: WebmOpusTrack,
-                   vendor: bytes = b"StreaMu") -> bytes:
+def build_ogg_opus(track: WebmOpusTrack, vendor: bytes = b"StreaMu") -> bytes:
     if not track.codec_private.startswith(b"OpusHead"):
         raise WebmOpusRemuxError("invalid OpusHead")
 
@@ -498,17 +477,12 @@ def build_ogg_opus(track: WebmOpusTrack,
         audio_page_bytes = 0
         audio_page_segments = 0
 
-    def append_audio_packet(packet_data: bytes,
-                            packet_granule_position: int) -> None:
+    def append_audio_packet(packet_data: bytes, packet_granule_position: int) -> None:
         nonlocal audio_page_bytes, audio_page_segments
         segment_count = _packet_segment_count(packet_data)
-        if audio_page_packets and (
-            audio_page_segments + segment_count > MAX_OGG_PAGE_SEGMENTS
-        ):
+        if audio_page_packets and (audio_page_segments + segment_count > MAX_OGG_PAGE_SEGMENTS):
             flush_audio_page()
-        audio_page_packets.append(
-            _OggPagePacket(packet_data, packet_granule_position)
-        )
+        audio_page_packets.append(_OggPagePacket(packet_data, packet_granule_position))
         audio_page_bytes += len(packet_data)
         audio_page_segments += segment_count
         if audio_page_bytes >= OGG_AUDIO_PAGE_TARGET_BYTES:
@@ -517,9 +491,7 @@ def build_ogg_opus(track: WebmOpusTrack,
     for packet in track.packets:
         granule_position += opus_packet_duration_samples(packet.data)
         if pending_packet is not None:
-            append_audio_packet(
-                pending_packet.data, pending_packet.granule_position
-            )
+            append_audio_packet(pending_packet.data, pending_packet.granule_position)
         pending_packet = _OggPagePacket(packet.data, granule_position)
 
     flush_audio_page()
@@ -577,9 +549,7 @@ def iter_ogg_opus_pages_from_webm_chunks(
     def append_audio_packet(packet: _OggPagePacket) -> Iterator[bytes]:
         nonlocal audio_page_bytes, audio_page_segments
         segment_count = _packet_segment_count(packet.data)
-        if audio_page_packets and (
-            audio_page_segments + segment_count > MAX_OGG_PAGE_SEGMENTS
-        ):
+        if audio_page_packets and (audio_page_segments + segment_count > MAX_OGG_PAGE_SEGMENTS):
             for page in flush_audio_page():
                 yield page
         audio_page_packets.append(packet)
@@ -629,15 +599,13 @@ def iter_ogg_opus_pages_from_webm_chunks(
                 if child.data_end > len(buffer):
                     break
 
-                payload = buffer[child.data_start:child.data_end]
+                payload = buffer[child.data_start : child.data_end]
                 if child.element_id == ID_TIMESTAMP:
                     cluster_time_ms = _read_uint(payload)
                 elif child.element_id == ID_SIMPLE_BLOCK:
                     if opus_track is None:
                         raise WebmOpusRemuxError("Cluster before Tracks")
-                    rel_time, packet = _parse_simple_block(
-                        payload, opus_track.track_number
-                    )
+                    rel_time, packet = _parse_simple_block(payload, opus_track.track_number)
                     packet_time_ms = cluster_time_ms + rel_time
                     if not should_emit_packet(packet_time_ms):
                         cluster_child_offset = child.data_end
@@ -691,19 +659,15 @@ def iter_ogg_opus_pages_from_webm_chunks(
             if header.element_id == ID_INFO:
                 if header.data_end > len(buffer):
                     break
-                for child in _iter_elements(
-                    buffer, header.data_start, header.data_end
-                ):
-                    if child.element_id == ID_TIMECODE_SCALE:
-                        payload = buffer[child.data_start:child.data_end]
+                for info_child in _iter_elements(buffer, header.data_start, header.data_end):
+                    if info_child.element_id == ID_TIMECODE_SCALE:
+                        payload = buffer[info_child.data_start : info_child.data_end]
                         timecode_scale_ns = _read_uint(payload)
                 segment_offset = header.data_end
             elif header.element_id == ID_TRACKS:
                 if header.data_end > len(buffer):
                     break
-                opus_track = _find_opus_track(
-                    buffer, header.data_start, header.data_end
-                )
+                opus_track = _find_opus_track(buffer, header.data_start, header.data_end)
                 for page in emit_headers():
                     yield page
                 segment_offset = header.data_end

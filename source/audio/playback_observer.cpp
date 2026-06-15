@@ -11,8 +11,10 @@ namespace {
 struct PlaybackObserverSession {
   bool active = false;
   StreamContainerMode stream_mode = StreamContainerMode::ProxyOggOpus;
+  PlaybackSessionKind session_kind = PlaybackSessionKind::Startup;
   u64 start_ms = 0;
   char video_id[32] = {0};
+  PlaybackObserverEventTimes event_times = {};
 };
 
 struct PlaybackObserverState {
@@ -78,10 +80,13 @@ const char *playback_compare_mode_name(StreamContainerMode mode) {
 }
 
 void playback_observer_begin_session(StreamContainerMode stream_mode,
+                                     PlaybackSessionKind session_kind,
                                      const char *video_id) {
   LightLock_Lock(&g_state.lock);
   g_state.session.stream_mode = stream_mode;
+  g_state.session.session_kind = session_kind;
   g_state.session.start_ms = osGetTime();
+  g_state.session.event_times = PlaybackObserverEventTimes{};
   memset(g_state.session.video_id, 0, sizeof(g_state.session.video_id));
   if (video_id && video_id[0] != '\0') {
     snprintf(g_state.session.video_id, sizeof(g_state.session.video_id), "%s",
@@ -93,8 +98,40 @@ void playback_observer_begin_session(StreamContainerMode stream_mode,
 
 void playback_observer_log(PlaybackCompareEvent event,
                            const PlaybackCompareSnapshot &snapshot) {
+  PlaybackObserverSession session;
   LightLock_Lock(&g_state.lock);
-  const PlaybackObserverSession session = g_state.session;
+  session = g_state.session;
+  if (session.active) {
+    const u64 now_ms = osGetTime();
+    const u64 elapsed_ms = (now_ms >= g_state.session.start_ms)
+                               ? (now_ms - g_state.session.start_ms)
+                               : 0;
+    switch (event) {
+      case PlaybackCompareEvent::FirstByte:
+        g_state.session.event_times.first_byte_seen = true;
+        g_state.session.event_times.first_byte_ms = elapsed_ms;
+        break;
+      case PlaybackCompareEvent::DecoderOpenStart:
+        g_state.session.event_times.decoder_open_start_seen = true;
+        g_state.session.event_times.decoder_open_start_ms = elapsed_ms;
+        break;
+      case PlaybackCompareEvent::DecoderOpenOk:
+        g_state.session.event_times.decoder_open_ok_seen = true;
+        g_state.session.event_times.decoder_open_ok_ms = elapsed_ms;
+        break;
+      case PlaybackCompareEvent::FirstPcmQueued:
+        g_state.session.event_times.first_pcm_queued_seen = true;
+        g_state.session.event_times.first_pcm_queued_ms = elapsed_ms;
+        break;
+      case PlaybackCompareEvent::AudioAudible:
+        g_state.session.event_times.audio_audible_seen = true;
+        g_state.session.event_times.audio_audible_ms = elapsed_ms;
+        break;
+      default:
+        break;
+    }
+    session = g_state.session;
+  }
   LightLock_Unlock(&g_state.lock);
   if (!session.active) {
     return;
@@ -104,7 +141,8 @@ void playback_observer_log(PlaybackCompareEvent event,
     return;
   }
   const u64 now_ms = osGetTime();
-  const u64 elapsed_ms = (now_ms >= session.start_ms) ? (now_ms - session.start_ms) : 0;
+  const u64 elapsed_ms =
+      (now_ms >= session.start_ms) ? (now_ms - session.start_ms) : 0;
   fprintf(
       f,
       "[playback-compare] +%llums mode=%s event=%s video=%s old3ds=%d "
@@ -136,8 +174,29 @@ void playback_observer_log_simple(PlaybackCompareEvent event,
   playback_observer_log(event, snapshot);
 }
 
+bool playback_observer_get_event_times(PlaybackObserverEventTimes *out_times) {
+  if (!out_times) {
+    return false;
+  }
+  LightLock_Lock(&g_state.lock);
+  const bool active = g_state.session.active;
+  if (active) {
+    *out_times = g_state.session.event_times;
+  }
+  LightLock_Unlock(&g_state.lock);
+  return active;
+}
+
+PlaybackSessionKind playback_observer_current_session_kind() {
+  LightLock_Lock(&g_state.lock);
+  const PlaybackSessionKind session_kind = g_state.session.session_kind;
+  LightLock_Unlock(&g_state.lock);
+  return session_kind;
+}
+
 void playback_observer_end_session() {
   LightLock_Lock(&g_state.lock);
   g_state.session.active = false;
+  g_state.session.event_times = PlaybackObserverEventTimes{};
   LightLock_Unlock(&g_state.lock);
 }

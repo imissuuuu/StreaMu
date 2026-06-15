@@ -4,6 +4,7 @@
 #include <3ds.h>
 #include <curl/curl.h>
 #include <memory>
+#include <stdint.h>
 #include <sstream>
 #include <stdio.h>
 
@@ -88,7 +89,7 @@ static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
   size_t total_size = size * nmemb;
   size_t stream_buffer_size = 0;
   if (!YouTubeAPI::should_cancel && g_stream_buffer_ptr && total_size > 0) {
-    uint8_t *data = (uint8_t *)contents;
+    uint8_t *data = static_cast<uint8_t *>(contents);
     LightLock_Lock(&stream_lock);
     g_stream_buffer_ptr->insert(g_stream_buffer_ptr->end(), data,
                                 data + total_size);
@@ -138,8 +139,106 @@ static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
 
 static size_t WriteCallback(void *contents, size_t size, size_t nmemb,
                             void *userp) {
-  ((std::string *)userp)->append((char *)contents, size * nmemb);
+  static_cast<std::string *>(userp)->append(static_cast<char *>(contents),
+                                            size * nmemb);
   return size * nmemb;
+}
+
+static std::string parse_json_string_value(const std::string &json,
+                                           const char *key) {
+  if (!key) {
+    return "";
+  }
+  const std::string search = std::string("\"") + key + "\"";
+  size_t pos = json.find(search);
+  if (pos == std::string::npos) {
+    return "";
+  }
+  pos = json.find(':', pos);
+  if (pos == std::string::npos) {
+    return "";
+  }
+  ++pos;
+  while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' ||
+                               json[pos] == '\r' || json[pos] == '\n')) {
+    ++pos;
+  }
+  if (pos >= json.size() || json[pos] != '"') {
+    return "";
+  }
+  ++pos;
+
+  std::string out;
+  while (pos < json.size()) {
+    const char c = json[pos++];
+    if (c == '\\') {
+      if (pos >= json.size()) {
+        return "";
+      }
+      const char escaped = json[pos++];
+      switch (escaped) {
+        case '"':
+        case '\\':
+        case '/':
+          out.push_back(escaped);
+          break;
+        case 'b':
+          out.push_back('\b');
+          break;
+        case 'f':
+          out.push_back('\f');
+          break;
+        case 'n':
+          out.push_back('\n');
+          break;
+        case 'r':
+          out.push_back('\r');
+          break;
+        case 't':
+          out.push_back('\t');
+          break;
+        default:
+          return "";
+      }
+      continue;
+    }
+    if (c == '"') {
+      return out;
+    }
+    out.push_back(c);
+  }
+  return "";
+}
+
+static bool parse_json_u64_value(const std::string &json, const char *key,
+                                 uint64_t *out_value) {
+  if (!key || !out_value) {
+    return false;
+  }
+  const std::string search = std::string("\"") + key + "\"";
+  size_t pos = json.find(search);
+  if (pos == std::string::npos) {
+    return false;
+  }
+  pos = json.find(':', pos);
+  if (pos == std::string::npos) {
+    return false;
+  }
+  ++pos;
+  while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' ||
+                               json[pos] == '\r' || json[pos] == '\n')) {
+    ++pos;
+  }
+  if (pos >= json.size() || json[pos] < '0' || json[pos] > '9') {
+    return false;
+  }
+  uint64_t value = 0;
+  while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
+    value = (value * 10ULL) + static_cast<uint64_t>(json[pos] - '0');
+    ++pos;
+  }
+  *out_value = value;
+  return true;
 }
 
 void YouTubeAPI::init() {
@@ -224,10 +323,10 @@ bool YouTubeAPI::start_streaming(const std::string &url,
     LightLock_Lock(&stream_lock);
     final_buffer_size = g_stream_buffer_ptr ? g_stream_buffer_ptr->size() : 0;
     LightLock_Unlock(&stream_lock);
-    append_webm_perf_log(success ? "stream_complete"
-                                 : (cancelled ? "stream_cancelled"
-                                              : "stream_failed"),
-                         g_webm_perf_bytes, final_buffer_size, 0);
+    append_webm_perf_log(
+        success ? "stream_complete"
+                : (cancelled ? "stream_cancelled" : "stream_failed"),
+        g_webm_perf_bytes, final_buffer_size, 0);
   }
   if (!is_webm_opus) {
     LightLock_Lock(&stream_lock);
@@ -328,6 +427,60 @@ void YouTubeAPI::get_audio_stream_url(const std::string &video_id,
   get_audio_stream_url(video_id, seek_seconds,
                        StreamContainerMode::ProxyOggOpus, callback);
 }
+
+bool YouTubeAPI::get_webm_seek_stream_info(const std::string &video_id,
+                                           WebmSeekStreamInfo *out_info) {
+  if (!out_info || video_id.empty()) {
+    return false;
+  }
+  const std::string url = get_base_url() + "/stream_opus_info?i=" + video_id;
+  const std::string json = http_get(url, 15L);
+  if (json.empty()) {
+    return false;
+  }
+
+  WebmSeekStreamInfo parsed = {};
+  parsed.stream_url = parse_json_string_value(json, "stream_url");
+  parsed.has_filesize =
+      parse_json_u64_value(json, "filesize", &parsed.filesize);
+  parsed.has_duration_ms =
+      parse_json_u64_value(json, "duration_ms", &parsed.duration_ms);
+  if (parsed.stream_url.empty()) {
+    parsed.stream_url = build_webm_stream_url(video_id, 0);
+  }
+  *out_info = parsed;
+  return true;
+}
+
+std::string YouTubeAPI::build_webm_stream_url(const std::string &video_id,
+                                              uint64_t start_byte) {
+  std::string url = get_base_url() + "/stream_opus?i=" + video_id;
+  if (start_byte > 0) {
+    url += "&start=" + std::to_string(start_byte);
+  }
+  return url;
+}
+
+std::string
+YouTubeAPI::build_webm_seek_probe_base_url(const std::string &video_id) {
+  if (video_id.empty()) {
+    return "";
+  }
+  return get_base_url() + "/stream_opus_probe?i=" + video_id;
+}
+
+std::string YouTubeAPI::get_webm_seek_probe(const std::string &video_id,
+                                            uint64_t start_byte,
+                                            uint64_t probe_size_bytes) {
+  if (video_id.empty() || probe_size_bytes == 0) {
+    return "";
+  }
+  std::string url = build_webm_seek_probe_base_url(video_id) +
+                    "&start=" + std::to_string(start_byte) +
+                    "&size=" + std::to_string(probe_size_bytes);
+  return http_get(url, 15L);
+}
+
 std::vector<Track> YouTubeAPI::parse_search_results(const std::string &data) {
   std::vector<Track> results;
   std::stringstream ss(data);

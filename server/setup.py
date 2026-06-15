@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Cross-platform setup script for 3DS Music Player proxy server."""
 
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from setup_common import ensure_python_version, ensure_venv, install_requirements
 

@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdio.h>
 #include <string>
+#include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <vector>
@@ -15,6 +16,9 @@
 #include "audio/opus_poc_player.h"
 #include "audio/non_audio_interference_gate.h"
 #include "audio/playback_observer.h"
+#include "audio/webm_seek_index.h"
+#include "audio/webm_seek_planner.h"
+#include "audio/webm_seek_runtime.h"
 #include "audio/opus_stream_pipeline.h"
 #include "audio/webm_playback_controller.h"
 #include "network/youtube_api.h"
@@ -31,12 +35,21 @@ std::unique_ptr<std::vector<uint8_t>>
 LightLock stream_lock;   // Mutex protecting stream_buffer access
 bool g_stream_download_complete = true;
 static u64 g_opus_playback_perf_start_ms = 0;
+static bool g_opus_first_pcm_queued_logged = false;
 static bool g_opus_audio_started_logged = false;
+static bool g_webm_first_pcm_queued_logged = false;
 static bool g_webm_audio_started_logged = false;
 static u64 g_opus_last_frame_observe_ms = 0;
 static int g_opus_observed_max_decoded_buffers = 0;
 static bool g_opus_observed_decode_failure = false;
 static u64 g_startup_perf_start_ms = 0;
+static int g_webm_seek_trace_seq = 0;
+static const uint64_t kWebmSeekPlanPrerollMs = 80;
+static const uint64_t kWebmSeekHeaderProbeSizeBytes = 512ULL * 1024ULL;
+static const uint64_t kWebmSeekProbeSizeBytes = 512ULL * 1024ULL;
+static const uint64_t kWebmParserInitialSeedBytes = 128ULL * 1024ULL;
+
+static uint64_t backtrack_bytes_for_retry(int retry_count);
 
 static const char *playback_status_message(bool is_paused, bool is_buffering) {
   if (is_paused) {
@@ -54,11 +67,17 @@ static OpusPlaybackFailure webm_error_to_failure(WebmRemuxError error) {
     case WebmRemuxError::UnsupportedTrackCount:
     case WebmRemuxError::UnsupportedFeature:
       return OpusPlaybackFailure::WebmUnsupported;
+    case WebmRemuxError::SeekPrerollInsufficient:
     case WebmRemuxError::None:
       return OpusPlaybackFailure::None;
     default:
       return OpusPlaybackFailure::WebmParse;
   }
+}
+
+static StreamContainerMode stream_mode_for_audio_path(AudioPathConfig path) {
+  return audio_path_uses_webm_direct(path) ? StreamContainerMode::ProxyWebmOpus
+                                           : StreamContainerMode::ProxyOggOpus;
 }
 
 static const char *playback_failure_message(OpusPlaybackFailure failure) {
@@ -95,6 +114,497 @@ static void append_webm_playback_log(const char *event, size_t bytes) {
   fclose(f);
 }
 
+enum class Phase5aDominantStage {
+  Unknown,
+  Network,
+  BufferWait,
+  DecodeToPcm,
+};
+
+static const char *phase5a_dominant_stage_name(Phase5aDominantStage stage) {
+  switch (stage) {
+    case Phase5aDominantStage::Network:
+      return "network";
+    case Phase5aDominantStage::BufferWait:
+      return "buffer_wait";
+    case Phase5aDominantStage::DecodeToPcm:
+      return "decode_to_pcm";
+    case Phase5aDominantStage::Unknown:
+      return "unknown";
+  }
+  return "unknown";
+}
+
+static const char *
+playback_session_kind_name(PlaybackSessionKind session_kind) {
+  switch (session_kind) {
+    case PlaybackSessionKind::Startup:
+      return "startup";
+    case PlaybackSessionKind::Seek:
+      return "seek";
+  }
+  return "unknown";
+}
+
+static Phase5aDominantStage
+dominant_stage_for_phase5a(const PlaybackObserverEventTimes &times,
+                           u64 *out_network_ms, u64 *out_buffer_wait_ms,
+                           u64 *out_decode_to_pcm_ms) {
+  if (out_network_ms) {
+    *out_network_ms = 0;
+  }
+  if (out_buffer_wait_ms) {
+    *out_buffer_wait_ms = 0;
+  }
+  if (out_decode_to_pcm_ms) {
+    *out_decode_to_pcm_ms = 0;
+  }
+  if (!times.first_byte_seen || !times.decoder_open_start_seen ||
+      !times.decoder_open_ok_seen || !times.first_pcm_queued_seen) {
+    return Phase5aDominantStage::Unknown;
+  }
+
+  const u64 network_ms = times.first_byte_ms;
+  const u64 buffer_wait_ms =
+      times.decoder_open_start_ms >= times.first_byte_ms
+          ? (times.decoder_open_start_ms - times.first_byte_ms)
+          : 0;
+  const u64 decode_to_pcm_ms =
+      times.first_pcm_queued_ms >= times.decoder_open_ok_ms
+          ? (times.first_pcm_queued_ms - times.decoder_open_ok_ms)
+          : 0;
+  if (out_network_ms) {
+    *out_network_ms = network_ms;
+  }
+  if (out_buffer_wait_ms) {
+    *out_buffer_wait_ms = buffer_wait_ms;
+  }
+  if (out_decode_to_pcm_ms) {
+    *out_decode_to_pcm_ms = decode_to_pcm_ms;
+  }
+
+  if (network_ms >= buffer_wait_ms && network_ms >= decode_to_pcm_ms) {
+    return Phase5aDominantStage::Network;
+  }
+  if (buffer_wait_ms >= decode_to_pcm_ms) {
+    return Phase5aDominantStage::BufferWait;
+  }
+  return Phase5aDominantStage::DecodeToPcm;
+}
+
+static void
+append_webm_phase5a_summary_log(PlaybackSessionKind session_kind,
+                                const PlaybackObserverEventTimes &times) {
+  u64 network_ms = 0;
+  u64 buffer_wait_ms = 0;
+  u64 decode_to_pcm_ms = 0;
+  const Phase5aDominantStage dominant = dominant_stage_for_phase5a(
+      times, &network_ms, &buffer_wait_ms, &decode_to_pcm_ms);
+  if (dominant == Phase5aDominantStage::Unknown) {
+    return;
+  }
+
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  fprintf(f,
+          "[webm-phase5a] kind=%s dominant=%s network_ms=%llu "
+          "buffer_wait_ms=%llu decode_to_pcm_ms=%llu first_byte_ms=%llu "
+          "decoder_open_start_ms=%llu decoder_open_ok_ms=%llu "
+          "first_pcm_ms=%llu audio_audible_ms=%llu\n",
+          playback_session_kind_name(session_kind),
+          phase5a_dominant_stage_name(dominant),
+          static_cast<unsigned long long>(network_ms),
+          static_cast<unsigned long long>(buffer_wait_ms),
+          static_cast<unsigned long long>(decode_to_pcm_ms),
+          static_cast<unsigned long long>(times.first_byte_ms),
+          static_cast<unsigned long long>(times.decoder_open_start_ms),
+          static_cast<unsigned long long>(times.decoder_open_ok_ms),
+          static_cast<unsigned long long>(times.first_pcm_queued_ms),
+          static_cast<unsigned long long>(times.audio_audible_ms));
+  fclose(f);
+}
+
+static bool should_log_webm_seek_plan_event(const char *event) {
+  if (!event) {
+    return false;
+  }
+  return strcmp(event, "parser_seek_plan_ready") == 0 ||
+         strcmp(event, "seek_plan_ready") == 0 ||
+         strcmp(event, "parser_seek_plan_invalid") == 0 ||
+         strcmp(event, "seek_plan_invalid") == 0 ||
+         strcmp(event, "parser_seek_metadata_failed") == 0 ||
+         strcmp(event, "seek_plan_metadata_failed") == 0;
+}
+
+static void append_webm_seek_plan_log(const char *event, int target_ms,
+                                      uint64_t start_byte, int emit_start_ms) {
+  if (!should_log_webm_seek_plan_event(event)) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms = now_ms >= g_opus_playback_perf_start_ms
+                             ? now_ms - g_opus_playback_perf_start_ms
+                             : 0;
+  fprintf(
+      f,
+      "[webm-perf] +%llums %s target_ms=%d start_byte=%llu emit_start_ms=%d\n",
+      static_cast<unsigned long long>(elapsed_ms), event, target_ms,
+      static_cast<unsigned long long>(start_byte), emit_start_ms);
+  fclose(f);
+}
+
+static const char *webm_seek_plan_source_name(WebmSeekPlanSource source) {
+  switch (source) {
+    case WebmSeekPlanSource::Invalid:
+      return "invalid";
+    case WebmSeekPlanSource::ExactClusterCache:
+      return "cache";
+    case WebmSeekPlanSource::CueIndex:
+      return "cues";
+    case WebmSeekPlanSource::ProbeCluster:
+      return "probe";
+    case WebmSeekPlanSource::CoarseEstimate:
+      return "coarse";
+  }
+  return "unknown";
+}
+
+static const char *webm_seek_reuse_class_name(WebmSeekReuseClass value) {
+  switch (value) {
+    case WebmSeekReuseClass::Cold:
+      return "cold";
+    case WebmSeekReuseClass::MetadataWarm:
+      return "metadata";
+    case WebmSeekReuseClass::CuesWarm:
+      return "cues";
+    case WebmSeekReuseClass::ClusterCacheWarm:
+      return "cluster_cache";
+  }
+  return "unknown";
+}
+
+static const char *
+webm_seek_cache_lookup_status_name(WebmSeekCacheLookupStatus value) {
+  switch (value) {
+    case WebmSeekCacheLookupStatus::NotChecked:
+      return "na";
+    case WebmSeekCacheLookupStatus::Empty:
+      return "empty";
+    case WebmSeekCacheLookupStatus::ExactHit:
+      return "exact_hit";
+    case WebmSeekCacheLookupStatus::ExactMissNoCandidate:
+      return "exact_miss_no_candidate";
+    case WebmSeekCacheLookupStatus::ExactRejectedGap:
+      return "exact_rejected_gap";
+    case WebmSeekCacheLookupStatus::ProbeEstimateHit:
+      return "probe_estimate_hit";
+    case WebmSeekCacheLookupStatus::ProbeEstimateMiss:
+      return "probe_estimate_miss";
+  }
+  return "unknown";
+}
+
+static const char *
+webm_seek_cache_store_status_name(WebmSeekCacheStoreStatus value) {
+  switch (value) {
+    case WebmSeekCacheStoreStatus::IgnoredInvalid:
+      return "ignored_invalid";
+    case WebmSeekCacheStoreStatus::Added:
+      return "added";
+    case WebmSeekCacheStoreStatus::UpdatedExisting:
+      return "updated_existing";
+    case WebmSeekCacheStoreStatus::EvictedOldest:
+      return "evicted_oldest";
+  }
+  return "unknown";
+}
+
+static const char *
+webm_prebuffer_hold_reason_name(WebmPrebufferHoldReason reason) {
+  switch (reason) {
+    case WebmPrebufferHoldReason::None:
+      return "none";
+    case WebmPrebufferHoldReason::UserPaused:
+      return "user_paused";
+    case WebmPrebufferHoldReason::QueueBelowTarget:
+      return "queue_below_target";
+    case WebmPrebufferHoldReason::BytesBelowRelease:
+      return "bytes_below_release";
+    case WebmPrebufferHoldReason::WaitingForDecoder:
+      return "waiting_for_decoder";
+  }
+  return "unknown";
+}
+
+static int next_webm_seek_trace_seq() {
+  ++g_webm_seek_trace_seq;
+  if (g_webm_seek_trace_seq <= 0) {
+    g_webm_seek_trace_seq = 1;
+  }
+  return g_webm_seek_trace_seq;
+}
+
+static bool should_log_webm_seek_trace_event(const char *event,
+                                             const WebmSeekPlan *plan,
+                                             u64 elapsed_ms) {
+  if (!event) {
+    return false;
+  }
+  if (strcmp(event, "seek_request") == 0 ||
+      strcmp(event, "seek_plan_ready") == 0 ||
+      strcmp(event, "first_pcm_after_seek") == 0) {
+    return true;
+  }
+  if (strcmp(event, "seek_info_done") == 0) {
+    return elapsed_ms >= 200ULL;
+  }
+  if (strcmp(event, "seek_index_lookup_done") == 0) {
+    return true;
+  }
+  if (strcmp(event, "seek_probe_done") == 0) {
+    return (plan && plan->source != WebmSeekPlanSource::CoarseEstimate) ||
+           elapsed_ms >= 200ULL;
+  }
+  if (strcmp(event, "seek_runtime_cache_store") == 0 ||
+      strcmp(event, "seek_runtime_cache_harvest") == 0) {
+    return true;
+  }
+  return false;
+}
+
+static void append_webm_seek_trace_log(
+    const char *event, int seek_seq, const WebmSeekRequest &request,
+    bool repeated_seek, WebmSeekReuseClass reuse_class,
+    const WebmSeekPlan *plan, const WebmSeekCacheLookupTrace *cache_trace,
+    uint64_t start_byte, int cluster_ms, bool cache_hit, u64 elapsed_ms) {
+  if (!should_log_webm_seek_trace_event(event, plan, elapsed_ms)) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const char *seek_case = repeated_seek ? "repeated" : "cold";
+  const WebmSeekPlanSource source =
+      plan ? plan->source : WebmSeekPlanSource::Invalid;
+  const bool cluster_aligned = plan ? plan->cluster_aligned : false;
+  const int plan_cluster_ms =
+      cluster_ms >= 0 ? cluster_ms : (plan ? plan->selected_cluster_ms : -1);
+  const int gap_ms = (request.target_ms > 0 && plan_cluster_ms >= 0)
+                         ? (request.target_ms - plan_cluster_ms)
+                         : -1;
+  const size_t cache_size = cache_trace ? cache_trace->cache_size : 0U;
+  const int best_cluster_ms = cache_trace ? cache_trace->best_cluster_ms : -1;
+  const int best_gap_ms = cache_trace ? cache_trace->best_gap_ms : -1;
+  const uint64_t best_start_byte =
+      cache_trace ? cache_trace->best_start_byte : 0U;
+  const uint64_t estimated_probe_start_byte =
+      cache_trace ? cache_trace->estimated_probe_start_byte : 0U;
+  fprintf(
+      f,
+      "[webm-seek] %s seek_seq=%d target_ms=%d reuse=%s cold_or_repeated=%s "
+      "plan_source=%s cluster_aligned=%d start_byte=%llu cluster_ms=%d "
+      "gap_ms=%d cache_hit=%d cache_size=%lu exact=%s probe=%s "
+      "best_cluster_ms=%d best_gap_ms=%d best_start_byte=%llu "
+      "estimated_probe_start_byte=%llu elapsed_ms=%llu\n",
+      event, seek_seq, request.target_ms,
+      webm_seek_reuse_class_name(reuse_class), seek_case,
+      webm_seek_plan_source_name(source), cluster_aligned ? 1 : 0,
+      static_cast<unsigned long long>(start_byte), plan_cluster_ms, gap_ms,
+      cache_hit ? 1 : 0, static_cast<unsigned long>(cache_size),
+      webm_seek_cache_lookup_status_name(
+          cache_trace ? cache_trace->exact_status
+                      : WebmSeekCacheLookupStatus::NotChecked),
+      webm_seek_cache_lookup_status_name(
+          cache_trace ? cache_trace->probe_status
+                      : WebmSeekCacheLookupStatus::NotChecked),
+      best_cluster_ms, best_gap_ms,
+      static_cast<unsigned long long>(best_start_byte),
+      static_cast<unsigned long long>(estimated_probe_start_byte),
+      static_cast<unsigned long long>(elapsed_ms));
+  fclose(f);
+}
+
+static void
+append_webm_seek_cache_store_log(const char *event, int seek_seq, int target_ms,
+                                 const WebmSeekCacheStoreTrace &store_trace) {
+  if (!event) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  fprintf(f,
+          "[webm-seek] %s seek_seq=%d target_ms=%d store=%s point_ms=%d "
+          "start_byte=%llu cache_size=%lu\n",
+          event, seek_seq, target_ms,
+          webm_seek_cache_store_status_name(store_trace.status),
+          store_trace.timecode_ms,
+          static_cast<unsigned long long>(store_trace.start_byte),
+          static_cast<unsigned long>(store_trace.cache_size_after));
+  fclose(f);
+}
+
+static void reset_webm_seek_track_state(AppContext *context) {
+  if (!context) {
+    return;
+  }
+  context->webm_seek_track_state = WebmSeekTrackState{};
+  context->webm_seek_track_state_video_id.clear();
+  context->webm_parser_initial_seed_bytes.clear();
+  context->webm_parser_initial_seed_video_id.clear();
+}
+
+static bool get_cached_webm_parser_initial_seed(AppContext *context,
+                                                const std::string &video_id,
+                                                std::string *seed_bytes) {
+  if (!context || !seed_bytes || video_id.empty()) {
+    return false;
+  }
+  LightLock_Lock(&context->lock);
+  const bool cache_hit =
+      context->webm_parser_initial_seed_video_id == video_id &&
+      !context->webm_parser_initial_seed_bytes.empty();
+  if (cache_hit) {
+    seed_bytes->assign(context->webm_parser_initial_seed_bytes.begin(),
+                       context->webm_parser_initial_seed_bytes.end());
+  }
+  LightLock_Unlock(&context->lock);
+  return cache_hit;
+}
+
+static void store_webm_parser_initial_seed(AppContext *context,
+                                           const std::string &video_id,
+                                           const std::string &seed_bytes) {
+  if (!context || video_id.empty() || seed_bytes.empty()) {
+    return;
+  }
+  LightLock_Lock(&context->lock);
+  context->webm_parser_initial_seed_video_id = video_id;
+  context->webm_parser_initial_seed_bytes.assign(seed_bytes.begin(),
+                                                 seed_bytes.end());
+  LightLock_Unlock(&context->lock);
+}
+
+static std::string fetch_webm_parser_initial_seed(YouTubeAPI *api,
+                                                  AppContext *context,
+                                                  const std::string &video_id) {
+  std::string seed_bytes;
+  if (get_cached_webm_parser_initial_seed(context, video_id, &seed_bytes)) {
+    return seed_bytes;
+  }
+  if (!api || video_id.empty()) {
+    return seed_bytes;
+  }
+  seed_bytes =
+      api->get_webm_seek_probe(video_id, 0, kWebmParserInitialSeedBytes);
+  if (!seed_bytes.empty()) {
+    store_webm_parser_initial_seed(context, video_id, seed_bytes);
+  }
+  return seed_bytes;
+}
+
+static void clear_pending_webm_seek_runtime(AppContext *context) {
+  if (!context) {
+    return;
+  }
+  context->pending_stream_seek_ms = 0;
+  context->pending_stream_emit_start_ms = 0;
+  context->pending_stream_parser_prefetch_byte = 0;
+  context->pending_stream_parser_cluster_aligned = false;
+  context->pending_stream_seek_seq = 0;
+  context->pending_stream_seek_plan = WebmSeekPlan{};
+  context->pending_stream_repeated_seek = false;
+  context->pending_stream_reuse_class = WebmSeekReuseClass::Cold;
+}
+
+static void clear_active_webm_seek_runtime(AppContext *context) {
+  if (!context) {
+    return;
+  }
+  context->active_stream_seek_seq = 0;
+  context->active_stream_seek_target_ms = 0;
+  context->active_stream_seek_plan = WebmSeekPlan{};
+  context->active_stream_repeated_seek = false;
+  context->active_stream_reuse_class = WebmSeekReuseClass::Cold;
+  context->active_stream_seek_plan_ready_at_ms = 0;
+  context->active_stream_first_pcm_queued_logged = false;
+  context->active_stream_runtime_cache_saved = false;
+  context->active_stream_first_pcm_queued_at_ms = 0;
+}
+
+struct WebmStartupInfoWarmupTask {
+  AppContext *context = nullptr;
+  YouTubeAPI *api = nullptr;
+  std::string video_id;
+  uint64_t preroll_ms = 0;
+  uint64_t backtrack_bytes = 0;
+};
+
+static void warmup_webm_startup_info_thread(void *arg) {
+  std::unique_ptr<WebmStartupInfoWarmupTask> task(
+      static_cast<WebmStartupInfoWarmupTask *>(arg));
+  if (!task || !task->context || !task->api || task->video_id.empty()) {
+    return;
+  }
+
+  WebmSeekStreamInfo seek_info = {};
+  if (!task->api->get_webm_seek_stream_info(task->video_id, &seek_info) ||
+      !seek_info.has_filesize || !seek_info.has_duration_ms ||
+      seek_info.filesize == 0 || seek_info.duration_ms == 0) {
+    return;
+  }
+
+  LightLock_Lock(&task->context->lock);
+  const bool same_track =
+      task->context->playing_id == task->video_id &&
+      task->context->active_stream_mode == StreamContainerMode::ProxyWebmOpus &&
+      audio_path_uses_webm_direct(task->context->active_audio_path) &&
+      OpusPocPlayer::is_playing;
+  if (same_track && !task->context->webm_seek_track_state.source_info_ready) {
+    WebmSeekSourceInfo source_info = {};
+    source_info.has_filesize = true;
+    source_info.filesize = seek_info.filesize;
+    source_info.has_duration_ms = true;
+    source_info.duration_ms = seek_info.duration_ms;
+    source_info.preroll_ms = task->preroll_ms;
+    source_info.backtrack_bytes = task->backtrack_bytes;
+    task->context->webm_seek_track_state.source_info = source_info;
+    task->context->webm_seek_track_state.source_info_ready = true;
+    task->context->webm_seek_track_state_video_id = task->video_id;
+  }
+  task->context->webm_startup_warmup_done = true;
+  LightLock_Unlock(&task->context->lock);
+}
+
+static void cleanup_finished_webm_startup_warmup_thread(AppContext *context,
+                                                        bool wait) {
+  if (!context) {
+    return;
+  }
+  Thread warmup_thread = nullptr;
+  LightLock_Lock(&context->lock);
+  if (context->webm_startup_warmup_thread &&
+      (wait || context->webm_startup_warmup_done)) {
+    warmup_thread = context->webm_startup_warmup_thread;
+    context->webm_startup_warmup_thread = nullptr;
+    context->webm_startup_warmup_done = true;
+    context->webm_startup_warmup_video_id.clear();
+  }
+  LightLock_Unlock(&context->lock);
+  if (warmup_thread) {
+    threadJoin(warmup_thread, U64_MAX);
+    threadFree(warmup_thread);
+  }
+}
+
 static void log_playback_compare_event(StreamContainerMode stream_mode,
                                        PlaybackCompareEvent event,
                                        const OpusPlayerUpdateStats &stats) {
@@ -121,17 +631,50 @@ make_webm_controller_input(const PlaybackCoreSnapshot &core_snapshot,
   return input;
 }
 
+static void append_webm_queue_state_log(
+    const char *event, PlaybackSessionKind session_kind,
+    WebmPlaybackStage stage, const WebmPlaybackControllerInput &input,
+    const WebmPlaybackControllerDecision &decision,
+    const OpusPlayerUpdateStats &stats, bool seek_active, bool user_paused) {
+  if (!event) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms = now_ms >= g_opus_playback_perf_start_ms
+                             ? now_ms - g_opus_playback_perf_start_ms
+                             : 0;
+  fprintf(f,
+          "[webm-queue] +%llums %s kind=%s stage=%d seek_active=%d "
+          "queued_before=%d queued_after=%d free_before=%d free_after=%d "
+          "decoded=%d target=%d max_decode=%d release=%d keep_paused=%d "
+          "user_paused=%d has_started=%d hold=%s\n",
+          static_cast<unsigned long long>(elapsed_ms), event,
+          playback_session_kind_name(session_kind), static_cast<int>(stage),
+          seek_active ? 1 : 0, stats.queued_before_update,
+          stats.queued_after_update, stats.free_before_update,
+          stats.free_after_update, stats.decoded_buffers,
+          stats.target_queued_wavebufs, stats.max_decode_buffers,
+          decision.release_prebuffer ? 1 : 0, decision.keep_ndsp_paused ? 1 : 0,
+          user_paused ? 1 : 0, input.has_started_playing ? 1 : 0,
+          webm_prebuffer_hold_reason_name(decision.hold_reason));
+  fclose(f);
+}
+
 static NonAudioInterferenceInput make_non_audio_interference_input(
     size_t stream_buffer_size, bool stream_download_complete,
     const OpusPocPlayer &player, const AppContext &context) {
   NonAudioInterferenceInput input = {};
   input.stream_mode = context.active_stream_mode;
   input.webm_stage = context.webm_playback_stage;
-  input.is_opus_direct =
-      context.active_audio_path == AudioPathConfig::OPUS_DIRECT;
+  input.is_opus_direct = audio_path_uses_webm_direct(context.active_audio_path);
   input.download_complete = stream_download_complete;
   input.stream_buffer_bytes = stream_buffer_size;
-  input.queued_wavebufs = OpusPocPlayer::is_playing ? player.queued_wavebuf_count() : 0;
+  input.queued_wavebufs =
+      OpusPocPlayer::is_playing ? player.queued_wavebuf_count() : 0;
   input.audio_started =
       OpusPocPlayer::is_playing && player.has_started_playing();
   return input;
@@ -171,9 +714,9 @@ static RenderContext make_render_snapshot_locked(const AppContext &context) {
   snapshot.config = context.config;
   snapshot.theme = context.theme;
 
-  const AppState active_state =
-      is_popup_state(context.current_state) ? context.previous_state
-                                            : context.current_state;
+  const AppState active_state = is_popup_state(context.current_state)
+                                    ? context.previous_state
+                                    : context.current_state;
 
   const bool need_playlists =
       active_state == STATE_HOME || active_state == STATE_PLAYLISTS ||
@@ -323,7 +866,7 @@ std::unique_ptr<OpusPocPlayer> g_opus_player_ptr;
 
 std::string url_encode(const std::string &value) {
   std::ostringstream escaped;
-  escaped.fill('0');
+  escaped << std::setfill('0');
   escaped << std::hex;
   for (std::string::const_iterator i = value.begin(), n = value.end(); i != n;
        ++i) {
@@ -374,6 +917,40 @@ static std::string show_ip_keyboard(const std::string &initial) {
 static constexpr size_t OPUS_STREAM_START_BYTES = 16U * 1024U;
 static const WebmPlaybackControllerConfig kWebmPlaybackControllerConfig =
     webm_playback_controller_default_config();
+
+static WebmPlaybackControllerConfig
+controller_config_for_seek(bool seek_active) {
+  WebmPlaybackControllerConfig config = kWebmPlaybackControllerConfig;
+  if (seek_active) {
+    config.decoder_start_bytes = 0U;
+    config.playback_release_bytes = 0U;
+    config.initial_wavebuf_target = 1;
+  }
+  return config;
+}
+
+// Parser-level seek against the current "header + ranged cluster relay" stream
+// is not reliable yet. Keep the older 3DS-side coarse seek path active until
+// we have true random-access backed IO for nestegg.
+static const bool kWebmUseParserLevelSeek = true;
+static const uint64_t kWebmSeekRetryBacktrackBytes[] = {
+    128ULL * 1024ULL,
+    512ULL * 1024ULL,
+    1024ULL * 1024ULL,
+};
+
+static uint64_t backtrack_bytes_for_retry(int retry_count) {
+  if (retry_count <= 0) {
+    return kWebmSeekRetryBacktrackBytes[0];
+  }
+  const size_t max_index = (sizeof(kWebmSeekRetryBacktrackBytes) /
+                            sizeof(kWebmSeekRetryBacktrackBytes[0])) -
+                           1U;
+  const size_t index = static_cast<size_t>(retry_count) > max_index
+                           ? max_index
+                           : static_cast<size_t>(retry_count);
+  return kWebmSeekRetryBacktrackBytes[index];
+}
 
 ThemeColors g_theme_colors;
 std::unique_ptr<AppContext> g_ctx_ptr;
@@ -541,7 +1118,7 @@ static void thumbnail_dl_thread(void *arg) {
 }
 
 void download_thread(void *arg) {
-  YouTubeAPI *api = (YouTubeAPI *)arg;
+  YouTubeAPI *api = static_cast<YouTubeAPI *>(arg);
   while (ctx.is_running) {
     std::string q = "";
     std::string lang = "en";
@@ -575,24 +1152,140 @@ void download_thread(void *arg) {
     }
 
     std::string stream_url = "";
+    std::string stream_video_id = "";
     StreamContainerMode stream_mode = StreamContainerMode::ProxyOggOpus;
+    int pending_seek_ms = 0;
+    uint64_t pending_seek_backtrack_bytes = 0;
+    int pending_seek_retry_count = 0;
+    int pending_seek_seq = 0;
+    WebmSeekTrackState webm_seek_track_state = {};
+    std::string webm_seek_track_state_video_id = "";
     LightLock_Lock(&ctx.lock);
     if (ctx.is_downloading && ctx.current_stream_url != "") {
       stream_url = ctx.current_stream_url;
+      stream_video_id = ctx.playing_id;
       stream_mode = ctx.active_stream_mode;
+      pending_seek_ms = ctx.pending_stream_seek_ms;
+      pending_seek_backtrack_bytes = ctx.pending_seek_backtrack_bytes;
+      pending_seek_retry_count = ctx.pending_seek_retry_count;
+      pending_seek_seq = ctx.pending_stream_seek_seq;
+      webm_seek_track_state = ctx.webm_seek_track_state;
+      webm_seek_track_state_video_id = ctx.webm_seek_track_state_video_id;
       ctx.current_stream_url = "";
     }
     LightLock_Unlock(&ctx.lock);
 
     if (stream_url != "") {
-      bool success = api->start_streaming(stream_url, stream_mode);
+      if (stream_mode == StreamContainerMode::ProxyWebmOpus &&
+          pending_seek_ms > 0 && !stream_video_id.empty()) {
+        const WebmSeekRequest seek_request = {
+            pending_seek_ms,
+            pending_seek_seq > 0 ? pending_seek_seq
+                                 : next_webm_seek_trace_seq(),
+        };
+        append_webm_seek_plan_log(kWebmUseParserLevelSeek ? "seek_mode_parser"
+                                                          : "seek_mode_coarse",
+                                  pending_seek_ms, 0, 0);
+        PreparedWebmSeekPlanResult prepared_seek = prepare_webm_seek_plan(
+            api, stream_video_id, seek_request, pending_seek_backtrack_bytes,
+            pending_seek_retry_count, kWebmSeekPlanPrerollMs,
+            kWebmSeekHeaderProbeSizeBytes, kWebmSeekProbeSizeBytes,
+            backtrack_bytes_for_retry, append_webm_seek_trace_log,
+            &webm_seek_track_state);
+        LightLock_Lock(&ctx.lock);
+        ctx.webm_seek_track_state = webm_seek_track_state;
+        ctx.webm_seek_track_state_video_id = webm_seek_track_state_video_id;
+        if (prepared_seek.plan_ok) {
+          stream_url = prepared_seek.stream_url;
+          append_webm_seek_plan_log(
+              kWebmUseParserLevelSeek ? "parser_seek_plan_ready"
+                                      : "seek_plan_ready",
+              prepared_seek.seek_plan.seek_target_ms,
+              prepared_seek.seek_plan.reconnect_start_byte,
+              prepared_seek.seek_plan.emit_start_ms);
+          ctx.pending_stream_seek_ms = prepared_seek.seek_plan.seek_target_ms;
+          ctx.pending_stream_emit_start_ms =
+              prepared_seek.seek_plan.emit_start_ms;
+          ctx.pending_stream_parser_prefetch_byte =
+              kWebmUseParserLevelSeek
+                  ? prepared_seek.seek_plan.reconnect_start_byte
+                  : 0;
+          ctx.pending_stream_parser_cluster_aligned =
+              kWebmUseParserLevelSeek && prepared_seek.parser_cluster_aligned;
+          ctx.pending_stream_seek_seq = seek_request.seek_seq;
+          ctx.pending_stream_seek_plan = prepared_seek.seek_plan;
+          ctx.pending_stream_repeated_seek = prepared_seek.repeated_seek;
+          ctx.pending_stream_reuse_class = prepared_seek.reuse_class;
+          ctx.active_stream_seek_target_ms =
+              prepared_seek.seek_plan.seek_target_ms;
+          ctx.active_stream_seek_plan_ready_at_ms = osGetTime();
+          ctx.webm_seek_track_state.source_info = prepared_seek.source_info;
+          ctx.webm_seek_track_state.source_info_ready = true;
+          ctx.webm_seek_track_state_video_id = stream_video_id;
+        } else {
+          append_webm_seek_plan_log(
+              prepared_seek.metadata_ok
+                  ? (kWebmUseParserLevelSeek ? "parser_seek_plan_invalid"
+                                             : "seek_plan_invalid")
+                  : (kWebmUseParserLevelSeek ? "parser_seek_metadata_failed"
+                                             : "seek_plan_metadata_failed"),
+              pending_seek_ms, 0, 0);
+          clear_pending_webm_seek_runtime(&ctx);
+          ctx.webm_seek_track_state.source_info = WebmSeekSourceInfo{};
+          ctx.webm_seek_track_state.source_info_ready = false;
+          ctx.webm_seek_track_state_video_id = stream_video_id;
+          clear_active_webm_seek_runtime(&ctx);
+        }
+        LightLock_Unlock(&ctx.lock);
+      }
+
+      bool success = false;
+      if (stream_mode == StreamContainerMode::ProxyWebmOpus &&
+          pending_seek_ms > 0 && !stream_video_id.empty() &&
+          kWebmUseParserLevelSeek) {
+        const std::string initial_bytes =
+            fetch_webm_parser_initial_seed(api, &ctx, stream_video_id);
+        LightLock_Lock(&stream_lock);
+        if (g_stream_buffer_ptr) {
+          g_stream_buffer_ptr->clear();
+          if (!initial_bytes.empty()) {
+            g_stream_buffer_ptr->insert(g_stream_buffer_ptr->end(),
+                                        initial_bytes.begin(),
+                                        initial_bytes.end());
+          }
+        }
+        g_stream_download_complete = false;
+        LightLock_Unlock(&stream_lock);
+        success = !initial_bytes.empty();
+      } else {
+        success = api->start_streaming(stream_url, stream_mode);
+      }
 
       // Retry only if server is reachable (e.g. transient extract error)
       if (!success && !YouTubeAPI::should_cancel) {
         if (api->check_connection(1000L)) {
           svcSleepThread(500ULL * 1000 * 1000); // 0.5s wait
           if (!YouTubeAPI::should_cancel) {
-            success = api->start_streaming(stream_url, stream_mode);
+            if (stream_mode == StreamContainerMode::ProxyWebmOpus &&
+                pending_seek_ms > 0 && !stream_video_id.empty() &&
+                kWebmUseParserLevelSeek) {
+              const std::string initial_bytes =
+                  fetch_webm_parser_initial_seed(api, &ctx, stream_video_id);
+              LightLock_Lock(&stream_lock);
+              if (g_stream_buffer_ptr) {
+                g_stream_buffer_ptr->clear();
+                if (!initial_bytes.empty()) {
+                  g_stream_buffer_ptr->insert(g_stream_buffer_ptr->end(),
+                                              initial_bytes.begin(),
+                                              initial_bytes.end());
+                }
+              }
+              g_stream_download_complete = false;
+              LightLock_Unlock(&stream_lock);
+              success = !initial_bytes.empty();
+            } else {
+              success = api->start_streaming(stream_url, stream_mode);
+            }
           }
         }
       }
@@ -607,6 +1300,10 @@ void download_thread(void *arg) {
         ctx.is_server_connected = is_online;
         if (!success && !playback_started) {
           ctx.is_buffering = false;
+          clear_pending_webm_seek_runtime(&ctx);
+          ctx.webm_seek_track_state.source_info = WebmSeekSourceInfo{};
+          ctx.webm_seek_track_state.source_info_ready = false;
+          clear_active_webm_seek_runtime(&ctx);
           ctx.opus_playback_failure = OpusPlaybackFailure::Network;
           if (!ctx.is_paused && ctx.pause_started_at > 0) {
             ctx.pause_accumulated_ms += osGetTime() - ctx.pause_started_at;
@@ -776,7 +1473,7 @@ int main(int argc, char *argv[]) {
   ctx.active_audio_path = ctx.config.audio_path;
   const Result ptmu_rc = ptmuInit();
   append_startup_result_log("ptmu-init", ptmu_rc);
-  u32 *soc_buffer = (u32 *)memalign(0x1000, 0x100000);
+  u32 *soc_buffer = static_cast<u32 *>(memalign(0x1000, 0x100000));
   append_startup_perf_log(
       soc_buffer ? "soc-buffer-alloc-ok" : "soc-buffer-alloc-failed", "");
   if (soc_buffer) {
@@ -1083,6 +1780,7 @@ int main(int argc, char *argv[]) {
   }
 
   cleanup_startup_check_thread();
+  cleanup_finished_webm_startup_warmup_thread(&ctx, true);
   {
     char detail[160];
     const u64 now_ms = osGetTime();
@@ -1107,6 +1805,7 @@ int main(int argc, char *argv[]) {
     YouTubeAPI::should_cancel = true; // Signal download thread to stop
     const bool keep_paused_after_seek =
         ctx.seek_target_seconds >= 0 && ctx.is_paused;
+    const bool preserve_seek_cache = (ctx.playing_id == track.id);
     { // Safely read is_downloading under lock
       bool still_dl;
       do {
@@ -1133,16 +1832,29 @@ int main(int argc, char *argv[]) {
     int seek_secs = ctx.seek_target_seconds;
     ctx.seek_target_seconds = -1;
     g_opus_playback_perf_start_ms = osGetTime();
+    g_opus_first_pcm_queued_logged = false;
     g_opus_audio_started_logged = false;
     g_opus_last_frame_observe_ms = 0;
     g_opus_observed_max_decoded_buffers = 0;
     g_opus_observed_decode_failure = false;
+    cleanup_finished_webm_startup_warmup_thread(&ctx, false);
     append_opus_playback_perf_log(OpusPerfEvent::PlaybackRequest, 0);
 
     LightLock_Lock(&ctx.lock);
     ctx.pause_accumulated_ms = 0;
     ctx.pause_started_at = osGetTime(); // freeze bar: buffering starts now
     ctx.is_buffering = true;
+    clear_pending_webm_seek_runtime(&ctx);
+    clear_active_webm_seek_runtime(&ctx);
+    ctx.pending_seek_backtrack_bytes = 0;
+    ctx.pending_seek_retry_count = 0;
+    if (!preserve_seek_cache) {
+      reset_webm_seek_track_state(&ctx);
+    } else {
+      ctx.webm_seek_track_state.source_info.preroll_ms = kWebmSeekPlanPrerollMs;
+      ctx.webm_seek_track_state.source_info.backtrack_bytes = 0;
+      ctx.webm_seek_track_state_video_id = track.id;
+    }
     ctx.playback_start_time =
         (seek_secs > 0) ? osGetTime() - (u64)seek_secs * 1000ULL : osGetTime();
     ctx.playing_id = track.id;
@@ -1165,26 +1877,32 @@ int main(int argc, char *argv[]) {
     ctx.playing_meta = meta;
 
     update_playing_title_lines(ui_mgr.get_text_buf());
+    const AudioPathConfig selected_audio_path = ctx.config.audio_path;
     const StreamContainerMode stream_mode =
-        ctx.opus_webm_poc_enabled ? StreamContainerMode::ProxyWebmOpus
-                                  : StreamContainerMode::ProxyOggOpus;
+        stream_mode_for_audio_path(selected_audio_path);
+    const PlaybackSessionKind session_kind = seek_secs > 0
+                                                 ? PlaybackSessionKind::Seek
+                                                 : PlaybackSessionKind::Startup;
     playback_observer_end_session();
-    playback_observer_begin_session(stream_mode, track.id.c_str());
-    ctx.active_audio_path = AudioPathConfig::OPUS_DIRECT;
+    playback_observer_begin_session(stream_mode, session_kind,
+                                    track.id.c_str());
+    ctx.active_audio_path = selected_audio_path;
     ctx.active_stream_mode = stream_mode;
     ctx.opus_playback_failure = OpusPlaybackFailure::None;
-    ctx.webm_playback_stage =
-        opus_ready ? WebmPlaybackStage::WaitingForDecoderStart
-                   : WebmPlaybackStage::Idle;
+    ctx.webm_playback_stage = opus_ready
+                                  ? WebmPlaybackStage::WaitingForDecoderStart
+                                  : WebmPlaybackStage::Idle;
     ctx.compare_thumbnail_fetch_logged = false;
     ctx.compare_thumbnail_done_logged = false;
     ctx.compare_thumbnail_upload_logged = false;
     ctx.compare_audio_audible_logged = false;
     OpusPocPlayer::is_playing = opus_ready;
+    g_webm_first_pcm_queued_logged = false;
     g_webm_audio_started_logged = false;
     opus_player.set_decode_tuning(
         stream_mode == StreamContainerMode::ProxyWebmOpus
-            ? webm_startup_decode_tuning()
+            ? (seek_secs > 0 ? webm_seek_decode_tuning()
+                             : webm_startup_decode_tuning())
             : default_opus_decode_tuning());
     if (opus_ready) {
       ctx.g_status_msg =
@@ -1200,27 +1918,83 @@ int main(int argc, char *argv[]) {
       return;
     }
 
-    api.get_audio_stream_url(ctx.playing_id, seek_secs, stream_mode,
-                             [&, seek_secs](const std::string &url, bool ok) {
-                               LightLock_Lock(&ctx.lock);
-                               if (ok && !url.empty()) {
-                                 ctx.current_stream_url = url;
-                                 ctx.is_downloading = true;
-                               } else {
-                                 ctx.opus_playback_failure =
-                                     OpusPlaybackFailure::Network;
-                                 ctx.g_status_msg = playback_failure_message(
-                                     ctx.opus_playback_failure);
-                                 OpusPocPlayer::is_playing = false;
-                                  ctx.webm_playback_stage =
-                                      WebmPlaybackStage::Idle;
-                                 ctx.seek_target_seconds = -1;
+    api.get_audio_stream_url(
+        ctx.playing_id, seek_secs, stream_mode,
+        [&, seek_secs, stream_mode](const std::string &url, bool ok) {
+          Thread finished_warmup_thread = nullptr;
+          LightLock_Lock(&ctx.lock);
+          const std::string final_url =
+              (stream_mode == StreamContainerMode::ProxyWebmOpus)
+                  ? api.build_webm_stream_url(track.id, 0)
+                  : url;
+          if (ok && !final_url.empty()) {
+            ctx.current_stream_url = final_url;
+            ctx.is_downloading = true;
+            ctx.pending_stream_seek_ms =
+                (stream_mode == StreamContainerMode::ProxyWebmOpus &&
+                 seek_secs > 0)
+                    ? seek_secs * 1000
+                    : 0;
+            ctx.pending_stream_emit_start_ms = 0;
+            ctx.pending_stream_parser_prefetch_byte = 0;
+            ctx.pending_stream_parser_cluster_aligned = false;
+            ctx.pending_stream_seek_seq = 0;
+            ctx.pending_stream_seek_plan = WebmSeekPlan{};
+            ctx.pending_stream_repeated_seek = false;
+            if (stream_mode == StreamContainerMode::ProxyWebmOpus &&
+                seek_secs <= 0 &&
+                !ctx.webm_seek_track_state.source_info_ready) {
+              if (ctx.webm_startup_warmup_thread &&
+                  ctx.webm_startup_warmup_done) {
+                finished_warmup_thread = ctx.webm_startup_warmup_thread;
+                ctx.webm_startup_warmup_thread = nullptr;
+                ctx.webm_startup_warmup_video_id.clear();
+              }
+              const bool warmup_already_running =
+                  ctx.webm_startup_warmup_thread &&
+                  !ctx.webm_startup_warmup_done;
+              if (!warmup_already_running) {
+                std::unique_ptr<WebmStartupInfoWarmupTask> warmup_task =
+                    std::make_unique<WebmStartupInfoWarmupTask>();
+                warmup_task->context = &ctx;
+                warmup_task->api = &api;
+                warmup_task->video_id = track.id;
+                warmup_task->preroll_ms = kWebmSeekPlanPrerollMs;
+                warmup_task->backtrack_bytes = backtrack_bytes_for_retry(0);
+                WebmStartupInfoWarmupTask *warmup_arg = warmup_task.release();
+                Thread warmup_thread =
+                    threadCreate(warmup_webm_startup_info_thread, warmup_arg,
+                                 0x8000, 0x3F, -2, false);
+                if (warmup_thread) {
+                  ctx.webm_startup_warmup_thread = warmup_thread;
+                  ctx.webm_startup_warmup_done = false;
+                  ctx.webm_startup_warmup_video_id = track.id;
+                } else {
+                  std::unique_ptr<WebmStartupInfoWarmupTask>
+                      cleanup_warmup_task(warmup_arg);
+                }
+              }
+            }
+          } else {
+            ctx.opus_playback_failure = OpusPlaybackFailure::Network;
+            ctx.g_status_msg =
+                playback_failure_message(ctx.opus_playback_failure);
+            OpusPocPlayer::is_playing = false;
+            ctx.webm_playback_stage = WebmPlaybackStage::Idle;
+            ctx.seek_target_seconds = -1;
+            clear_pending_webm_seek_runtime(&ctx);
+            reset_webm_seek_track_state(&ctx);
+            clear_active_webm_seek_runtime(&ctx);
 
-                                 ctx.playing_id = "";
-                                 playback_observer_end_session();
-                               }
-                               LightLock_Unlock(&ctx.lock);
-                             });
+            ctx.playing_id = "";
+            playback_observer_end_session();
+          }
+          LightLock_Unlock(&ctx.lock);
+          if (finished_warmup_thread) {
+            threadJoin(finished_warmup_thread, U64_MAX);
+            threadFree(finished_warmup_thread);
+          }
+        });
   };
 
   auto try_get_queued_track_locked = [&](int queue_pos, Track *out_track,
@@ -1242,6 +2016,7 @@ int main(int argc, char *argv[]) {
   };
 
   while (aptMainLoop()) {
+    cleanup_finished_webm_startup_warmup_thread(&ctx, false);
     if (!ctx.is_running)
       break; // Exit immediately if START pressed right after boot
 
@@ -1326,15 +2101,6 @@ int main(int argc, char *argv[]) {
     u32 kDown = hidKeysDown();
     u32 kHeld = hidKeysHeld();
     u32 kRepeat = hidKeysDownRepeat();
-
-    if ((kDown & KEY_X) && (kHeld & KEY_L) && (kHeld & KEY_R)) {
-      LightLock_Lock(&ctx.lock);
-      ctx.opus_webm_poc_enabled = !ctx.opus_webm_poc_enabled;
-      ctx.g_status_msg =
-          ctx.opus_webm_poc_enabled ? "WebM PoC ON" : "WebM PoC OFF";
-      LightLock_Unlock(&ctx.lock);
-      kDown &= ~(KEY_X | KEY_L | KEY_R);
-    }
 
     // D-pad held repeat (respects sensitivity setting)
     {
@@ -2257,6 +3023,9 @@ int main(int argc, char *argv[]) {
               OpusPocPlayer::is_playing = false;
               ctx.active_audio_path = ctx.config.audio_path;
               ctx.webm_playback_stage = WebmPlaybackStage::Idle;
+              clear_pending_webm_seek_runtime(&ctx);
+              reset_webm_seek_track_state(&ctx);
+              clear_active_webm_seek_runtime(&ctx);
             }
           } else {
             // Remove from PlaylistDetailScreen (existing logic)
@@ -2487,6 +3256,9 @@ int main(int argc, char *argv[]) {
         YouTubeAPI::should_cancel = false;
         ctx.active_audio_path = ctx.config.audio_path;
         ctx.webm_playback_stage = WebmPlaybackStage::Idle;
+        clear_pending_webm_seek_runtime(&ctx);
+        reset_webm_seek_track_state(&ctx);
+        clear_active_webm_seek_runtime(&ctx);
         ctx.playing_id = "";
         ctx.playing_title = "";
         ctx.playing_title_lines.clear();
@@ -2514,9 +3286,8 @@ int main(int argc, char *argv[]) {
                            ctx.playing_id != ctx.thumbnail_vid_id &&
                            !ctx.thumbnail_loading;
       const NonAudioInterferenceInput non_audio_input =
-          make_non_audio_interference_input(stream_buffer_size,
-                                           stream_download_complete,
-                                           opus_player, ctx);
+          make_non_audio_interference_input(
+              stream_buffer_size, stream_download_complete, opus_player, ctx);
       const bool defer_thumb_for_opus =
           should_defer_thumbnail_fetch(non_audio_input);
       bool need_fetch = track_changed && !defer_thumb_for_opus &&
@@ -2569,9 +3340,8 @@ int main(int argc, char *argv[]) {
       bool allow_upload = false;
       LightLock_Lock(&ctx.lock);
       const NonAudioInterferenceInput non_audio_input =
-          make_non_audio_interference_input(stream_buffer_size,
-                                           stream_download_complete,
-                                           opus_player, ctx);
+          make_non_audio_interference_input(
+              stream_buffer_size, stream_download_complete, opus_player, ctx);
       allow_upload = !should_defer_thumbnail_upload(non_audio_input);
       LightLock_Unlock(&ctx.lock);
 
@@ -2624,10 +3394,9 @@ int main(int argc, char *argv[]) {
     WebmPlaybackControllerDecision controller_decision = {};
     LightLock_Lock(&ctx.lock);
     const bool opus_decode_pending =
-        ctx.active_audio_path == AudioPathConfig::OPUS_DIRECT &&
         ctx.webm_playback_stage == WebmPlaybackStage::WaitingForDecoderStart &&
         OpusPocPlayer::is_playing;
-    use_webm_poc = ctx.opus_webm_poc_enabled;
+    use_webm_poc = ctx.active_stream_mode == StreamContainerMode::ProxyWebmOpus;
     compare_stream_mode = ctx.active_stream_mode;
     playback_stage = ctx.webm_playback_stage;
     LightLock_Unlock(&ctx.lock);
@@ -2636,13 +3405,16 @@ int main(int argc, char *argv[]) {
       opus_buffer_size = core_snapshot.stream_buffer_bytes;
       opus_download_complete = core_snapshot.download_complete;
       if (use_webm_poc) {
+        bool seek_active = false;
         LightLock_Lock(&ctx.lock);
-        controller_input = make_webm_controller_input(core_snapshot,
-                                                      OpusPlayerUpdateStats{},
-                                                      opus_player, ctx);
+        seek_active = ctx.active_stream_seek_seq > 0;
+        controller_input = make_webm_controller_input(
+            core_snapshot, OpusPlayerUpdateStats{}, opus_player, ctx);
         LightLock_Unlock(&ctx.lock);
+        const WebmPlaybackControllerConfig controller_config =
+            controller_config_for_seek(seek_active);
         controller_decision = decide_webm_playback_step(
-            playback_stage, controller_input, kWebmPlaybackControllerConfig);
+            playback_stage, controller_input, controller_config);
         should_start_opus_decoder = controller_decision.should_start_decoder;
       } else {
         should_start_opus_decoder =
@@ -2653,16 +3425,41 @@ int main(int argc, char *argv[]) {
 
     if (should_start_opus_decoder) {
       bool started = false;
+      int pending_seek_ms = 0;
+      int pending_emit_start_ms = 0;
+      uint64_t parser_prefetch_offset = 0;
+      bool enable_parser_seek = false;
+      bool parser_cluster_aligned = false;
+      std::string parser_range_probe_base_url = "";
+      uint64_t parser_range_filesize = 0;
       append_opus_playback_perf_log(OpusPerfEvent::DecoderOpenStart,
                                     opus_buffer_size);
       log_playback_compare_event(compare_stream_mode,
                                  PlaybackCompareEvent::DecoderOpenStart,
                                  OpusPlayerUpdateStats{});
+      LightLock_Lock(&ctx.lock);
+      pending_seek_ms = ctx.pending_stream_seek_ms;
+      pending_emit_start_ms = ctx.pending_stream_emit_start_ms;
+      parser_prefetch_offset = ctx.pending_stream_parser_prefetch_byte;
+      parser_cluster_aligned = ctx.pending_stream_parser_cluster_aligned;
+      enable_parser_seek = kWebmUseParserLevelSeek && pending_seek_ms > 0;
+      if (enable_parser_seek && ctx.webm_seek_track_state.source_info_ready &&
+          ctx.webm_seek_track_state.source_info.has_filesize) {
+        parser_range_filesize = ctx.webm_seek_track_state.source_info.filesize;
+      }
+      if (enable_parser_seek) {
+        parser_range_probe_base_url =
+            api.build_webm_seek_probe_base_url(ctx.playing_id);
+      }
+      LightLock_Unlock(&ctx.lock);
       if (g_stream_buffer_ptr) {
         if (use_webm_poc) {
           started = opus_player.start_webm_streaming(
               g_stream_buffer_ptr.get(), &stream_lock,
-              &g_stream_download_complete);
+              &g_stream_download_complete, pending_seek_ms,
+              pending_emit_start_ms, enable_parser_seek, parser_cluster_aligned,
+              parser_range_probe_base_url, parser_range_filesize,
+              parser_prefetch_offset);
         } else if (opus_download_complete) {
           LightLock_Lock(&stream_lock);
           started = opus_player.start(g_stream_buffer_ptr->data(),
@@ -2677,18 +3474,25 @@ int main(int argc, char *argv[]) {
       append_opus_playback_perf_log(started ? OpusPerfEvent::DecoderOpenOk
                                             : OpusPerfEvent::DecoderOpenFailed,
                                     opus_buffer_size);
-      log_playback_compare_event(
-          compare_stream_mode,
-          started ? PlaybackCompareEvent::DecoderOpenOk
-                  : PlaybackCompareEvent::DecoderOpenFailed,
-          OpusPlayerUpdateStats{});
+      log_playback_compare_event(compare_stream_mode,
+                                 started
+                                     ? PlaybackCompareEvent::DecoderOpenOk
+                                     : PlaybackCompareEvent::DecoderOpenFailed,
+                                 OpusPlayerUpdateStats{});
 
       LightLock_Lock(&ctx.lock);
+      const WebmRemuxError start_error =
+          use_webm_poc ? opus_player.webm_remux_error() : WebmRemuxError::None;
       if (!started) {
+        clear_pending_webm_seek_runtime(&ctx);
         ctx.webm_playback_stage = WebmPlaybackStage::Failed;
-        ctx.opus_playback_failure =
-            use_webm_poc ? webm_error_to_failure(opus_player.webm_remux_error())
-                         : OpusPlaybackFailure::Decoder;
+        ctx.pending_seek_backtrack_bytes = 0;
+        ctx.pending_seek_retry_count = 0;
+        reset_webm_seek_track_state(&ctx);
+        clear_active_webm_seek_runtime(&ctx);
+        ctx.opus_playback_failure = use_webm_poc
+                                        ? webm_error_to_failure(start_error)
+                                        : OpusPlaybackFailure::Decoder;
         if (ctx.opus_playback_failure == OpusPlaybackFailure::None) {
           ctx.opus_playback_failure = OpusPlaybackFailure::Decoder;
         }
@@ -2697,9 +3501,21 @@ int main(int argc, char *argv[]) {
         ctx.playing_id = "";
         playback_observer_end_session();
       } else {
-        ctx.webm_playback_stage = use_webm_poc ? WebmPlaybackStage::Prebuffering
-                                               : WebmPlaybackStage::Steady;
-        ndspChnSetPaused(0, use_webm_poc ? true : ctx.is_paused);
+        ctx.pending_seek_backtrack_bytes = 0;
+        ctx.pending_seek_retry_count = 0;
+        ctx.active_stream_seek_seq = ctx.pending_stream_seek_seq;
+        ctx.active_stream_seek_plan = ctx.pending_stream_seek_plan;
+        ctx.active_stream_repeated_seek = ctx.pending_stream_repeated_seek;
+        ctx.active_stream_reuse_class = ctx.pending_stream_reuse_class;
+        clear_pending_webm_seek_runtime(&ctx);
+        const bool started_from_seek = use_webm_poc && pending_seek_ms > 0;
+        ctx.webm_playback_stage =
+            use_webm_poc ? (started_from_seek ? WebmPlaybackStage::Steady
+                                              : WebmPlaybackStage::Prebuffering)
+                         : WebmPlaybackStage::Steady;
+        ndspChnSetPaused(0, use_webm_poc
+                                ? (started_from_seek ? ctx.is_paused : true)
+                                : ctx.is_paused);
         ctx.g_status_msg =
             playback_status_message(ctx.is_paused, ctx.is_buffering);
       }
@@ -2742,56 +3558,92 @@ int main(int argc, char *argv[]) {
 
     if (use_opus_poc_for_update) {
       LightLock_Lock(&ctx.lock);
-      use_webm_poc = ctx.opus_webm_poc_enabled;
+      use_webm_poc =
+          ctx.active_stream_mode == StreamContainerMode::ProxyWebmOpus;
       playback_stage = ctx.webm_playback_stage;
+      const bool seek_active = ctx.active_stream_seek_seq > 0;
       controller_input =
           make_webm_controller_input(collect_playback_core_snapshot(),
                                      opus_update_stats, opus_player, ctx);
       LightLock_Unlock(&ctx.lock);
-      controller_decision = use_webm_poc
-                                ? decide_webm_playback_step(
-                                      playback_stage, controller_input,
-                                      kWebmPlaybackControllerConfig)
-                                : WebmPlaybackControllerDecision{};
-      const WebmPlaybackStage next_stage = use_webm_poc
-                                               ? next_webm_playback_stage(
-                                                     playback_stage,
-                                                     controller_input,
-                                                     controller_decision)
-                                               : WebmPlaybackStage::Steady;
+      const WebmPlaybackControllerConfig controller_config =
+          controller_config_for_seek(seek_active);
+      controller_decision =
+          use_webm_poc
+              ? decide_webm_playback_step(playback_stage, controller_input,
+                                          controller_config)
+              : WebmPlaybackControllerDecision{};
+      const WebmPlaybackStage next_stage =
+          use_webm_poc
+              ? next_webm_playback_stage(playback_stage, controller_input,
+                                         controller_decision)
+              : WebmPlaybackStage::Steady;
       LightLock_Lock(&ctx.lock);
       if (use_webm_poc) {
         ctx.webm_playback_stage = next_stage;
       }
-      const bool should_unpause =
-          use_webm_poc && controller_decision.release_prebuffer && !ctx.is_paused;
+      const bool entering_steady_from_prebuffer =
+          use_webm_poc && playback_stage == WebmPlaybackStage::Prebuffering &&
+          next_stage == WebmPlaybackStage::Steady;
+      const bool should_unpause = use_webm_poc &&
+                                  (controller_decision.release_prebuffer ||
+                                   entering_steady_from_prebuffer) &&
+                                  !ctx.is_paused;
       LightLock_Unlock(&ctx.lock);
       if (should_unpause) {
+        append_webm_playback_log("prebuffer_release", opus_buffer_size);
+        append_webm_queue_state_log(
+            "prebuffer_release", playback_observer_current_session_kind(),
+            playback_stage, controller_input, controller_decision,
+            opus_update_stats, seek_active, controller_input.user_paused);
         ndspChnSetPaused(0, false);
       }
+      if (use_webm_poc && playback_stage == WebmPlaybackStage::Prebuffering &&
+          opus_update_stats.decoded_buffers > 0 &&
+          !controller_decision.release_prebuffer) {
+        append_webm_queue_state_log("prebuffer_hold_after_pcm",
+                                    playback_observer_current_session_kind(),
+                                    playback_stage, controller_input,
+                                    controller_decision, opus_update_stats,
+                                    seek_active, controller_input.user_paused);
+      }
       if (use_webm_poc && next_stage == WebmPlaybackStage::Steady) {
-        opus_player.set_decode_tuning(webm_steady_decode_tuning());
+        bool keep_seek_tuning = false;
+        LightLock_Lock(&ctx.lock);
+        keep_seek_tuning = ctx.active_stream_seek_seq > 0;
+        LightLock_Unlock(&ctx.lock);
+        opus_player.set_decode_tuning(keep_seek_tuning
+                                          ? webm_seek_decode_tuning()
+                                          : webm_steady_decode_tuning());
       }
-    }
-
-    if (use_opus_poc_for_update && opus_player.has_decode_failed()) {
-      log_playback_compare_event(ctx.active_stream_mode,
-                                 PlaybackCompareEvent::DecodeFailure,
-                                 opus_update_stats);
-      LightLock_Lock(&ctx.lock);
-      ctx.opus_playback_failure =
-          ctx.opus_webm_poc_enabled
-              ? webm_error_to_failure(opus_player.webm_remux_error())
-              : OpusPlaybackFailure::Decoder;
-      if (ctx.opus_playback_failure == OpusPlaybackFailure::None) {
-        ctx.opus_playback_failure = OpusPlaybackFailure::Decoder;
+      if (opus_player.has_decode_failed()) {
+        log_playback_compare_event(ctx.active_stream_mode,
+                                   PlaybackCompareEvent::DecodeFailure,
+                                   opus_update_stats);
+        LightLock_Lock(&ctx.lock);
+        const bool failed_during_seek = ctx.active_stream_seek_seq > 0;
+        ctx.opus_playback_failure =
+            ctx.active_stream_mode == StreamContainerMode::ProxyWebmOpus
+                ? webm_error_to_failure(opus_player.webm_remux_error())
+                : OpusPlaybackFailure::Decoder;
+        if (ctx.opus_playback_failure == OpusPlaybackFailure::None) {
+          ctx.opus_playback_failure = OpusPlaybackFailure::Decoder;
+        }
+        ctx.g_status_msg = playback_failure_message(ctx.opus_playback_failure);
+        ctx.playing_id = "";
+        OpusPocPlayer::is_playing = false;
+        ctx.webm_playback_stage = WebmPlaybackStage::Failed;
+        if (failed_during_seek) {
+          append_webm_queue_state_log("decode_failure_during_seek",
+                                      playback_observer_current_session_kind(),
+                                      playback_stage, controller_input,
+                                      controller_decision, opus_update_stats,
+                                      true, ctx.is_paused);
+          clear_active_webm_seek_runtime(&ctx);
+        }
+        LightLock_Unlock(&ctx.lock);
+        playback_observer_end_session();
       }
-      ctx.g_status_msg = playback_failure_message(ctx.opus_playback_failure);
-      ctx.playing_id = "";
-      OpusPocPlayer::is_playing = false;
-      ctx.webm_playback_stage = WebmPlaybackStage::Failed;
-      LightLock_Unlock(&ctx.lock);
-      playback_observer_end_session();
     }
 
     // Clear buffering flag once audio actually starts playing
@@ -2803,8 +3655,9 @@ int main(int argc, char *argv[]) {
     bool has_started_playing = use_opus_poc_for_update &&
                                opus_player.has_started_playing() &&
                                !waiting_for_prebuffer_release;
-    if (use_opus_poc_for_update && has_started_playing &&
-        !g_opus_audio_started_logged) {
+    const bool pcm_queued_this_update =
+        use_opus_poc_for_update && opus_update_stats.decoded_buffers > 0;
+    if (pcm_queued_this_update && !g_opus_first_pcm_queued_logged) {
       size_t logged_opus_buffer_size = 0;
       LightLock_Lock(&stream_lock);
       logged_opus_buffer_size =
@@ -2812,14 +3665,87 @@ int main(int argc, char *argv[]) {
       LightLock_Unlock(&stream_lock);
       append_opus_playback_perf_log(OpusPerfEvent::AudioStarted,
                                     logged_opus_buffer_size);
-      g_opus_audio_started_logged = true;
+      g_opus_first_pcm_queued_logged = true;
       log_playback_compare_event(ctx.active_stream_mode,
                                  PlaybackCompareEvent::FirstPcmQueued,
                                  opus_update_stats);
     }
-    if (use_opus_poc_for_update && ctx.opus_webm_poc_enabled &&
-        has_started_playing && !g_webm_audio_started_logged) {
+    if (use_opus_poc_for_update && has_started_playing &&
+        !g_opus_audio_started_logged) {
+      g_opus_audio_started_logged = true;
+    }
+    if (use_opus_poc_for_update && use_webm_poc && pcm_queued_this_update &&
+        !g_webm_first_pcm_queued_logged) {
       append_webm_playback_log("first_pcm_queued", opus_buffer_size);
+      append_webm_queue_state_log(
+          "first_pcm_queued", playback_observer_current_session_kind(),
+          playback_stage, controller_input, controller_decision,
+          opus_update_stats, ctx.active_stream_seek_seq > 0, ctx.is_paused);
+      PlaybackObserverEventTimes phase5a_times = {};
+      if (playback_observer_get_event_times(&phase5a_times)) {
+        append_webm_phase5a_summary_log(
+            playback_observer_current_session_kind(), phase5a_times);
+      }
+      int active_seek_seq = 0;
+      int active_seek_target_ms = 0;
+      u64 active_seek_plan_ready_at_ms = 0;
+      bool repeated_seek = false;
+      WebmSeekReuseClass reuse_class = WebmSeekReuseClass::Cold;
+      WebmSeekPlan active_seek_plan = {};
+      LightLock_Lock(&ctx.lock);
+      active_seek_seq = ctx.active_stream_seek_seq;
+      active_seek_target_ms = ctx.active_stream_seek_target_ms;
+      active_seek_plan_ready_at_ms = ctx.active_stream_seek_plan_ready_at_ms;
+      repeated_seek = ctx.active_stream_repeated_seek;
+      reuse_class = ctx.active_stream_reuse_class;
+      active_seek_plan = ctx.active_stream_seek_plan;
+      LightLock_Unlock(&ctx.lock);
+      if (active_seek_seq > 0 && active_seek_plan_ready_at_ms > 0) {
+        WebmSeekRequest seek_request = {};
+        seek_request.target_ms = active_seek_target_ms;
+        seek_request.seek_seq = active_seek_seq;
+        append_webm_seek_trace_log(
+            "first_pcm_after_seek", active_seek_seq, seek_request,
+            repeated_seek, reuse_class, &active_seek_plan, NULL,
+            active_seek_plan.reconnect_start_byte,
+            active_seek_plan.selected_cluster_ms, active_seek_plan.cache_hit,
+            osGetTime() - active_seek_plan_ready_at_ms);
+        uint64_t runtime_seek_start_byte = 0;
+        int runtime_seek_timecode_ms = -1;
+        if (opus_player.get_webm_last_seek_runtime_point(
+                &runtime_seek_start_byte, &runtime_seek_timecode_ms)) {
+          LightLock_Lock(&ctx.lock);
+          const WebmSeekCacheStoreTrace store_trace =
+              append_webm_seek_runtime_cache_point(&ctx.webm_seek_track_state,
+                                                   runtime_seek_timecode_ms,
+                                                   runtime_seek_start_byte);
+          append_webm_seek_cache_store_log("seek_runtime_cache_harvest",
+                                           active_seek_seq,
+                                           active_seek_target_ms, store_trace);
+          ctx.active_stream_runtime_cache_saved =
+              store_trace.status != WebmSeekCacheStoreStatus::IgnoredInvalid;
+          ctx.active_stream_first_pcm_queued_logged = true;
+          ctx.active_stream_first_pcm_queued_at_ms = osGetTime();
+          LightLock_Unlock(&ctx.lock);
+        }
+      }
+      g_webm_first_pcm_queued_logged = true;
+    }
+    if (use_opus_poc_for_update && use_webm_poc &&
+        ctx.active_stream_first_pcm_queued_logged &&
+        ctx.active_stream_first_pcm_queued_at_ms > 0 && !ctx.is_paused &&
+        !has_started_playing &&
+        osGetTime() >= ctx.active_stream_first_pcm_queued_at_ms + 1000ULL) {
+      append_webm_queue_state_log(
+          "queue_to_playing_slow", playback_observer_current_session_kind(),
+          playback_stage, controller_input, controller_decision,
+          opus_update_stats, true, ctx.is_paused);
+      LightLock_Lock(&ctx.lock);
+      ctx.active_stream_first_pcm_queued_at_ms = osGetTime();
+      LightLock_Unlock(&ctx.lock);
+    }
+    if (use_opus_poc_for_update && use_webm_poc && has_started_playing &&
+        !g_webm_audio_started_logged) {
       g_webm_audio_started_logged = true;
     }
     if (use_opus_poc_for_update && has_started_playing &&
@@ -2829,6 +3755,15 @@ int main(int argc, char *argv[]) {
                                  opus_update_stats);
       LightLock_Lock(&ctx.lock);
       ctx.compare_audio_audible_logged = true;
+      LightLock_Unlock(&ctx.lock);
+    }
+    if (use_opus_poc_for_update && use_webm_poc) {
+      LightLock_Lock(&ctx.lock);
+      if (ctx.active_stream_seek_seq > 0 &&
+          ctx.active_stream_first_pcm_queued_logged &&
+          (has_started_playing || ctx.is_paused)) {
+        clear_active_webm_seek_runtime(&ctx);
+      }
       LightLock_Unlock(&ctx.lock);
     }
     if (use_opus_poc_for_update && has_started_playing && !use_webm_poc) {

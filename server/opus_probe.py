@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import time
+from dataclasses import asdict, dataclass
 from typing import Any
 
-import yt_dlp  # type: ignore
+import yt_dlp
 
-
-OPUS_FORMAT_SELECTOR = (
-    "bestaudio[acodec*=opus][ext=webm]/"
-    "bestaudio[acodec*=opus]"
-)
+OPUS_FORMAT_SELECTOR = "249/bestaudio[acodec*=opus][ext=webm]/bestaudio[acodec*=opus]"
 
 
 @dataclass(frozen=True)
@@ -176,9 +172,7 @@ def extract_opus_format_lookup(video_id: str) -> OpusFormatLookup:
         abr=_as_float_or_none(raw_info.get("abr")),
         sample_rate=_as_int_or_none(raw_info.get("asr")),
         channels=_as_int_or_none(raw_info.get("audio_channels")),
-        filesize=_as_int_or_none(
-            raw_info.get("filesize") or raw_info.get("filesize_approx")
-        ),
+        filesize=_as_int_or_none(raw_info.get("filesize") or raw_info.get("filesize_approx")),
         duration=_as_float_or_none(raw_info.get("duration")),
     )
     postprocess_ms = int((time.monotonic() - postprocess_start) * 1000)

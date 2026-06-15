@@ -18,7 +18,24 @@ enum LRAction {
 enum MenuButtonSide { MENU_BTN_LEFT = 0, MENU_BTN_RIGHT = 1 };
 
 // === Audio Path ===
-enum class AudioPathConfig { OPUS_DIRECT = 0 };
+enum class AudioPathConfig {
+  PROXY_OGG_OPUS = 0,
+  DIRECT_WEBM_OPUS = 1,
+};
+
+inline bool audio_path_uses_webm_direct(AudioPathConfig path) {
+  return path == AudioPathConfig::DIRECT_WEBM_OPUS;
+}
+
+inline const char *audio_path_display_name(AudioPathConfig path) {
+  switch (path) {
+    case AudioPathConfig::DIRECT_WEBM_OPUS:
+      return "Direct WebM/Opus";
+    case AudioPathConfig::PROXY_OGG_OPUS:
+    default:
+      return "Proxy Ogg/Opus";
+  }
+}
 
 // === Application Config ===
 struct AppConfig {
@@ -34,7 +51,7 @@ struct AppConfig {
   std::string wallpaper_file = ""; // Wallpaper filename (in wallpaper/ folder)
   std::string server_ip = "";      // Server IP:Port (e.g. "192.168.1.100:8080")
   std::string language = "en";     // Metadata language ("en" or "ja")
-  AudioPathConfig audio_path = AudioPathConfig::OPUS_DIRECT;
+  AudioPathConfig audio_path = AudioPathConfig::PROXY_OGG_OPUS;
   float accent_saturation = 0.75f; // 0.0-1.0 (custom mode saturation)
   float accent_brightness = 0.78f; // 0.0-1.0 (custom mode brightness/value)
 };
@@ -120,46 +137,44 @@ inline u32 hsv_to_color32(int h, float s, float v) {
 
   float r = 0, g = 0, b = 0;
   switch (hi % 6) {
-  case 0:
-    r = v;
-    g = t;
-    b = p;
-    break;
-  case 1:
-    r = q;
-    g = v;
-    b = p;
-    break;
-  case 2:
-    r = p;
-    g = v;
-    b = t;
-    break;
-  case 3:
-    r = p;
-    g = q;
-    b = v;
-    break;
-  case 4:
-    r = t;
-    g = p;
-    b = v;
-    break;
-  case 5:
-    r = v;
-    g = p;
-    b = q;
-    break;
+    case 0:
+      r = v;
+      g = t;
+      b = p;
+      break;
+    case 1:
+      r = q;
+      g = v;
+      b = p;
+      break;
+    case 2:
+      r = p;
+      g = v;
+      b = t;
+      break;
+    case 3:
+      r = p;
+      g = q;
+      b = v;
+      break;
+    case 4:
+      r = t;
+      g = p;
+      b = v;
+      break;
+    case 5:
+      r = v;
+      g = p;
+      b = q;
+      break;
   }
   return C2D_Color32((u8)(r * 255), (u8)(g * 255), (u8)(b * 255), 255);
 }
 
 // Get hue value from palette index
 inline int palette_get_hue(int row, int col) {
-  if (row < 0 || row >= COLOR_PALETTE_ROWS)
-    row = 0;
-  if (col < 0 || col >= COLOR_PALETTE_COLS)
-    col = 0;
+  if (row < 0 || row >= COLOR_PALETTE_ROWS) row = 0;
+  if (col < 0 || col >= COLOR_PALETTE_COLS) col = 0;
   return COLOR_PALETTE[row][col];
 }
 
@@ -220,24 +235,19 @@ inline void apply_theme(const AppConfig &cfg, ThemeColors &colors) {
 
   float play_s = s * 0.9f;
   float play_v = v * 0.7f;
-  if (play_s > 1.0f)
-    play_s = 1.0f;
-  if (play_v > 1.0f)
-    play_v = 1.0f;
+  if (play_s > 1.0f) play_s = 1.0f;
+  if (play_v > 1.0f) play_v = 1.0f;
   colors.playing_bg = hsv_to_color32(hue, play_s, play_v);
 
   float ptxt_s = s * 0.4f;
   float ptxt_v = v * 1.1f;
-  if (ptxt_v > 1.0f)
-    ptxt_v = 1.0f;
-  if (ptxt_s > 1.0f)
-    ptxt_s = 1.0f;
+  if (ptxt_v > 1.0f) ptxt_v = 1.0f;
+  if (ptxt_s > 1.0f) ptxt_s = 1.0f;
   colors.playing_text = hsv_to_color32(hue, ptxt_s, ptxt_v);
 
   float cursor_s = s * 1.1f;
   float cursor_v = v * 0.6f;
-  if (cursor_s > 1.0f)
-    cursor_s = 1.0f;
+  if (cursor_s > 1.0f) cursor_s = 1.0f;
   colors.cursor_outline = hsv_to_color32(hue, cursor_s, cursor_v);
 
   colors.warn = C2D_Color32(255, 80, 80, 255);

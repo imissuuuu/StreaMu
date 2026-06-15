@@ -1,6 +1,8 @@
 import asyncio
 import collections
 import re
+import socket
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -8,31 +10,39 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncGenerator, Iterator
 
+import requests
+import uvicorn
+import yt_dlp
 from opus_probe import (
     OpusExtractMetrics,
     OpusFormatInfo,
     extract_opus_format_lookup,
 )
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
+from starlette.routing import Route
 from webm_opus_remux import (
     WebmOpusRemuxError,
     iter_ogg_opus_pages_from_webm_chunks,
 )
-
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.responses import StreamingResponse, PlainTextResponse, HTMLResponse, JSONResponse, Response
-from starlette.requests import Request
-import yt_dlp # type: ignore
-import uvicorn # type: ignore
-import socket
 
 PORT = 8080
 MAX_LOGS = 50
 app_logs: collections.deque[str] = collections.deque(maxlen=MAX_LOGS)
 
 _opus_info_cache: dict[str, tuple[OpusFormatInfo, float]] = {}
+_opus_info_lookup_lock = threading.Lock()
+_opus_info_inflight: dict[str, "InflightOpusInfoLookup"] = {}
 URL_CACHE_TTL = 3600  # 1 hour
 MAX_OPUS_WEBM_BYTES = 64 * 1024 * 1024
+MAX_OPUS_PROBE_BYTES = 512 * 1024
 OPUS_THUMBNAIL_DELAY_BYTES = 16 * 1024
 OPUS_OGG_PAGE_BATCH_BYTES = 16 * 1024
 OPUS_OGG_PAGE_BATCH_MAX = 64
@@ -42,6 +52,7 @@ OPUS_SEEK_RANGE_BACKTRACK_BYTES = 1024 * 1024
 OPUS_SEEK_CLUSTER_SCAN_BYTES = 1024 * 1024
 WEBM_CLUSTER_ID = b"\x1f\x43\xb6\x75"
 _opus_prebuffer_videos: set[str] = set()
+_http_session_local = threading.local()
 
 
 @dataclass(frozen=True)
@@ -61,6 +72,12 @@ class OpusInfoLookupResult:
     failure_stage: str | None
 
 
+@dataclass
+class InflightOpusInfoLookup:
+    done: threading.Event
+    result: OpusInfoLookupResult | None = None
+
+
 def add_log(msg: str) -> None:
     time_str: str = datetime.now().strftime("%H:%M:%S")
     log_msg: str = f"[{time_str}] {msg}"
@@ -68,8 +85,23 @@ def add_log(msg: str) -> None:
     app_logs.appendleft(log_msg)
 
 
-def _begin_opus_perf_request(route: str,
-                             video_id: str) -> OpusPerfRequestContext:
+def _get_http_session() -> Any:
+    session = getattr(_http_session_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=8,
+            pool_maxsize=8,
+            max_retries=0,
+            pool_block=False,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _http_session_local.session = session
+    return session
+
+
+def _begin_opus_perf_request(route: str, video_id: str) -> OpusPerfRequestContext:
     request_id = f"{time.monotonic_ns() & 0xFFFFFF:06x}"
     return OpusPerfRequestContext(
         route=route,
@@ -89,9 +121,7 @@ def _format_perf_field_value(value: object) -> str:
     return str(value).replace(" ", "_")
 
 
-def _log_opus_perf(ctx: OpusPerfRequestContext,
-                   event: str,
-                   **fields: object) -> None:
+def _log_opus_perf(ctx: OpusPerfRequestContext, event: str, **fields: object) -> None:
     parts: list[str] = [
         "Opus perf",
         f"route={ctx.route}",
@@ -122,17 +152,89 @@ def _lookup_cached_or_extract_opus_info(v_id: str) -> OpusInfoLookupResult:
             failure_stage=None,
         )
 
-    lookup = extract_opus_format_lookup(v_id)
-    if lookup.info is not None:
-        _opus_info_cache[v_id] = (lookup.info, time.time())
+    inflight: InflightOpusInfoLookup | None = None
+    is_owner = False
+    with _opus_info_lookup_lock:
+        cached = _opus_info_cache.get(v_id)
+        if cached and time.time() - cached[1] < URL_CACHE_TTL:
+            return OpusInfoLookupResult(
+                info=cached[0],
+                cache_hit=True,
+                lookup_ms=int((time.monotonic() - lookup_start) * 1000),
+                extract_metrics=OpusExtractMetrics(
+                    ydl_init_ms=0,
+                    extract_info_ms=0,
+                    postprocess_ms=0,
+                    total_ms=0,
+                ),
+                failure_stage=None,
+            )
+        inflight = _opus_info_inflight.get(v_id)
+        if inflight is None:
+            inflight = InflightOpusInfoLookup(done=threading.Event())
+            _opus_info_inflight[v_id] = inflight
+            is_owner = True
 
-    return OpusInfoLookupResult(
-        info=lookup.info,
-        cache_hit=False,
-        lookup_ms=int((time.monotonic() - lookup_start) * 1000),
-        extract_metrics=lookup.metrics,
-        failure_stage=lookup.failure_stage,
-    )
+    if not is_owner:
+        inflight.done.wait()
+        if inflight.result is not None:
+            shared = inflight.result
+            return OpusInfoLookupResult(
+                info=shared.info,
+                cache_hit=shared.cache_hit,
+                lookup_ms=int((time.monotonic() - lookup_start) * 1000),
+                extract_metrics=shared.extract_metrics,
+                failure_stage=shared.failure_stage,
+            )
+        return OpusInfoLookupResult(
+            info=None,
+            cache_hit=False,
+            lookup_ms=int((time.monotonic() - lookup_start) * 1000),
+            extract_metrics=OpusExtractMetrics(
+                ydl_init_ms=0,
+                extract_info_ms=0,
+                postprocess_ms=0,
+                total_ms=0,
+            ),
+            failure_stage="shared_lookup_missing",
+        )
+
+    result: OpusInfoLookupResult
+    try:
+        lookup = extract_opus_format_lookup(v_id)
+        if lookup.info is not None:
+            _opus_info_cache[v_id] = (lookup.info, time.time())
+
+        result = OpusInfoLookupResult(
+            info=lookup.info,
+            cache_hit=False,
+            lookup_ms=int((time.monotonic() - lookup_start) * 1000),
+            extract_metrics=lookup.metrics,
+            failure_stage=lookup.failure_stage,
+        )
+    except Exception:
+        result = OpusInfoLookupResult(
+            info=None,
+            cache_hit=False,
+            lookup_ms=int((time.monotonic() - lookup_start) * 1000),
+            extract_metrics=OpusExtractMetrics(
+                ydl_init_ms=0,
+                extract_info_ms=0,
+                postprocess_ms=0,
+                total_ms=0,
+            ),
+            failure_stage="unexpected_exception",
+        )
+        raise
+    finally:
+        inflight.result = result
+        inflight.done.set()
+        with _opus_info_lookup_lock:
+            current = _opus_info_inflight.get(v_id)
+            if current is inflight:
+                _opus_info_inflight.pop(v_id, None)
+    return result
+
 
 def get_local_ip() -> str:
     try:
@@ -143,6 +245,7 @@ def get_local_ip() -> str:
         return ip
     except (socket.error, OSError):
         return "127.0.0.1"
+
 
 def format_duration(seconds: int | float | None) -> str:
     """Convert seconds to mm:ss or h:mm:ss format"""
@@ -155,6 +258,7 @@ def format_duration(seconds: int | float | None) -> str:
     if h > 0:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
 
 def format_views(count: int | float | None, lang: str = "en") -> str:
     """Format view count to human-readable string (e.g. 1.2M views / 120万回)"""
@@ -176,12 +280,15 @@ def format_views(count: int | float | None, lang: str = "en") -> str:
         return f"{c / 1_000:.1f}K views".replace(".0K views", "K views")
     return f"{c:,} views"
 
+
 def format_relative_date(upload_date_str: str | None) -> str:
     """Convert YYYYMMDD to relative date string (e.g. '3y ago', '2mo ago')"""
     if not upload_date_str or len(upload_date_str) != 8:
         return "?"
     try:
-        upload = datetime(int(upload_date_str[:4]), int(upload_date_str[4:6]), int(upload_date_str[6:8]))
+        upload = datetime(
+            int(upload_date_str[:4]), int(upload_date_str[4:6]), int(upload_date_str[6:8])
+        )
         now = datetime.now()
         diff = now - upload
         days = diff.days
@@ -204,35 +311,49 @@ def format_relative_date(upload_date_str: str | None) -> str:
     except (ValueError, TypeError):
         return "?"
 
+
 def search_youtube(query: str, lang: str = "en") -> str:
     ydl_opts = {
-        'extract_flat': 'in_playlist',
-        'max_downloads': 10,
-        'quiet': True,
-        'default_search': 'ytsearch10',
-        'socket_timeout': 10,
+        "extract_flat": "in_playlist",
+        "max_downloads": 10,
+        "quiet": True,
+        "default_search": "ytsearch10",
+        "socket_timeout": 10,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(query, download=False)
             output = ""
-            if 'entries' in info:
-                for entry in info['entries']:
+            if "entries" in info:
+                for entry in info["entries"]:
                     # Filter out live streams and archives (title-based)
-                    title = entry.get('title', '').replace('\t', ' ').replace('\n', ' ')
-                    live_status = entry.get('live_status', '')
+                    title = entry.get("title", "").replace("\t", " ").replace("\n", " ")
+                    live_status = entry.get("live_status", "")
                     title_lower = title.lower()
-                    if live_status in ('is_live', 'is_upcoming', 'post_live'):
+                    if live_status in ("is_live", "is_upcoming", "post_live"):
                         continue
-                    if any(kw in title_lower for kw in ['\u3010live\u3011', '\u3010生放送\u3011', 'live stream', '配信中', '生配信']):
+                    if any(
+                        kw in title_lower
+                        for kw in [
+                            "\u3010live\u3011",
+                            "\u3010生放送\u3011",
+                            "live stream",
+                            "配信中",
+                            "生配信",
+                        ]
+                    ):
                         continue
-                    
-                    vid = entry.get('id', '')
-                    duration = format_duration(entry.get('duration'))
-                    views = format_views(entry.get('view_count'), lang)
-                    uploader = entry.get('channel', entry.get('uploader', 'Unknown')).replace('\t', ' ').replace('\n', ' ')
-                    upload_date = ''  # Not available with extract_flat
-                    
+
+                    vid = entry.get("id", "")
+                    duration = format_duration(entry.get("duration"))
+                    views = format_views(entry.get("view_count"), lang)
+                    uploader = (
+                        entry.get("channel", entry.get("uploader", "Unknown"))
+                        .replace("\t", " ")
+                        .replace("\n", " ")
+                    )
+                    upload_date = ""  # Not available with extract_flat
+
                     output += f"{vid}\t{title}\t{duration}\t{views}\t{uploader}\t{upload_date}\n"
             add_log(f"Search completed: '{query}' ({len(info.get('entries', []))} results)")
             return output
@@ -242,6 +363,7 @@ def search_youtube(query: str, lang: str = "en") -> str:
         except ValueError as e:
             add_log(f"Search ERROR (Value): {e}")
             return ""
+
 
 async def search(request: Request) -> PlainTextResponse:
     q = request.query_params.get("q", "")
@@ -255,9 +377,10 @@ async def search(request: Request) -> PlainTextResponse:
     output = await asyncio.to_thread(search_youtube, q, lang)
     return PlainTextResponse(output)
 
+
 async def opus_info(request: Request) -> JSONResponse | PlainTextResponse:
     v_id = request.query_params.get("i", "")
-    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+    if not v_id or not isinstance(v_id, str) or not re.match(r"^[a-zA-Z0-9_\-]{11}$", v_id):
         add_log(f"Blocked invalid Opus info ID: {v_id}")
         return PlainTextResponse("Invalid video ID format", status_code=400)
 
@@ -295,6 +418,7 @@ async def opus_info(request: Request) -> JSONResponse | PlainTextResponse:
     _log_opus_perf(ctx, "response-ready")
     return JSONResponse(lookup.info.to_json_dict())
 
+
 def _get_cached_or_extract_opus_info(v_id: str) -> OpusFormatInfo | None:
     return _lookup_cached_or_extract_opus_info(v_id).info
 
@@ -309,8 +433,29 @@ def _clamp_seek_seconds(value: str | None) -> int:
     return seek_seconds
 
 
-def _fragment_start_index(fragments: list[dict[str, Any]],
-                          seek_seconds: int) -> tuple[int, float]:
+def _clamp_start_byte(value: str | None) -> int:
+    try:
+        start_byte = int(value or "0")
+    except ValueError:
+        return 0
+    if start_byte < 0:
+        return 0
+    return start_byte
+
+
+def _clamp_probe_size(value: str | None) -> int:
+    try:
+        probe_size = int(value or "0")
+    except ValueError:
+        return 0
+    if probe_size <= 0:
+        return 0
+    if probe_size > MAX_OPUS_PROBE_BYTES:
+        return MAX_OPUS_PROBE_BYTES
+    return probe_size
+
+
+def _fragment_start_index(fragments: list[dict[str, Any]], seek_seconds: int) -> tuple[int, float]:
     if seek_seconds <= 0 or not fragments:
         return 0, 0.0
 
@@ -352,8 +497,7 @@ def _webm_header_prefix(data: bytes) -> bytes:
     return data[:cluster_offset]
 
 
-def _opus_seek_range_start(info: OpusFormatInfo,
-                           seek_seconds: int) -> int | None:
+def _opus_seek_range_start(info: OpusFormatInfo, seek_seconds: int) -> int | None:
     if seek_seconds <= 0 or not info.filesize or not info.duration:
         return None
     if info.filesize <= 0 or info.duration <= 0:
@@ -363,22 +507,32 @@ def _opus_seek_range_start(info: OpusFormatInfo,
     return max(0, estimated - OPUS_SEEK_RANGE_BACKTRACK_BYTES)
 
 
-def _fetch_url_bytes(fetch_url: str, headers: dict[str, str],
-                     timeout: int = 30) -> bytes:
-    req = urllib.request.Request(fetch_url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+def _fetch_url_bytes(fetch_url: str, headers: dict[str, str], timeout: int = 30) -> bytes:
+    resp = _get_http_session().get(
+        fetch_url,
+        headers=headers,
+        timeout=timeout,
+        allow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.content
 
 
-def _fetch_url_bytes_limited(fetch_url: str, headers: dict[str, str],
-                             max_bytes: int,
-                             timeout: int = 60) -> bytes:
-    req = urllib.request.Request(fetch_url, headers=headers)
+def _fetch_url_bytes_limited(
+    fetch_url: str, headers: dict[str, str], max_bytes: int, timeout: int = 60
+) -> bytes:
     chunks: list[bytes] = []
     total = 0
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _get_http_session().get(
+        fetch_url,
+        headers=headers,
+        timeout=timeout,
+        allow_redirects=True,
+        stream=True,
+    ) as resp:
+        resp.raise_for_status()
         while True:
-            chunk = resp.read(65536)
+            chunk = resp.raw.read(65536)
             if not chunk:
                 break
             total += len(chunk)
@@ -388,8 +542,9 @@ def _fetch_url_bytes_limited(fetch_url: str, headers: dict[str, str],
     return b"".join(chunks)
 
 
-def _fetch_url_range(fetch_url: str, headers: dict[str, str], start: int,
-                     end: int | None = None, timeout: int = 30) -> bytes:
+def _fetch_url_range(
+    fetch_url: str, headers: dict[str, str], start: int, end: int | None = None, timeout: int = 30
+) -> bytes:
     if start < 0:
         raise ValueError("negative range start")
     range_headers = dict(headers)
@@ -399,50 +554,458 @@ def _fetch_url_range(fetch_url: str, headers: dict[str, str], start: int,
         if end < start:
             raise ValueError("invalid byte range")
         range_headers["Range"] = f"bytes={start}-{end}"
-    req = urllib.request.Request(fetch_url, headers=range_headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    resp = _get_http_session().get(
+        fetch_url,
+        headers=range_headers,
+        timeout=timeout,
+        allow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.content
 
 
-async def opus_webm_generator(request: Request, v_id: str) -> AsyncGenerator[bytes, None]:
-    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
-    if info is None:
-        add_log(f"Opus WebM extraction failed: {v_id}")
-        return
-    if not info.direct_url:
-        add_log(f"Opus WebM fragmented stream unsupported: {v_id}")
-        return
+def _stream_opus_info_payload(v_id: str, info: OpusFormatInfo) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "stream_url": f"http://127.0.0.1:{PORT}/stream_opus?i={v_id}",
+        "filesize": int(info.filesize) if info.filesize is not None else 0,
+        "duration_ms": (int(float(info.duration) * 1000.0) if info.duration is not None else 0),
+    }
+    return payload
 
-    add_log(f"Opus WebM stream started: {v_id} ({info.ext}/{info.acodec})")
-    try:
-        req = urllib.request.Request(info.direct_url, headers=info.http_headers)
+
+def iter_seekable_webm_chunks(
+    ctx: OpusPerfRequestContext,
+    info: OpusFormatInfo,
+    seek_seconds: int,
+) -> Iterator[bytes]:
+    upstream_first_byte_logged = False
+    total = 0
+
+    def read_url(fetch_url: str, headers: dict[str, str] | None = None) -> Iterator[bytes]:
+        nonlocal upstream_first_byte_logged
+        nonlocal total
+        req_headers = info.http_headers if headers is None else headers
+        req = urllib.request.Request(fetch_url, headers=req_headers)
         with urllib.request.urlopen(req, timeout=300) as resp:
             while True:
-                if await request.is_disconnected():
-                    add_log(f"Opus WebM stream disconnected: {v_id}")
-                    break
-                chunk = resp.read(32768)
+                chunk = resp.read(16384)
                 if not chunk:
                     break
+                total += len(chunk)
+                if total > MAX_OPUS_WEBM_BYTES:
+                    raise ValueError("response too large")
+                if not upstream_first_byte_logged:
+                    upstream_first_byte_logged = True
+                    _log_opus_perf(
+                        ctx,
+                        "upstream-first-byte",
+                        bytes=total,
+                    )
                 yield chunk
+
+    if info.fragments:
+        init_fragments = [
+            fragment for fragment in info.fragments if _fragment_duration_seconds(fragment) <= 0.0
+        ]
+        media_fragments = [
+            fragment for fragment in info.fragments if _fragment_duration_seconds(fragment) > 0.0
+        ]
+        if seek_seconds > 0 and not init_fragments:
+            start_idx, fragment_seconds = 0, 0.0
+            add_log("Opus seek: no init fragment; streaming from first fragment")
+        else:
+            start_idx, fragment_seconds = _fragment_start_index(media_fragments, seek_seconds)
+        add_log(f"Opus seek info: start_idx={start_idx} fragment_time={fragment_seconds:.1f}s")
+        for fragment in init_fragments:
+            yield from read_url(_fragment_url(info.direct_url, fragment))
+        for fragment in media_fragments[start_idx:]:
+            yield from read_url(_fragment_url(info.direct_url, fragment))
+        return
+
+    range_start = _opus_seek_range_start(info, seek_seconds)
+    if range_start is not None:
+        try:
+            header = _fetch_url_range(info.direct_url, info.http_headers, 0, (512 * 1024) - 1)
+            header_prefix = _webm_header_prefix(header)
+            range_headers = dict(info.http_headers)
+            range_headers["Range"] = f"bytes={range_start}-"
+            req = urllib.request.Request(info.direct_url, headers=range_headers)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                pending = bytearray()
+                cluster_found = False
+                while True:
+                    chunk = resp.read(16384)
+                    if not chunk:
+                        raise ValueError("Opus seek cluster not found")
+                    total += len(chunk)
+                    if total > MAX_OPUS_WEBM_BYTES:
+                        raise ValueError("response too large")
+                    if not upstream_first_byte_logged:
+                        upstream_first_byte_logged = True
+                        _log_opus_perf(
+                            ctx,
+                            "upstream-first-byte",
+                            bytes=total,
+                        )
+                    pending.extend(chunk)
+                    cluster_offset = pending.find(WEBM_CLUSTER_ID)
+                    if cluster_offset >= 0:
+                        yield header_prefix
+                        yield bytes(pending[cluster_offset:])
+                        cluster_found = True
+                        break
+                    if len(pending) > OPUS_SEEK_CLUSTER_SCAN_BYTES:
+                        raise ValueError("Opus seek cluster not found")
+
+                if cluster_found:
+                    while True:
+                        chunk = resp.read(16384)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_OPUS_WEBM_BYTES:
+                            raise ValueError("response too large")
+                        yield chunk
+                    return
+        except (OSError, ValueError) as e:
+            add_log(f"Opus seek range fallback: {e}")
+
+    yield from read_url(info.direct_url)
+
+
+async def opus_webm_generator(
+    request: Request,
+    ctx: OpusPerfRequestContext,
+    info: OpusFormatInfo,
+    seek_seconds: int,
+) -> AsyncGenerator[bytes, None]:
+    disconnected = False
+    _opus_info_cache[ctx.video_id] = (info, time.time())
+    _log_opus_perf(
+        ctx,
+        "stream-start",
+        seek=seek_seconds,
+        fragments=len(info.fragments),
+        ext=info.ext,
+        acodec=info.acodec,
+    )
+    try:
+        for chunk in iter_seekable_webm_chunks(ctx, info, seek_seconds):
+            if await request.is_disconnected():
+                add_log(f"Opus WebM stream disconnected: {ctx.video_id}")
+                disconnected = True
+                break
+            yield chunk
     except asyncio.CancelledError:
-        add_log(f"Opus WebM stream disconnected: {v_id}")
+        add_log(f"Opus WebM stream disconnected: {ctx.video_id}")
+        _log_opus_perf(ctx, "disconnected")
+        raise
+    except ValueError as e:
+        add_log(f"Opus WebM stream rejected: {e}")
+        _log_opus_perf(ctx, "rejected", error_type=type(e).__name__)
     except (BrokenPipeError, ConnectionResetError, OSError) as e:
         add_log(f"Opus WebM stream error: {e}")
+        _log_opus_perf(ctx, "failed", error_type=type(e).__name__)
+    else:
+        if disconnected:
+            _log_opus_perf(ctx, "disconnected")
+            return
+        add_log(f"Opus WebM stream finished: {ctx.video_id}")
+        _log_opus_perf(ctx, "finished")
+
+
+def iter_raw_webm_chunks(
+    ctx: OpusPerfRequestContext,
+    info: OpusFormatInfo,
+    start_byte: int,
+) -> Iterator[bytes]:
+    total = 0
+    upstream_first_byte_logged = False
+    if start_byte <= 0:
+        req_headers = dict(info.http_headers)
+        req = urllib.request.Request(info.direct_url, headers=req_headers)
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            while True:
+                chunk = resp.read(16384)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_OPUS_WEBM_BYTES:
+                    raise ValueError("response too large")
+                if not upstream_first_byte_logged:
+                    upstream_first_byte_logged = True
+                    _log_opus_perf(
+                        ctx,
+                        "upstream-first-byte",
+                        bytes=total,
+                        start=start_byte,
+                    )
+                yield chunk
+        return
+
+    header = _fetch_url_range(info.direct_url, info.http_headers, 0, (512 * 1024) - 1)
+    header_prefix = _webm_header_prefix(header)
+    if not header_prefix:
+        raise ValueError("missing webm header prefix")
+
+    req_headers = dict(info.http_headers)
+    req_headers["Range"] = f"bytes={start_byte}-"
+    req = urllib.request.Request(info.direct_url, headers=req_headers)
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        pending = bytearray()
+        cluster_found = False
+        while True:
+            chunk = resp.read(16384)
+            if not chunk:
+                raise ValueError("raw webm cluster not found")
+            total += len(chunk)
+            if total > MAX_OPUS_WEBM_BYTES:
+                raise ValueError("response too large")
+            if not upstream_first_byte_logged:
+                upstream_first_byte_logged = True
+                _log_opus_perf(
+                    ctx,
+                    "upstream-first-byte",
+                    bytes=total,
+                    start=start_byte,
+                )
+            pending.extend(chunk)
+            cluster_offset = pending.find(WEBM_CLUSTER_ID)
+            if cluster_offset >= 0:
+                yield header_prefix
+                yield bytes(pending[cluster_offset:])
+                cluster_found = True
+                break
+            if len(pending) > OPUS_SEEK_CLUSTER_SCAN_BYTES:
+                raise ValueError("raw webm cluster not found")
+
+        if cluster_found:
+            while True:
+                chunk = resp.read(16384)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_OPUS_WEBM_BYTES:
+                    raise ValueError("response too large")
+                yield chunk
+
+
+async def raw_webm_generator(
+    request: Request,
+    ctx: OpusPerfRequestContext,
+    info: OpusFormatInfo,
+    start_byte: int,
+) -> AsyncGenerator[bytes, None]:
+    disconnected = False
+    _opus_info_cache[ctx.video_id] = (info, time.time())
+    _log_opus_perf(
+        ctx,
+        "stream-start",
+        start=start_byte,
+        fragments=len(info.fragments),
+        ext=info.ext,
+        acodec=info.acodec,
+    )
+    try:
+        for chunk in iter_raw_webm_chunks(ctx, info, start_byte):
+            if await request.is_disconnected():
+                add_log(f"Opus raw WebM stream disconnected: {ctx.video_id}")
+                disconnected = True
+                break
+            yield chunk
+    except asyncio.CancelledError:
+        add_log(f"Opus raw WebM stream disconnected: {ctx.video_id}")
+        _log_opus_perf(ctx, "disconnected", start=start_byte)
+        raise
+    except ValueError as e:
+        add_log(f"Opus raw WebM stream rejected: {e}")
+        _log_opus_perf(
+            ctx,
+            "rejected",
+            error_type=type(e).__name__,
+            start=start_byte,
+        )
+    except (BrokenPipeError, ConnectionResetError, OSError) as e:
+        add_log(f"Opus raw WebM stream error: {e}")
+        _log_opus_perf(
+            ctx,
+            "failed",
+            error_type=type(e).__name__,
+            start=start_byte,
+        )
+    else:
+        if disconnected:
+            _log_opus_perf(ctx, "disconnected", start=start_byte)
+            return
+        add_log(f"Opus raw WebM stream finished: {ctx.video_id}")
+        _log_opus_perf(ctx, "finished", start=start_byte)
+
+
+async def stream_opus_info(request: Request) -> JSONResponse | PlainTextResponse:
+    v_id = request.query_params.get("i", "")
+    if not v_id or not isinstance(v_id, str) or not re.match(r"^[a-zA-Z0-9_\-]{11}$", v_id):
+        add_log(f"Blocked invalid Opus stream info ID: {v_id}")
+        return PlainTextResponse("Invalid video ID format", status_code=400)
+
+    ctx = _begin_opus_perf_request("stream_opus_info", v_id)
+    _log_opus_perf(ctx, "request-start")
+    lookup = await asyncio.to_thread(_lookup_cached_or_extract_opus_info, v_id)
+    if lookup.info is None:
+        _log_opus_perf(
+            ctx,
+            "info-failed",
+            cache_hit=lookup.cache_hit,
+            lookup_ms=lookup.lookup_ms,
+            failure_stage=lookup.failure_stage or "unknown",
+        )
+        return PlainTextResponse("Opus extraction failed", status_code=502)
+    _log_opus_perf(
+        ctx,
+        "response-ready",
+        cache_hit=lookup.cache_hit,
+        lookup_ms=lookup.lookup_ms,
+        filesize=lookup.info.filesize or 0,
+        duration_ms=int(float(lookup.info.duration or 0.0) * 1000.0),
+    )
+    return JSONResponse(_stream_opus_info_payload(v_id, lookup.info))
+
+
+async def stream_opus_probe(request: Request) -> Response | PlainTextResponse:
+    v_id = request.query_params.get("i", "")
+    if not v_id or not isinstance(v_id, str) or not re.match(r"^[a-zA-Z0-9_\-]{11}$", v_id):
+        add_log(f"Blocked invalid Opus probe ID: {v_id}")
+        return PlainTextResponse("Invalid video ID format", status_code=400)
+    start_byte = _clamp_start_byte(request.query_params.get("start", "0"))
+    probe_size = _clamp_probe_size(request.query_params.get("size", "0"))
+    if probe_size <= 0:
+        return PlainTextResponse("Invalid probe size", status_code=400)
+
+    ctx = _begin_opus_perf_request("stream_opus_probe", v_id)
+    _log_opus_perf(ctx, "request-start", start=start_byte, size=probe_size)
+
+    lookup = await asyncio.to_thread(_lookup_cached_or_extract_opus_info, v_id)
+    if lookup.info is None:
+        _log_opus_perf(
+            ctx,
+            "info-failed",
+            cache_hit=lookup.cache_hit,
+            lookup_ms=lookup.lookup_ms,
+            failure_stage=lookup.failure_stage or "unknown",
+            start=start_byte,
+            size=probe_size,
+        )
+        return PlainTextResponse("Opus extraction failed", status_code=502)
+    if not lookup.info.direct_url:
+        _log_opus_perf(
+            ctx,
+            "info-unsupported",
+            cache_hit=lookup.cache_hit,
+            lookup_ms=lookup.lookup_ms,
+            start=start_byte,
+            size=probe_size,
+        )
+        return PlainTextResponse("Opus fragmented stream unsupported", status_code=501)
+
+    end_byte = start_byte + probe_size - 1
+    try:
+        probe_bytes = await asyncio.to_thread(
+            _fetch_url_range,
+            lookup.info.direct_url,
+            lookup.info.http_headers,
+            start_byte,
+            end_byte,
+        )
+    except ValueError as e:
+        _log_opus_perf(
+            ctx,
+            "rejected",
+            error_type=type(e).__name__,
+            start=start_byte,
+            size=probe_size,
+        )
+        return PlainTextResponse(str(e), status_code=400)
+    except (BrokenPipeError, ConnectionResetError, OSError) as e:
+        add_log(f"Opus raw probe failed: {e}")
+        _log_opus_perf(
+            ctx,
+            "failed",
+            error_type=type(e).__name__,
+            start=start_byte,
+            size=probe_size,
+        )
+        return PlainTextResponse("Probe fetch failed", status_code=502)
+
+    _log_opus_perf(
+        ctx,
+        "finished",
+        start=start_byte,
+        size=probe_size,
+        sent=len(probe_bytes),
+    )
+    return Response(content=probe_bytes, media_type="application/octet-stream")
+
 
 async def stream_opus(request: Request) -> StreamingResponse | PlainTextResponse:
     v_id = request.query_params.get("i", "")
-    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+    if not v_id or not isinstance(v_id, str) or not re.match(r"^[a-zA-Z0-9_\-]{11}$", v_id):
         add_log(f"Blocked invalid Opus stream ID: {v_id}")
         return PlainTextResponse("Invalid video ID format", status_code=400)
+    start_byte = _clamp_start_byte(request.query_params.get("start", "0"))
 
-    info = await asyncio.to_thread(_get_cached_or_extract_opus_info, v_id)
-    if info is None:
+    ctx = _begin_opus_perf_request("stream_opus", v_id)
+    _log_opus_perf(ctx, "request-start", start=start_byte)
+
+    lookup = await asyncio.to_thread(_lookup_cached_or_extract_opus_info, v_id)
+    if lookup.info is None:
+        _log_opus_perf(
+            ctx,
+            "info-failed",
+            cache_hit=lookup.cache_hit,
+            lookup_ms=lookup.lookup_ms,
+            ydl_init_ms=lookup.extract_metrics.ydl_init_ms,
+            extract_info_ms=lookup.extract_metrics.extract_info_ms,
+            postprocess_ms=lookup.extract_metrics.postprocess_ms,
+            extract_total_ms=lookup.extract_metrics.total_ms,
+            failure_stage=lookup.failure_stage or "unknown",
+            start=start_byte,
+        )
         return PlainTextResponse("Opus extraction failed", status_code=502)
-    if not info.direct_url:
+    if not lookup.info.direct_url and start_byte > 0:
+        _log_opus_perf(
+            ctx,
+            "info-unsupported",
+            cache_hit=lookup.cache_hit,
+            lookup_ms=lookup.lookup_ms,
+            ydl_init_ms=lookup.extract_metrics.ydl_init_ms,
+            extract_info_ms=lookup.extract_metrics.extract_info_ms,
+            postprocess_ms=lookup.extract_metrics.postprocess_ms,
+            extract_total_ms=lookup.extract_metrics.total_ms,
+            start=start_byte,
+        )
         return PlainTextResponse("Opus fragmented stream unsupported", status_code=501)
-    _opus_info_cache[v_id] = (info, time.time())
-    return StreamingResponse(opus_webm_generator(request, v_id), media_type="audio/webm")
+    _log_opus_perf(
+        ctx,
+        "info-ready",
+        cache_hit=lookup.cache_hit,
+        lookup_ms=lookup.lookup_ms,
+        ydl_init_ms=lookup.extract_metrics.ydl_init_ms,
+        extract_info_ms=lookup.extract_metrics.extract_info_ms,
+        postprocess_ms=lookup.extract_metrics.postprocess_ms,
+        extract_total_ms=lookup.extract_metrics.total_ms,
+        start=start_byte,
+        fragments=len(lookup.info.fragments),
+        ext=lookup.info.ext,
+        acodec=lookup.info.acodec,
+    )
+    if not lookup.info.direct_url:
+        return StreamingResponse(
+            opus_webm_generator(request, ctx, lookup.info, 0),
+            media_type="audio/webm",
+        )
+    return StreamingResponse(
+        raw_webm_generator(request, ctx, lookup.info, start_byte),
+        media_type="audio/webm",
+    )
 
 
 def _next_ogg_page_batch_or_none(iterator: Iterator[bytes]) -> list[bytes] | None:
@@ -465,114 +1028,6 @@ async def opus_ogg_generator(
     info: OpusFormatInfo,
     seek_seconds: int = 0,
 ) -> AsyncGenerator[bytes, None]:
-    upstream_first_byte_logged = False
-
-    def webm_chunks() -> Iterator[bytes]:
-        nonlocal upstream_first_byte_logged
-        total = 0
-
-        def read_url(fetch_url: str) -> Iterator[bytes]:
-            nonlocal upstream_first_byte_logged
-            nonlocal total
-            req = urllib.request.Request(fetch_url, headers=info.http_headers)
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                while True:
-                    chunk = resp.read(16384)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_OPUS_WEBM_BYTES:
-                        raise ValueError("response too large")
-                    if not upstream_first_byte_logged:
-                        upstream_first_byte_logged = True
-                        _log_opus_perf(
-                            ctx,
-                            "upstream-first-byte",
-                            bytes=total,
-                        )
-                    yield chunk
-
-        if info.fragments:
-            init_fragments = [
-                fragment for fragment in info.fragments
-                if _fragment_duration_seconds(fragment) <= 0.0
-            ]
-            media_fragments = [
-                fragment for fragment in info.fragments
-                if _fragment_duration_seconds(fragment) > 0.0
-            ]
-            if seek_seconds > 0 and not init_fragments:
-                start_idx, fragment_seconds = 0, 0.0
-                add_log("Opus Ogg seek: no init fragment; streaming from first fragment")
-            else:
-                start_idx, fragment_seconds = _fragment_start_index(
-                    media_fragments, seek_seconds
-                )
-            add_log(
-                f"Opus Ogg seek info: start_idx={start_idx} "
-                f"fragment_time={fragment_seconds:.1f}s"
-            )
-            for fragment in init_fragments:
-                yield from read_url(_fragment_url(info.direct_url, fragment))
-            for fragment in media_fragments[start_idx:]:
-                yield from read_url(_fragment_url(info.direct_url, fragment))
-            return
-
-        range_start = _opus_seek_range_start(info, seek_seconds)
-        if range_start is not None:
-            try:
-                header = _fetch_url_range(
-                    info.direct_url, info.http_headers, 0, (512 * 1024) - 1
-                )
-                header_prefix = _webm_header_prefix(header)
-                range_headers = dict(info.http_headers)
-                range_headers["Range"] = f"bytes={range_start}-"
-                req = urllib.request.Request(info.direct_url, headers=range_headers)
-                with urllib.request.urlopen(req, timeout=300) as resp:
-                    pending = bytearray()
-                    while True:
-                        chunk = resp.read(16384)
-                        if not chunk:
-                            raise ValueError("Opus seek cluster not found")
-                        total += len(chunk)
-                        if total > MAX_OPUS_WEBM_BYTES:
-                            raise ValueError("response too large")
-                        if not upstream_first_byte_logged:
-                            upstream_first_byte_logged = True
-                            _log_opus_perf(
-                                ctx,
-                                "upstream-first-byte",
-                                bytes=total,
-                            )
-                        pending.extend(chunk)
-                        cluster_offset = pending.find(WEBM_CLUSTER_ID)
-                        if cluster_offset >= 0:
-                            yield header_prefix
-                            yield bytes(pending[cluster_offset:])
-                            break
-                        if len(pending) > OPUS_SEEK_CLUSTER_SCAN_BYTES:
-                            raise ValueError("Opus seek cluster not found")
-                    while True:
-                        chunk = resp.read(16384)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > MAX_OPUS_WEBM_BYTES:
-                            raise ValueError("response too large")
-                        if not upstream_first_byte_logged:
-                            upstream_first_byte_logged = True
-                            _log_opus_perf(
-                                ctx,
-                                "upstream-first-byte",
-                                bytes=total,
-                            )
-                        yield chunk
-                    return
-            except (OSError, ValueError) as e:
-                add_log(f"Opus Ogg seek range fallback: {e}")
-
-        yield from read_url(info.direct_url)
-
     _opus_info_cache[ctx.video_id] = (info, time.time())
     _log_opus_perf(
         ctx,
@@ -588,13 +1043,12 @@ async def opus_ogg_generator(
     first_page_logged = False
     sixteen_k_logged = False
     page_iterator = iter_ogg_opus_pages_from_webm_chunks(
-        webm_chunks(), seek_start_ms=seek_seconds * 1000
+        iter_seekable_webm_chunks(ctx, info, seek_seconds),
+        seek_start_ms=seek_seconds * 1000,
     )
     try:
         while True:
-            page_batch = await asyncio.to_thread(
-                _next_ogg_page_batch_or_none, page_iterator
-            )
+            page_batch = await asyncio.to_thread(_next_ogg_page_batch_or_none, page_iterator)
             if page_batch is None:
                 break
             for page in page_batch:
@@ -608,10 +1062,7 @@ async def opus_ogg_generator(
                     )
                 sent_bytes += len(page)
                 yield page
-                if (
-                    not sixteen_k_logged
-                    and sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES
-                ):
+                if not sixteen_k_logged and sent_bytes >= OPUS_THUMBNAIL_DELAY_BYTES:
                     sixteen_k_logged = True
                     _log_opus_perf(
                         ctx,
@@ -657,7 +1108,7 @@ async def opus_ogg_generator(
 
 async def stream_opus_ogg(request: Request) -> StreamingResponse | PlainTextResponse:
     v_id = request.query_params.get("i", "")
-    if not v_id or not isinstance(v_id, str) or not re.match(r'^[a-zA-Z0-9_\-]{11}$', v_id):
+    if not v_id or not isinstance(v_id, str) or not re.match(r"^[a-zA-Z0-9_\-]{11}$", v_id):
         add_log(f"Blocked invalid Opus Ogg stream ID: {v_id}")
         return PlainTextResponse("Invalid video ID format", status_code=400)
     t = _clamp_seek_seconds(request.query_params.get("t", "0"))
@@ -714,9 +1165,10 @@ async def stream_opus_ogg(request: Request) -> StreamingResponse | PlainTextResp
         media_type="audio/ogg",
     )
 
+
 async def thumbnail(request: Request) -> Response | PlainTextResponse:
     vid = request.query_params.get("id", "")
-    if not vid or not re.match(r'^[a-zA-Z0-9_\-]{11}$', vid):
+    if not vid or not re.match(r"^[a-zA-Z0-9_\-]{11}$", vid):
         add_log(f"Blocked invalid thumbnail ID: {vid}")
         return PlainTextResponse("Invalid video ID format", status_code=400)
 
@@ -740,11 +1192,14 @@ async def thumbnail(request: Request) -> Response | PlainTextResponse:
         add_log(f"Thumbnail fetch ERROR for {vid}: {e}")
         return PlainTextResponse("Failed to fetch thumbnail", status_code=502)
 
+
 async def get_logs(request: Request) -> JSONResponse:
     return JSONResponse({"logs": list(app_logs)})
 
+
 async def healthz(request: Request) -> PlainTextResponse:
     return PlainTextResponse("ok")
+
 
 async def dashboard(request: Request) -> HTMLResponse:
     ip: str = get_local_ip()
@@ -779,7 +1234,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                     const response = await fetch('/api/logs?t=' + new Date().getTime());
                     const data = await response.json();
                     const logContainer = document.getElementById('log-container');
-                    
+
                     const wasAtBottom = logContainer.scrollHeight - logContainer.scrollTop <= logContainer.clientHeight + 10;
 
                     let html = '';
@@ -792,7 +1247,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                         }});
                     }}
                     logContainer.innerHTML = html;
-                    
+
                     if (autoScroll && wasAtBottom) {{
                         logContainer.scrollTop = logContainer.scrollHeight;
                     }}
@@ -823,7 +1278,7 @@ async def dashboard(request: Request) -> HTMLResponse:
                     <div class="ip-box">http://{ip}:{PORT}</div>
                 </div>
             </div>
-            
+
             <h2>
                 <span>Real-time Activity Log <span class="badge">Live</span></span>
                 <label class="auto-scroll-label">
@@ -839,15 +1294,18 @@ async def dashboard(request: Request) -> HTMLResponse:
     """
     return HTMLResponse(content=html_content)
 
+
 routes = [
     Route("/search", search),
     Route("/api/opus-info", opus_info),
+    Route("/stream_opus_info", stream_opus_info),
+    Route("/stream_opus_probe", stream_opus_probe),
     Route("/stream_opus", stream_opus),
     Route("/stream_opus_ogg", stream_opus_ogg),
     Route("/thumbnail", thumbnail),
     Route("/healthz", healthz),
     Route("/api/logs", get_logs),
-    Route("/", dashboard)
+    Route("/", dashboard),
 ]
 
 app = Starlette(debug=False, routes=routes)

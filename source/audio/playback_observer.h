@@ -7,6 +7,11 @@
 
 #include "network/youtube_api.h"
 
+enum class PlaybackSessionKind {
+  Startup,
+  Seek,
+};
+
 enum class PlaybackCompareEvent {
   RequestStart,
   FirstByte,
@@ -39,13 +44,29 @@ struct PlaybackCompareSnapshot {
   u32 linear_free_bytes = 0;
 };
 
+struct PlaybackObserverEventTimes {
+  bool first_byte_seen = false;
+  u64 first_byte_ms = 0;
+  bool decoder_open_start_seen = false;
+  u64 decoder_open_start_ms = 0;
+  bool decoder_open_ok_seen = false;
+  u64 decoder_open_ok_ms = 0;
+  bool first_pcm_queued_seen = false;
+  u64 first_pcm_queued_ms = 0;
+  bool audio_audible_seen = false;
+  u64 audio_audible_ms = 0;
+};
+
 void playback_observer_begin_session(StreamContainerMode stream_mode,
+                                     PlaybackSessionKind session_kind,
                                      const char *video_id);
 void playback_observer_log(PlaybackCompareEvent event,
                            const PlaybackCompareSnapshot &snapshot);
 void playback_observer_log_simple(PlaybackCompareEvent event,
                                   StreamContainerMode stream_mode,
                                   size_t stream_buffer_bytes);
+bool playback_observer_get_event_times(PlaybackObserverEventTimes *out_times);
+PlaybackSessionKind playback_observer_current_session_kind();
 void playback_observer_end_session();
 const char *playback_compare_event_name(PlaybackCompareEvent event);
 const char *playback_compare_mode_name(StreamContainerMode mode);

@@ -16,7 +16,6 @@ def ensure_python_version() -> None:
 
 def ensure_venv(base_dir: Path) -> tuple[Path, Path]:
     venv_dir = base_dir / "venv"
-    is_windows = platform.system() == "Windows"
 
     if venv_dir.exists():
         print(f"[OK] venv already exists: {venv_dir}")
@@ -29,14 +28,28 @@ def ensure_venv(base_dir: Path) -> tuple[Path, Path]:
             sys.exit(1)
         print(f"[OK] venv created: {venv_dir}")
 
-    if is_windows:
-        pip_path = venv_dir / "Scripts" / "pip.exe"
-        python_path = venv_dir / "Scripts" / "python.exe"
+    candidates: list[tuple[Path, Path]] = []
+    if platform.system() == "Windows":
+        candidates.extend(
+            [
+                (venv_dir / "Scripts" / "pip.exe", venv_dir / "Scripts" / "python.exe"),
+                (venv_dir / "bin" / "pip", venv_dir / "bin" / "python.exe"),
+            ]
+        )
     else:
-        pip_path = venv_dir / "bin" / "pip"
-        python_path = venv_dir / "bin" / "python"
+        candidates.extend(
+            [
+                (venv_dir / "bin" / "pip", venv_dir / "bin" / "python"),
+                (venv_dir / "Scripts" / "pip.exe", venv_dir / "Scripts" / "python.exe"),
+            ]
+        )
 
-    return pip_path, python_path
+    for pip_path, python_path in candidates:
+        if pip_path.exists() and python_path.exists():
+            return pip_path, python_path
+
+    print(f"[ERROR] Could not locate pip/python inside venv: {venv_dir}")
+    sys.exit(1)
 
 
 def install_requirements(pip_path: Path, req_file: Path, label: str) -> None:

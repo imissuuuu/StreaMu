@@ -4,14 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass
-from pathlib import Path
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
-
 
 JsonObject = dict[str, Any]
 STATE_COMMENT_MARKER = "streamu-automation-state"
@@ -147,9 +146,7 @@ class ReleasePlan:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="GitHub automation helper for StreaMu PR CI."
-    )
+    parser = argparse.ArgumentParser(description="GitHub automation helper for StreaMu PR CI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     inspect_parser = subparsers.add_parser("inspect-pr")
@@ -159,9 +156,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     inspect_local_parser = subparsers.add_parser("inspect-local")
     inspect_local_parser.add_argument("--repo-root", type=Path, required=True)
-    inspect_local_parser.add_argument(
-        "--scope-path", action="append", default=[]
-    )
+    inspect_local_parser.add_argument("--scope-path", action="append", default=[])
 
     autofix_parser = subparsers.add_parser("apply-deterministic-autofix")
     autofix_parser.add_argument("--repo-root", type=Path, required=True)
@@ -186,12 +181,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     sync_parser.add_argument("--event-path", type=Path, required=True)
     sync_parser.add_argument("--phase", required=True)
     sync_parser.add_argument("--selected-workflow")
-    sync_parser.add_argument(
-        "--device-test-passed", choices=("true", "false"), required=True
-    )
-    sync_parser.add_argument(
-        "--release-requested", choices=("true", "false"), required=True
-    )
+    sync_parser.add_argument("--device-test-passed", choices=("true", "false"), required=True)
+    sync_parser.add_argument("--release-requested", choices=("true", "false"), required=True)
     sync_parser.add_argument("--release-version")
     sync_parser.add_argument("--increment-autofix-attempts", action="store_true")
     sync_parser.add_argument("--increment-review-attempts", action="store_true")
@@ -270,9 +261,7 @@ def run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str
     return subprocess.run(command, check=True, capture_output=True, text=True)
 
 
-def collect_changed_files(
-    repo_root: Path, base_sha: str, head_sha: str
-) -> tuple[str, ...]:
+def collect_changed_files(repo_root: Path, base_sha: str, head_sha: str) -> tuple[str, ...]:
     result = run_git(repo_root, ["diff", "--name-only", f"{base_sha}...{head_sha}"])
     paths = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     return tuple(paths)
@@ -347,10 +336,7 @@ def filter_changed_files_by_scope(
     for changed_file in changed_files:
         normalized_file = changed_file.replace("\\", "/")
         for scope_path in scope_paths:
-            if (
-                normalized_file == scope_path
-                or normalized_file.startswith(f"{scope_path}/")
-            ):
+            if normalized_file == scope_path or normalized_file.startswith(f"{scope_path}/"):
                 filtered.append(changed_file)
                 break
     return tuple(filtered)
@@ -363,8 +349,7 @@ def is_publishable_path(path: str) -> bool:
     if normalized_path in LOCAL_ONLY_EXACT_PATHS:
         return False
     if any(
-        normalized_path == prefix.rstrip("/")
-        or normalized_path.startswith(prefix)
+        normalized_path == prefix.rstrip("/") or normalized_path.startswith(prefix)
         for prefix in LOCAL_ONLY_PATH_PREFIXES
     ):
         return False
@@ -373,8 +358,7 @@ def is_publishable_path(path: str) -> bool:
     if RELEASE_NOTES_PATTERN.fullmatch(normalized_path):
         return True
     return any(
-        normalized_path == prefix.rstrip("/")
-        or normalized_path.startswith(prefix)
+        normalized_path == prefix.rstrip("/") or normalized_path.startswith(prefix)
         for prefix in PUBLISHABLE_PATH_PREFIXES
     )
 
@@ -497,9 +481,7 @@ def select_local_review_workflow(changed_files: tuple[str, ...]) -> LocalInspect
         release_version=None,
     )
     local_workflow = (
-        "review-pipeline"
-        if selection.workflow_name == "review-pipeline-ci"
-        else "review-only"
+        "review-pipeline" if selection.workflow_name == "review-pipeline-ci" else "review-only"
     )
     return LocalInspection(
         branch="",
@@ -545,16 +527,12 @@ def print_json(payload: JsonObject) -> None:
     print(json.dumps(payload, ensure_ascii=True, indent=2))
 
 
-def handle_inspect_pr(
-    event_path: Path, repo_root: Path, output_path: Path | None
-) -> int:
+def handle_inspect_pr(event_path: Path, repo_root: Path, output_path: Path | None) -> int:
     context = load_pull_request_context(event_path=event_path, repo_root=repo_root)
     device_test_passed = detect_device_test_passed(context.body)
     release_requested = detect_release_requested(context.body)
     release_version = read_release_version(repo_root)
-    release_eligible = release_requested and release_notes_exists(
-        repo_root, release_version
-    )
+    release_eligible = release_requested and release_notes_exists(repo_root, release_version)
     selection = select_review_workflow(
         changed_files=context.changed_files,
         release_requested=release_requested,
@@ -563,23 +541,17 @@ def handle_inspect_pr(
     static_check_plan = build_static_check_plan(context.changed_files)
 
     outputs = {
-        "changed_files_json": json.dumps(
-            list(context.changed_files), ensure_ascii=True
-        ),
+        "changed_files_json": json.dumps(list(context.changed_files), ensure_ascii=True),
         "device_test_passed": "true" if device_test_passed else "false",
         "release_requested": "true" if release_requested else "false",
         "selected_review_workflow": selection.workflow_name,
         "release_version": release_version or "",
         "release_eligible": "true" if release_eligible else "false",
-        "ruff_targets_json": json.dumps(
-            list(static_check_plan.ruff_targets), ensure_ascii=True
-        ),
+        "ruff_targets_json": json.dumps(list(static_check_plan.ruff_targets), ensure_ascii=True),
         "py_compile_targets_json": json.dumps(
             list(static_check_plan.py_compile_targets), ensure_ascii=True
         ),
-        "mypy_targets_json": json.dumps(
-            list(static_check_plan.mypy_targets), ensure_ascii=True
-        ),
+        "mypy_targets_json": json.dumps(list(static_check_plan.mypy_targets), ensure_ascii=True),
     }
     write_github_output(output_path, outputs)
 
@@ -605,9 +577,7 @@ def handle_inspect_local(repo_root: Path, scope_paths: tuple[str, ...]) -> int:
         collect_worktree_changed_files(repo_root),
         scope_paths,
     )
-    publishable_changed_files, blocked_paths = split_publishable_paths(
-        scoped_changed_files
-    )
+    publishable_changed_files, blocked_paths = split_publishable_paths(scoped_changed_files)
     inspection = select_local_review_workflow(publishable_changed_files)
     payload: JsonObject = {
         "branch": get_current_branch(repo_root),
@@ -692,6 +662,28 @@ def run_local_server_build(repo_root: Path) -> None:
     )
 
 
+def run_local_cppcheck(repo_root: Path, changed_files: tuple[str, ...]) -> None:
+    cpp_targets = [
+        path
+        for path in changed_files
+        if path.startswith(CPP_PATH_PREFIXES) and Path(path).suffix.lower() in CPP_FILE_EXTENSIONS
+    ]
+    if not cpp_targets:
+        return
+    run_command(
+        repo_root,
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(repo_root / "scripts" / "run_cppcheck.ps1"),
+            *cpp_targets,
+        ],
+    )
+
+
 def collect_git_diff_paths(repo_root: Path) -> tuple[str, ...]:
     return collect_worktree_changed_files(repo_root)
 
@@ -750,9 +742,7 @@ def handle_apply_deterministic_autofix(
     return 0
 
 
-def handle_run_local_checks(
-    repo_root: Path, skip_build: bool, scope_paths: tuple[str, ...]
-) -> int:
+def handle_run_local_checks(repo_root: Path, skip_build: bool, scope_paths: tuple[str, ...]) -> int:
     scoped_changed_files = filter_changed_files_by_scope(
         collect_worktree_changed_files(repo_root),
         scope_paths,
@@ -766,9 +756,7 @@ def handle_run_local_checks(
             )
         raise ValueError("no local changes found")
 
-    changed_after_fix, _, _ = apply_deterministic_autofix_to_files(
-        repo_root, changed_files
-    )
+    changed_after_fix, _, _ = apply_deterministic_autofix_to_files(repo_root, changed_files)
     effective_changed_files, blocked_after_fix = split_publishable_paths(
         changed_after_fix or collect_worktree_changed_files(repo_root)
     )
@@ -783,6 +771,9 @@ def handle_run_local_checks(
         path.startswith("server/") and Path(path).suffix.lower() in PYTHON_FILE_EXTENSIONS
         for path in effective_changed_files
     )
+
+    if touches_cpp:
+        run_local_cppcheck(repo_root, effective_changed_files)
 
     ran_3ds_build = False
     ran_server_build = False
@@ -811,9 +802,7 @@ def handle_run_local_checks(
 
 def parse_string_json_array(raw_value: str, argument_name: str) -> tuple[str, ...]:
     parsed = json.loads(raw_value)
-    if not isinstance(parsed, list) or not all(
-        isinstance(item, str) for item in parsed
-    ):
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
         raise ValueError(f"{argument_name} must be a JSON array of strings")
     return tuple(parsed)
 
@@ -885,9 +874,7 @@ def build_state_comment(state: AutomationState) -> str:
 def build_review_comment(decision: ReviewDecision) -> str:
     action_lines: list[str]
     if decision.decision == "APPROVE":
-        action_lines = [
-            "- No blocking review issue remains. Release automation can continue."
-        ]
+        action_lines = ["- No blocking review issue remains. Release automation can continue."]
     elif decision.decision == "AUTO_FIXABLE":
         if decision.auto_fix_allowed:
             action_lines = [
@@ -895,12 +882,12 @@ def build_review_comment(decision: ReviewDecision) -> str:
             ]
         else:
             action_lines = [
-                "- Auto-fix was requested, but the workflow could not safely proceed without maintainer follow-up."
+                "- Auto-fix was requested, but the workflow could not safely "
+                "proceed without maintainer follow-up."
             ]
     elif decision.decision == "NEEDS_DECISION":
         prompt = (
-            decision.user_prompt
-            or "Please reply with the preferred behavior in natural language."
+            decision.user_prompt or "Please reply with the preferred behavior in natural language."
         )
         action_lines = [
             "- Reply on this PR with the desired behavior in natural language.",
@@ -960,9 +947,7 @@ def github_api_request(
     raise ValueError(f"unexpected GitHub API response from {url}")
 
 
-def list_issue_comments(
-    repository: str, pr_number: int, token: str
-) -> list[JsonObject]:
+def list_issue_comments(repository: str, pr_number: int, token: str) -> list[JsonObject]:
     url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments?per_page=100"
     response = github_api_request("GET", url, token)
     if response is None:
@@ -972,9 +957,7 @@ def list_issue_comments(
     return response
 
 
-def upsert_state_comment(
-    repository: str, pr_number: int, token: str, body: str
-) -> None:
+def upsert_state_comment(repository: str, pr_number: int, token: str, body: str) -> None:
     upsert_marked_comment(
         repository=repository,
         pr_number=pr_number,
@@ -1002,9 +985,7 @@ def upsert_marked_comment(
     github_api_request("POST", url, token, {"body": body})
 
 
-def read_state_from_github(
-    repository: str, pr_number: int, token: str
-) -> AutomationState | None:
+def read_state_from_github(repository: str, pr_number: int, token: str) -> AutomationState | None:
     for comment in list_issue_comments(repository, pr_number, token):
         existing_body = get_optional_str(comment, "body")
         if existing_body is None:
@@ -1015,9 +996,7 @@ def read_state_from_github(
     return None
 
 
-def add_labels(
-    repository: str, pr_number: int, token: str, labels: tuple[str, ...]
-) -> None:
+def add_labels(repository: str, pr_number: int, token: str, labels: tuple[str, ...]) -> None:
     if not labels:
         return
     url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/labels"
@@ -1026,9 +1005,7 @@ def add_labels(
 
 def remove_label(repository: str, pr_number: int, token: str, label: str) -> None:
     encoded = parse.quote(label, safe="")
-    url = (
-        f"https://api.github.com/repos/{repository}/issues/{pr_number}/labels/{encoded}"
-    )
+    url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/labels/{encoded}"
     try:
         github_api_request("DELETE", url, token)
     except error.HTTPError as http_error:
@@ -1052,9 +1029,7 @@ def sync_labels(
 
     labels_to_remove = set(PHASE_LABELS).union(PERSISTENT_LABELS) - desired_labels
     for label in sorted(labels_to_remove):
-        remove_label(
-            repository=repository, pr_number=context.number, token=token, label=label
-        )
+        remove_label(repository=repository, pr_number=context.number, token=token, label=label)
     add_labels(
         repository=repository,
         pr_number=context.number,
@@ -1208,9 +1183,7 @@ def find_latest_review_report(runs_root: Path) -> Path:
     return max(report_candidates, key=lambda path: path.stat().st_mtime)
 
 
-def resolve_review_report_path(
-    runs_root: Path | None, report_path: Path | None
-) -> Path:
+def resolve_review_report_path(runs_root: Path | None, report_path: Path | None) -> Path:
     if report_path is not None:
         if not report_path.is_file():
             raise FileNotFoundError(f"review report not found: {report_path}")
@@ -1297,9 +1270,7 @@ def handle_prepare_release_local(repo_root: Path) -> int:
     )
     missing_assets = [str(path) for path in asset_paths if not path.is_file()]
     if missing_assets:
-        raise FileNotFoundError(
-            f"release assets missing: {', '.join(missing_assets)}"
-        )
+        raise FileNotFoundError(f"release assets missing: {', '.join(missing_assets)}")
 
     release_plan = ReleasePlan(
         version=version,

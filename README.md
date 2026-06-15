@@ -158,28 +158,7 @@ build_exe.bat           # produces dist/StreaMu-Server.zip
 
 ### Maintainer Review And Release Flow
 
-Maintainers use the local review-first flow. AI review runs locally, while GitHub Actions only re-check builds after push and create the GitHub release after reviewed changes reach `main`.
-
-Recommended branch flow:
-1. Branch from `main`
-2. Finish implementation and device testing locally
-3. Run:
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/review_local.ps1 -DeviceTestSummary "PASS: ..."
-```
-4. Sync the approved branch and open or update a PR targeting `main`:
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/sync_remote.ps1
-```
-   `scripts/sync_remote.ps1` only stages publishable project files. Local-only paths such as `.claude/`, `.takt/`, `docs/`, `HANDOFF/`, `tools/`, and working review artifacts are blocked from remote sync.
-5. After the PR is merged to `main`, GitHub automatically builds artifacts and publishes a release when `Makefile` version and `RELEASE_NOTES_v{VERSION}.md` indicate a new release.
-
-For the full linked local flow up to PR sync, use:
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/review_and_ship.ps1 -DeviceTestSummary "PASS: ..."
-```
-
-`scripts/release_remote.ps1` remains available as a manual fallback for backfills or recovery, but normal releases should come from the `main` push workflow.
+Maintainers finish implementation, local checks, and device testing first. If another review angle is useful, queue a local TAKT `review` task, then push and open the PR manually.
 
 ### License
 

@@ -14,9 +14,9 @@ enum class WebmPlaybackStage {
 };
 
 struct WebmPlaybackControllerConfig {
-  size_t decoder_start_bytes = 16U * 1024U;
-  size_t playback_release_bytes = 24U * 1024U;
-  int initial_wavebuf_target = 2;
+  size_t decoder_start_bytes = 8U * 1024U;
+  size_t playback_release_bytes = 0U;
+  int initial_wavebuf_target = 1;
   u64 high_decode_ticks = 9500000ULL;
   u64 low_decode_ticks = 7000000ULL;
 };
@@ -33,6 +33,14 @@ struct WebmPlaybackControllerInput {
   bool user_paused = false;
 };
 
+enum class WebmPrebufferHoldReason {
+  None,
+  UserPaused,
+  QueueBelowTarget,
+  BytesBelowRelease,
+  WaitingForDecoder,
+};
+
 struct WebmPlaybackControllerDecision {
   bool should_start_decoder = false;
   bool keep_ndsp_paused = false;
@@ -40,14 +48,17 @@ struct WebmPlaybackControllerDecision {
   bool transition_to_failed = false;
   int target_queued_wavebufs = 0;
   int max_decode_buffers = 0;
+  WebmPrebufferHoldReason hold_reason = WebmPrebufferHoldReason::None;
 };
 
 WebmPlaybackControllerConfig webm_playback_controller_default_config();
-WebmPlaybackControllerDecision decide_webm_playback_step(
-    WebmPlaybackStage stage, const WebmPlaybackControllerInput &input,
-    const WebmPlaybackControllerConfig &config);
-WebmPlaybackStage next_webm_playback_stage(
-    WebmPlaybackStage stage, const WebmPlaybackControllerInput &input,
-    const WebmPlaybackControllerDecision &decision);
+WebmPlaybackControllerDecision
+decide_webm_playback_step(WebmPlaybackStage stage,
+                          const WebmPlaybackControllerInput &input,
+                          const WebmPlaybackControllerConfig &config);
+WebmPlaybackStage
+next_webm_playback_stage(WebmPlaybackStage stage,
+                         const WebmPlaybackControllerInput &input,
+                         const WebmPlaybackControllerDecision &decision);
 
 #endif

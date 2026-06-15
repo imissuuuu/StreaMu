@@ -3,6 +3,7 @@
 
 #include <3ds.h>
 #include <stdint.h>
+#include <string>
 #include <vector>
 
 #include "opus_decode_tuning.h"
@@ -13,6 +14,12 @@ struct OpusPlayerUpdateStats {
   int decoded_buffers = 0;
   bool hit_decode_failure = false;
   u64 decode_ticks = 0;
+  int queued_before_update = 0;
+  int queued_after_update = 0;
+  int free_before_update = 0;
+  int free_after_update = 0;
+  int target_queued_wavebufs = 0;
+  int max_decode_buffers = 0;
 };
 
 enum class OpusInputKind {
@@ -30,8 +37,13 @@ public:
   bool start(const uint8_t *data, size_t size);
   bool start_streaming(const std::vector<uint8_t> *buffer, LightLock *lock,
                        const bool *download_complete);
-  bool start_webm_streaming(const std::vector<uint8_t> *buffer, LightLock *lock,
-                            const bool *download_complete);
+  bool start_webm_streaming(std::vector<uint8_t> *buffer, LightLock *lock,
+                            bool *download_complete, int seek_start_ms,
+                            int emit_start_ms, bool enable_parser_seek,
+                            bool prefer_offset_seek,
+                            const std::string &range_probe_base_url,
+                            uint64_t range_filesize,
+                            uint64_t parser_prefetch_offset);
   void set_decode_tuning(const OpusDecodeTuning &tuning);
   void update();
   OpusPlayerUpdateStats update_with_stats();
@@ -40,6 +52,8 @@ public:
   bool has_started_playing() const;
   bool has_decode_failed() const;
   WebmRemuxError webm_remux_error() const;
+  bool get_webm_last_seek_runtime_point(uint64_t *out_start_byte,
+                                        int *out_timecode_ms) const;
   int queued_wavebuf_count() const;
   int free_wavebuf_count() const;
 
