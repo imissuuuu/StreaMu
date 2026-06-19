@@ -86,6 +86,31 @@ static void append_cluster_cache_points(WebmSeekTrackState *state,
   }
 }
 
+static void
+update_planning_breakdown_timings(WebmSeekPlanningBreakdown *breakdown,
+                                  u64 request_started_at_ms,
+                                  u64 metadata_done_at_ms, u64 cache_done_at_ms,
+                                  u64 probe_done_at_ms, u64 ready_at_ms) {
+  if (!breakdown) {
+    return;
+  }
+  breakdown->request_to_metadata_ms =
+      metadata_done_at_ms >= request_started_at_ms
+          ? metadata_done_at_ms - request_started_at_ms
+          : 0;
+  breakdown->metadata_to_cache_ms = cache_done_at_ms >= metadata_done_at_ms
+                                        ? cache_done_at_ms - metadata_done_at_ms
+                                        : 0;
+  breakdown->cache_to_probe_ms = probe_done_at_ms >= cache_done_at_ms
+                                     ? probe_done_at_ms - cache_done_at_ms
+                                     : 0;
+  breakdown->probe_to_ready_ms =
+      ready_at_ms >= probe_done_at_ms ? ready_at_ms - probe_done_at_ms : 0;
+  breakdown->request_to_ready_ms = ready_at_ms >= request_started_at_ms
+                                       ? ready_at_ms - request_started_at_ms
+                                       : 0;
+}
+
 } // namespace
 
 PreparedWebmSeekPlanResult prepare_webm_seek_plan(
@@ -104,7 +129,11 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
   result.reuse_class = classify_webm_seek_reuse(*track_state);
   const bool repeated_seek = result.reuse_class != WebmSeekReuseClass::Cold;
   result.repeated_seek = repeated_seek;
+  result.planning_breakdown.checked_cues = track_state->cues_checked;
   const uint64_t request_started_at_ms = osGetTime();
+  uint64_t metadata_done_at_ms = request_started_at_ms;
+  uint64_t cache_done_at_ms = request_started_at_ms;
+  uint64_t probe_done_at_ms = request_started_at_ms;
   trace_log("seek_request", request.seek_seq, request, repeated_seek,
             result.reuse_class, NULL, &result.cache_trace, 0, -1, false, 0);
 
@@ -114,9 +143,15 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
       track_state->source_info.duration_ms > 0) {
     result.metadata_ok = true;
     result.source_info = track_state->source_info;
+    result.planning_breakdown.used_cached_metadata = true;
   } else {
     WebmSeekStreamInfo seek_info = {};
     if (!api->get_webm_seek_stream_info(stream_video_id, &seek_info)) {
+      metadata_done_at_ms = osGetTime();
+      update_planning_breakdown_timings(
+          &result.planning_breakdown, request_started_at_ms,
+          metadata_done_at_ms, metadata_done_at_ms, metadata_done_at_ms,
+          metadata_done_at_ms);
       return result;
     }
     result.metadata_ok = true;
@@ -132,13 +167,17 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
           : backtrack_bytes_for_retry(pending_seek_retry_count);
   track_state->source_info = result.source_info;
   track_state->source_info_ready = true;
+  metadata_done_at_ms = osGetTime();
   trace_log("seek_info_done", request.seek_seq, request, repeated_seek,
             result.reuse_class, NULL, &result.cache_trace, 0, -1, false,
-            osGetTime() - request_started_at_ms);
+            metadata_done_at_ms - request_started_at_ms);
 
   result.seek_plan =
       build_webm_seek_plan(request.target_ms / 1000, result.source_info);
   if (!result.seek_plan.valid) {
+    update_planning_breakdown_timings(
+        &result.planning_breakdown, request_started_at_ms, metadata_done_at_ms,
+        osGetTime(), osGetTime(), osGetTime());
     return result;
   }
 
@@ -165,6 +204,7 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
             result.seek_plan.reconnect_start_byte,
             result.seek_plan.selected_cluster_ms, result.seek_plan.cache_hit,
             osGetTime() - request_started_at_ms);
+  cache_done_at_ms = osGetTime();
 
   if (kWebmSeekPreferColdCoarseFastPath && !result.parser_cluster_aligned &&
       result.seek_plan.source == WebmSeekPlanSource::CoarseEstimate &&
@@ -176,6 +216,7 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
   }
 
   if (!result.parser_cluster_aligned && !track_state->cues_checked) {
+    ++result.planning_breakdown.header_probe_count;
     const std::string header_probe_bytes =
         api->get_webm_seek_probe(stream_video_id, 0, header_probe_size_bytes);
     if (!header_probe_bytes.empty()) {
@@ -194,11 +235,13 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
         track_state->cues_absolute_offset = 0;
         track_state->segment_data_offset = 0;
       }
+      result.planning_breakdown.checked_cues = track_state->cues_checked;
     }
   }
 
   if (!result.parser_cluster_aligned && track_state->cues_available &&
       track_state->segment_data_offset > 0) {
+    ++result.planning_breakdown.cues_probe_count;
     const std::string cues_probe_bytes = api->get_webm_seek_probe(
         stream_video_id, track_state->cues_absolute_offset,
         header_probe_size_bytes);
@@ -212,6 +255,7 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
       if (refine_webm_seek_plan_with_cues(result.source_info, cues_probe,
                                           &result.seek_plan, NULL)) {
         result.parser_cluster_aligned = true;
+        result.planning_breakdown.used_cues = true;
         WebmSeekClusterPoint cue_point = {};
         cue_point.timecode_ms = result.seek_plan.selected_cluster_ms;
         cue_point.start_byte = result.seek_plan.reconnect_start_byte;
@@ -223,6 +267,7 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
   if (!result.parser_cluster_aligned &&
       result.seek_plan.source != WebmSeekPlanSource::CueIndex) {
     uint64_t coarse_start_byte = result.seek_plan.reconnect_start_byte;
+    ++result.planning_breakdown.cluster_probe_count;
     const std::string probe_bytes = api->get_webm_seek_probe(
         stream_video_id, coarse_start_byte, probe_size_bytes);
     if (!probe_bytes.empty()) {
@@ -233,6 +278,7 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
       if (refine_webm_seek_plan_with_probe(result.source_info, probe,
                                            &result.seek_plan, NULL)) {
         result.parser_cluster_aligned = true;
+        result.planning_breakdown.used_cluster_probe = true;
       }
       WebmSeekClusterPoint
           extracted_points[kWebmSeekProbeExtractedClusterLimit];
@@ -278,6 +324,7 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
             extra_probe_start_byte > coarse_start_byte &&
             extra_probe_start_byte - coarse_start_byte >=
                 kWebmSeekExtraProbeMinAdvanceBytes) {
+          ++result.planning_breakdown.extra_probe_count;
           const std::string extra_probe_bytes = api->get_webm_seek_probe(
               stream_video_id, extra_probe_start_byte, probe_size_bytes);
           if (!extra_probe_bytes.empty()) {
@@ -295,6 +342,7 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
               if (refined_gap_ms >= 0 && refined_gap_ms < initial_gap_ms) {
                 result.seek_plan = refined_plan;
                 result.parser_cluster_aligned = true;
+                result.planning_breakdown.used_extra_probe = true;
               }
             }
 
@@ -312,6 +360,7 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
       }
     }
   }
+  probe_done_at_ms = osGetTime();
 
   if (result.seek_plan.valid && result.seek_plan.cluster_aligned &&
       result.seek_plan.selected_cluster_ms >= 0) {
@@ -330,6 +379,9 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
   result.stream_url = api->build_webm_stream_url(
       stream_video_id, result.seek_plan.reconnect_start_byte);
   result.plan_ok = true;
+  update_planning_breakdown_timings(
+      &result.planning_breakdown, request_started_at_ms, metadata_done_at_ms,
+      cache_done_at_ms, probe_done_at_ms, osGetTime());
   trace_log("seek_plan_ready", request.seek_seq, request, repeated_seek,
             result.reuse_class, &result.seek_plan, &result.cache_trace,
             result.seek_plan.reconnect_start_byte,

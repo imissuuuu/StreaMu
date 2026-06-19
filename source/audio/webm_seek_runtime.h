@@ -26,6 +26,7 @@ struct PreparedWebmSeekPlanResult {
   WebmSeekSourceInfo source_info;
   WebmSeekPlan seek_plan;
   WebmSeekCacheLookupTrace cache_trace;
+  WebmSeekPlanningBreakdown planning_breakdown;
   std::string stream_url;
 };
 

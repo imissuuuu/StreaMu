@@ -97,6 +97,31 @@ struct WebmSeekRequest {
   int seek_seq = 0;
 };
 
+struct WebmSeekPlanningBreakdown {
+  uint64_t request_to_metadata_ms = 0;
+  uint64_t metadata_to_cache_ms = 0;
+  uint64_t cache_to_probe_ms = 0;
+  uint64_t probe_to_ready_ms = 0;
+  uint64_t request_to_ready_ms = 0;
+  uint32_t header_probe_count = 0;
+  uint32_t cues_probe_count = 0;
+  uint32_t cluster_probe_count = 0;
+  uint32_t extra_probe_count = 0;
+  bool used_cached_metadata = false;
+  bool checked_cues = false;
+  bool used_cues = false;
+  bool used_cluster_probe = false;
+  bool used_extra_probe = false;
+};
+
+struct WebmSeekExecutionContext {
+  int seek_seq = 0;
+  int target_ms = 0;
+  WebmSeekPlan plan;
+  bool repeated_seek = false;
+  WebmSeekReuseClass reuse_class = WebmSeekReuseClass::Cold;
+};
+
 struct WebmSeekTrackState {
   WebmSeekSourceInfo source_info;
   bool source_info_ready = false;

@@ -38,7 +38,8 @@ public:
   bool start_streaming(const std::vector<uint8_t> *buffer, LightLock *lock,
                        const bool *download_complete);
   bool start_webm_streaming(std::vector<uint8_t> *buffer, LightLock *lock,
-                            bool *download_complete, int seek_start_ms,
+                            bool *download_complete,
+                            const WebmSeekExecutionContext &seek_context,
                             int emit_start_ms, bool enable_parser_seek,
                             bool prefer_offset_seek,
                             const std::string &range_probe_base_url,

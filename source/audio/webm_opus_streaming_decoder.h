@@ -11,6 +11,7 @@
 
 #include "opus_memory_decoder.h"
 #include "webm_audible_start_policy.h"
+#include "webm_seek_types.h"
 
 struct nestegg;
 
@@ -38,7 +39,8 @@ public:
   ~WebmOpusStreamingDecoder();
 
   bool open_streaming(std::vector<uint8_t> *webm_buffer, LightLock *webm_lock,
-                      bool *webm_download_complete, int seek_start_ms,
+                      bool *webm_download_complete,
+                      const WebmSeekExecutionContext &seek_context,
                       int emit_start_ms, bool enable_parser_seek,
                       bool prefer_offset_seek,
                       const std::string &range_probe_base_url,
@@ -118,6 +120,8 @@ private:
   bool logged_init_;
   bool logged_track_;
   bool logged_headers_;
+  // Also marks the post-first-audio boundary where non-parser callbacks must
+  // fail fast instead of sleeping on unavailable bytes in the main update loop.
   bool logged_audio_;
   bool logged_decoder_open_;
   uint32_t ogg_sequence_;
@@ -126,6 +130,7 @@ private:
   size_t audio_page_segments_;
   WebmRemuxError last_error_;
   u64 perf_start_ms_;
+  WebmSeekExecutionContext seek_context_;
   int seek_start_ms_;
   int seek_emit_ms_;
   int requested_emit_start_ms_;

@@ -545,6 +545,38 @@ append_webm_seek_cache_store_log(const char *event, int seek_seq, int target_ms,
   fclose(f);
 }
 
+static void append_webm_seek_planning_breakdown_log(
+    int seek_seq, int target_ms, const WebmSeekPlanningBreakdown &breakdown,
+    const WebmSeekPlan &plan, WebmSeekReuseClass reuse_class) {
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  fprintf(
+      f,
+      "[webm-seek-plan] seek_seq=%d target_ms=%d reuse=%s source=%s "
+      "request_to_metadata_ms=%llu metadata_to_cache_ms=%llu "
+      "cache_to_probe_ms=%llu probe_to_ready_ms=%llu request_to_ready_ms=%llu "
+      "probes_header=%lu probes_cues=%lu probes_cluster=%lu probes_extra=%lu "
+      "cached_metadata=%d checked_cues=%d used_cues=%d "
+      "used_cluster_probe=%d used_extra_probe=%d\n",
+      seek_seq, target_ms, webm_seek_reuse_class_name(reuse_class),
+      webm_seek_plan_source_name(plan.source),
+      static_cast<unsigned long long>(breakdown.request_to_metadata_ms),
+      static_cast<unsigned long long>(breakdown.metadata_to_cache_ms),
+      static_cast<unsigned long long>(breakdown.cache_to_probe_ms),
+      static_cast<unsigned long long>(breakdown.probe_to_ready_ms),
+      static_cast<unsigned long long>(breakdown.request_to_ready_ms),
+      static_cast<unsigned long>(breakdown.header_probe_count),
+      static_cast<unsigned long>(breakdown.cues_probe_count),
+      static_cast<unsigned long>(breakdown.cluster_probe_count),
+      static_cast<unsigned long>(breakdown.extra_probe_count),
+      breakdown.used_cached_metadata ? 1 : 0, breakdown.checked_cues ? 1 : 0,
+      breakdown.used_cues ? 1 : 0, breakdown.used_cluster_probe ? 1 : 0,
+      breakdown.used_extra_probe ? 1 : 0);
+  fclose(f);
+}
+
 static void reset_webm_seek_track_state(AppContext *context) {
   if (!context) {
     return;
@@ -1417,6 +1449,10 @@ void download_thread(void *arg) {
               prepared_seek.seek_plan.seek_target_ms,
               prepared_seek.seek_plan.reconnect_start_byte,
               prepared_seek.seek_plan.emit_start_ms);
+          append_webm_seek_planning_breakdown_log(
+              seek_request.seek_seq, prepared_seek.seek_plan.seek_target_ms,
+              prepared_seek.planning_breakdown, prepared_seek.seek_plan,
+              prepared_seek.reuse_class);
           ctx.pending_stream_seek_ms = prepared_seek.seek_plan.seek_target_ms;
           ctx.pending_stream_emit_start_ms =
               prepared_seek.seek_plan.emit_start_ms;
@@ -3734,6 +3770,7 @@ int main(int argc, char *argv[]) {
       uint64_t parser_prefetch_offset = 0;
       bool enable_parser_seek = false;
       bool parser_cluster_aligned = false;
+      WebmSeekExecutionContext seek_execution_context = {};
       std::string parser_range_probe_base_url = "";
       uint64_t parser_range_filesize = 0;
       append_opus_playback_perf_log(OpusPerfEvent::DecoderOpenStart,
@@ -3746,6 +3783,11 @@ int main(int argc, char *argv[]) {
       pending_emit_start_ms = ctx.pending_stream_emit_start_ms;
       parser_prefetch_offset = ctx.pending_stream_parser_prefetch_byte;
       parser_cluster_aligned = ctx.pending_stream_parser_cluster_aligned;
+      seek_execution_context.seek_seq = ctx.pending_stream_seek_seq;
+      seek_execution_context.target_ms = ctx.pending_stream_seek_ms;
+      seek_execution_context.plan = ctx.pending_stream_seek_plan;
+      seek_execution_context.repeated_seek = ctx.pending_stream_repeated_seek;
+      seek_execution_context.reuse_class = ctx.pending_stream_reuse_class;
       enable_parser_seek = kWebmUseParserLevelSeek && pending_seek_ms > 0;
       if (enable_parser_seek && ctx.webm_seek_track_state.source_info_ready &&
           ctx.webm_seek_track_state.source_info.has_filesize) {
@@ -3760,7 +3802,7 @@ int main(int argc, char *argv[]) {
         if (use_webm_poc) {
           started = opus_player.start_webm_streaming(
               g_stream_buffer_ptr.get(), &stream_lock,
-              &g_stream_download_complete, pending_seek_ms,
+              &g_stream_download_complete, seek_execution_context,
               pending_emit_start_ms, enable_parser_seek, parser_cluster_aligned,
               parser_range_probe_base_url, parser_range_filesize,
               parser_prefetch_offset);

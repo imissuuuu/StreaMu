@@ -73,6 +73,42 @@ static void append_webm_perf_log(const char *event, size_t raw_bytes,
   fclose(f);
 }
 
+static const char *webm_seek_plan_source_name(WebmSeekPlanSource source) {
+  switch (source) {
+    case WebmSeekPlanSource::ExactClusterCache:
+      return "cache";
+    case WebmSeekPlanSource::CueIndex:
+      return "cue";
+    case WebmSeekPlanSource::ProbeCluster:
+      return "probe";
+    case WebmSeekPlanSource::CoarseEstimate:
+      return "coarse";
+    case WebmSeekPlanSource::Invalid:
+    default:
+      return "invalid";
+  }
+}
+
+static void append_webm_seek_execution_log(
+    const char *event, const WebmSeekExecutionContext &context, uint64_t offset,
+    int packet_ms, uint64_t elapsed_ms) {
+  if (!event || context.seek_seq <= 0) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  fprintf(f,
+          "[webm-seek-exec] %s seek_seq=%d target_ms=%d source=%s "
+          "start_byte=%llu packet_ms=%d elapsed_ms=%llu\n",
+          event, context.seek_seq, context.target_ms,
+          webm_seek_plan_source_name(context.plan.source),
+          static_cast<unsigned long long>(offset), packet_ms,
+          static_cast<unsigned long long>(elapsed_ms));
+  fclose(f);
+}
+
 static void
 append_webm_parser_range_fetch_log(const char *event, uint64_t fetch_start,
                                    uint64_t fetch_size, size_t fetched_size,
@@ -405,7 +441,8 @@ WebmOpusStreamingDecoder::WebmOpusStreamingDecoder()
       logged_track_(false), logged_headers_(false), logged_audio_(false),
       logged_decoder_open_(false), ogg_sequence_(0), granule_position_(0),
       audio_page_bytes_(0), audio_page_segments_(0),
-      last_error_(WebmRemuxError::None), perf_start_ms_(0), seek_start_ms_(0),
+      last_error_(WebmRemuxError::None), perf_start_ms_(0),
+      seek_context_(WebmSeekExecutionContext{}), seek_start_ms_(0),
       seek_emit_ms_(0), requested_emit_start_ms_(0),
       parser_seek_enabled_(false), parser_offset_seek_preferred_(false),
       parser_range_fetch_failed_(false), parser_range_fetch_count_(0),
@@ -492,6 +529,9 @@ int64_t WebmOpusStreamingDecoder::nestegg_read_cb(void *buffer, size_t length,
     if (source->owner && source->owner->parser_range_fetch_failed_) {
       return -1;
     }
+    if (source->owner && source->owner->logged_audio_) {
+      return -1;
+    }
     svcSleepThread(10 * 1000 * 1000);
   }
 }
@@ -538,6 +578,9 @@ int WebmOpusStreamingDecoder::nestegg_seek_cb(int64_t offset, int whence,
     } else if (whence == NESTEGG_SEEK_END) {
       if (!complete) {
         LightLock_Unlock(source->lock);
+        if (source->owner && source->owner->logged_audio_) {
+          return -1;
+        }
         svcSleepThread(10 * 1000 * 1000);
         continue;
       }
@@ -564,6 +607,9 @@ int WebmOpusStreamingDecoder::nestegg_seek_cb(int64_t offset, int whence,
     if (complete) {
       return -1;
     }
+    if (source->owner && source->owner->logged_audio_) {
+      return -1;
+    }
     svcSleepThread(10 * 1000 * 1000);
   }
 }
@@ -575,8 +621,8 @@ int64_t WebmOpusStreamingDecoder::nestegg_tell_cb(void *userdata) {
 
 bool WebmOpusStreamingDecoder::open_streaming(
     std::vector<uint8_t> *webm_buffer, LightLock *webm_lock,
-    bool *webm_download_complete, int seek_start_ms, int emit_start_ms,
-    bool enable_parser_seek, bool prefer_offset_seek,
+    bool *webm_download_complete, const WebmSeekExecutionContext &seek_context,
+    int emit_start_ms, bool enable_parser_seek, bool prefer_offset_seek,
     const std::string &range_probe_base_url, uint64_t range_filesize,
     uint64_t parser_prefetch_offset) {
   reset();
@@ -593,7 +639,8 @@ bool WebmOpusStreamingDecoder::open_streaming(
   stream_source_.filesize = range_filesize;
   stream_source_.range_probe_base_url = range_probe_base_url;
   stream_source_.owner = this;
-  seek_start_ms_ = seek_start_ms > 0 ? seek_start_ms : 0;
+  seek_context_ = seek_context;
+  seek_start_ms_ = seek_context.target_ms > 0 ? seek_context.target_ms : 0;
   seek_emit_ms_ = 0;
   requested_emit_start_ms_ = emit_start_ms > 0 ? emit_start_ms : 0;
   parser_seek_enabled_ = enable_parser_seek;
@@ -643,6 +690,7 @@ void WebmOpusStreamingDecoder::reset() {
   audio_page_segments_ = 0;
   last_error_ = WebmRemuxError::None;
   perf_start_ms_ = 0;
+  seek_context_ = WebmSeekExecutionContext{};
   seek_start_ms_ = 0;
   seek_emit_ms_ = 0;
   requested_emit_start_ms_ = 0;
@@ -755,7 +803,8 @@ void WebmOpusStreamingDecoder::merge_range_segments_locked() {
       continue;
     }
     if (next_end > current_end) {
-      const size_t append_offset = static_cast<size_t>(current_end - next.start);
+      const size_t append_offset =
+          static_cast<size_t>(current_end - next.start);
       current.data.insert(current.data.end(), next.data.begin() + append_offset,
                           next.data.end());
     }
@@ -1284,6 +1333,10 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
       append_webm_perf_log(
           "parser_offset_seek_done", static_cast<size_t>(stream_source_.offset),
           ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+      append_webm_seek_execution_log(
+          "parser_offset_seek_done", seek_context_,
+          static_cast<uint64_t>(stream_source_.offset), -1,
+          webm_perf_elapsed_ms(perf_start_ms_));
       offset_seek_applied = true;
     }
     if (!offset_seek_applied) {
@@ -1291,6 +1344,10 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
                            static_cast<size_t>(stream_source_.offset),
                            ogg_buffer_.size(), WebmRemuxError::None,
                            perf_start_ms_);
+      append_webm_seek_execution_log(
+          "parser_offset_seek_failed", seek_context_,
+          static_cast<uint64_t>(stream_source_.offset), -1,
+          webm_perf_elapsed_ms(perf_start_ms_));
     }
   }
 
@@ -1303,18 +1360,28 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
       append_webm_perf_log(
           "parser_seek_failed", static_cast<size_t>(stream_source_.offset),
           ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+      append_webm_seek_execution_log(
+          "parser_seek_failed", seek_context_,
+          static_cast<uint64_t>(stream_source_.offset), -1,
+          webm_perf_elapsed_ms(perf_start_ms_));
       return true;
     }
     last_error_ = WebmRemuxError::InvalidBlock;
     append_webm_perf_log("parser_seek_failed",
                          static_cast<size_t>(stream_source_.offset),
                          ogg_buffer_.size(), last_error_, perf_start_ms_);
+    append_webm_seek_execution_log("parser_seek_failed", seek_context_,
+                                   static_cast<uint64_t>(stream_source_.offset),
+                                   -1, webm_perf_elapsed_ms(perf_start_ms_));
     return false;
   }
   append_webm_perf_log(
       "parser_seek_done", static_cast<size_t>(stream_source_.offset),
       ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
   parser_seek_done_elapsed_ms_ = webm_perf_elapsed_ms(perf_start_ms_);
+  append_webm_seek_execution_log("parser_seek_done", seek_context_,
+                                 static_cast<uint64_t>(stream_source_.offset),
+                                 -1, parser_seek_done_elapsed_ms_);
   last_seek_runtime_start_byte_ = static_cast<uint64_t>(stream_source_.offset);
   last_seek_runtime_timecode_ms_ = -1;
   return true;
@@ -1392,6 +1459,10 @@ bool WebmOpusStreamingDecoder::emit_packet(const unsigned char *data,
     append_webm_perf_log(
         "first_audio_data", static_cast<size_t>(stream_source_.offset),
         ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+    append_webm_seek_execution_log("first_audio_data", seek_context_,
+                                   static_cast<uint64_t>(stream_source_.offset),
+                                   packet_tstamp_ms,
+                                   webm_perf_elapsed_ms(perf_start_ms_));
   }
   return true;
 }
@@ -1407,6 +1478,9 @@ void WebmOpusStreamingDecoder::log_first_decoded_pcm_if_needed(
   append_webm_perf_log(
       "first_decoded_pcm", static_cast<size_t>(stream_source_.offset),
       ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+  append_webm_seek_execution_log("first_decoded_pcm", seek_context_,
+                                 static_cast<uint64_t>(stream_source_.offset),
+                                 -1, first_decoded_pcm_elapsed_ms_);
 }
 
 void WebmOpusStreamingDecoder::log_first_audible_pcm_if_needed(
@@ -1420,6 +1494,9 @@ void WebmOpusStreamingDecoder::log_first_audible_pcm_if_needed(
   append_webm_perf_log(
       "first_audible_pcm", static_cast<size_t>(stream_source_.offset),
       ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+  append_webm_seek_execution_log("first_audible_pcm", seek_context_,
+                                 static_cast<uint64_t>(stream_source_.offset),
+                                 -1, first_audible_pcm_elapsed_ms_);
   if (seek_start_ms_ > 0 && parser_seek_done_elapsed_ms_ > 0 &&
       first_decoded_pcm_elapsed_ms_ > 0) {
     append_webm_seek_decode_breakdown_log(parser_seek_done_elapsed_ms_,

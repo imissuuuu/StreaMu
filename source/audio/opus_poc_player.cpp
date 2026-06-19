@@ -113,9 +113,10 @@ bool OpusPocPlayer::start_streaming(const std::vector<uint8_t> *buffer,
 
 bool OpusPocPlayer::start_webm_streaming(
     std::vector<uint8_t> *buffer, LightLock *lock, bool *download_complete,
-    int seek_start_ms, int emit_start_ms, bool enable_parser_seek,
-    bool prefer_offset_seek, const std::string &range_probe_base_url,
-    uint64_t range_filesize, uint64_t parser_prefetch_offset) {
+    const WebmSeekExecutionContext &seek_context, int emit_start_ms,
+    bool enable_parser_seek, bool prefer_offset_seek,
+    const std::string &range_probe_base_url, uint64_t range_filesize,
+    uint64_t parser_prefetch_offset) {
   stop();
   decode_failed_ = false;
   ndsp_format_initialized_ = false;
@@ -123,7 +124,7 @@ bool OpusPocPlayer::start_webm_streaming(
   input_kind_ = OpusInputKind::WebmStream;
   if (!audioBuffer ||
       !webm_decoder_.open_streaming(
-          buffer, lock, download_complete, seek_start_ms, emit_start_ms,
+          buffer, lock, download_complete, seek_context, emit_start_ms,
           enable_parser_seek, prefer_offset_seek, range_probe_base_url,
           range_filesize, parser_prefetch_offset)) {
     decode_failed_ = true;
