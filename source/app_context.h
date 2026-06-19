@@ -90,5 +90,4 @@ struct AppContext : public RenderContext {
   u64 thumbnail_upload_defer_since_ms = 0;
   u64 thumbnail_fetch_defer_last_log_ms = 0;
   u64 thumbnail_upload_defer_last_log_ms = 0;
-  std::string thumbnail_defer_video_id;
 };

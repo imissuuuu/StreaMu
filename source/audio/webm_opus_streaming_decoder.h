@@ -100,6 +100,8 @@ private:
   bool maybe_start_parser_range_prefetch(uint64_t offset);
   void run_parser_range_prefetch();
   void cleanup_parser_range_prefetch(bool cancel);
+  void merge_range_segments_locked();
+  void clear_parser_range_prefetch_state_locked();
   void seed_initial_range_segment();
 
   StreamSource stream_source_;

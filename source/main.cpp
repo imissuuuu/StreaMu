@@ -370,7 +370,6 @@ static void reset_thumbnail_interference_log_state(AppContext *context) {
   context->thumbnail_upload_defer_since_ms = 0;
   context->thumbnail_fetch_defer_last_log_ms = 0;
   context->thumbnail_upload_defer_last_log_ms = 0;
-  context->thumbnail_defer_video_id.clear();
 }
 
 static bool
@@ -2114,7 +2113,6 @@ int main(int argc, char *argv[]) {
     ctx.compare_thumbnail_upload_logged = false;
     ctx.compare_audio_audible_logged = false;
     reset_thumbnail_interference_log_state(&ctx);
-    ctx.thumbnail_defer_video_id = track.id;
     OpusPocPlayer::is_playing = opus_ready;
     g_webm_first_pcm_queued_logged = false;
     g_webm_audio_started_logged = false;

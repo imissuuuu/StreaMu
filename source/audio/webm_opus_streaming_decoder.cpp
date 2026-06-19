@@ -3,6 +3,7 @@
 #include <curl/curl.h>
 #include <stdio.h>
 #include <string.h>
+#include <utility>
 
 extern "C" {
 #include <nestegg/nestegg.h>
@@ -602,6 +603,7 @@ bool WebmOpusStreamingDecoder::open_streaming(
   parser_range_fetch_last_log_ms_ = 0;
   parser_range_retry_offset_ = 0;
   parser_range_retry_after_ms_ = 0;
+  parser_range_prefetch_active_ = false;
   parser_range_prefetch_cancel_ = false;
   parser_range_prefetch_offset_ = 0;
   parser_prefetch_offset_ = parser_prefetch_offset;
@@ -650,6 +652,8 @@ void WebmOpusStreamingDecoder::reset() {
   parser_range_fetch_last_log_ms_ = 0;
   parser_range_retry_offset_ = 0;
   parser_range_retry_after_ms_ = 0;
+  parser_range_prefetch_thread_ = NULL;
+  parser_range_prefetch_active_ = false;
   parser_range_prefetch_cancel_ = false;
   parser_range_prefetch_offset_ = 0;
   parser_prefetch_offset_ = 0;
@@ -723,12 +727,55 @@ WebmOpusStreamingDecoder::range_segment_end_for_offset(uint64_t offset) const {
   return 0U;
 }
 
+void WebmOpusStreamingDecoder::merge_range_segments_locked() {
+  if (range_segments_.size() < 2U) {
+    return;
+  }
+
+  for (size_t i = 1; i < range_segments_.size(); ++i) {
+    RangeSegment segment = std::move(range_segments_[i]);
+    size_t j = i;
+    while (j > 0U && segment.start < range_segments_[j - 1U].start) {
+      range_segments_[j] = std::move(range_segments_[j - 1U]);
+      --j;
+    }
+    range_segments_[j] = std::move(segment);
+  }
+
+  std::vector<RangeSegment> merged;
+  merged.reserve(range_segments_.size());
+  RangeSegment current = std::move(range_segments_[0]);
+  for (size_t i = 1; i < range_segments_.size(); ++i) {
+    RangeSegment &next = range_segments_[i];
+    const uint64_t current_end = current.start + current.data.size();
+    const uint64_t next_end = next.start + next.data.size();
+    if (current_end < next.start) {
+      merged.push_back(std::move(current));
+      current = std::move(next);
+      continue;
+    }
+    if (next_end > current_end) {
+      const size_t append_offset = static_cast<size_t>(current_end - next.start);
+      current.data.insert(current.data.end(), next.data.begin() + append_offset,
+                          next.data.end());
+    }
+  }
+  merged.push_back(std::move(current));
+  range_segments_.swap(merged);
+}
+
 void WebmOpusStreamingDecoder::parser_range_prefetch_thread(void *user_data) {
   WebmOpusStreamingDecoder *self =
       static_cast<WebmOpusStreamingDecoder *>(user_data);
   if (self) {
     self->run_parser_range_prefetch();
   }
+}
+
+void WebmOpusStreamingDecoder::clear_parser_range_prefetch_state_locked() {
+  parser_range_prefetch_active_ = false;
+  parser_range_prefetch_cancel_ = false;
+  parser_range_prefetch_offset_ = 0;
 }
 
 bool WebmOpusStreamingDecoder::maybe_start_parser_range_prefetch(
@@ -765,8 +812,7 @@ bool WebmOpusStreamingDecoder::maybe_start_parser_range_prefetch(
                                0x3F, -2, false);
   if (!thread) {
     LightLock_Lock(stream_source_.lock);
-    parser_range_prefetch_active_ = false;
-    parser_range_prefetch_offset_ = 0;
+    clear_parser_range_prefetch_state_locked();
     LightLock_Unlock(stream_source_.lock);
     return false;
   }
@@ -800,6 +846,11 @@ void WebmOpusStreamingDecoder::run_parser_range_prefetch() {
 void WebmOpusStreamingDecoder::cleanup_parser_range_prefetch(bool cancel) {
   Thread thread = parser_range_prefetch_thread_;
   if (!thread) {
+    if (cancel && stream_source_.lock) {
+      LightLock_Lock(stream_source_.lock);
+      clear_parser_range_prefetch_state_locked();
+      LightLock_Unlock(stream_source_.lock);
+    }
     return;
   }
 
@@ -816,6 +867,11 @@ void WebmOpusStreamingDecoder::cleanup_parser_range_prefetch(bool cancel) {
     threadJoin(thread, U64_MAX);
     threadFree(thread);
     parser_range_prefetch_thread_ = NULL;
+    if (cancel && stream_source_.lock) {
+      LightLock_Lock(stream_source_.lock);
+      clear_parser_range_prefetch_state_locked();
+      LightLock_Unlock(stream_source_.lock);
+    }
   }
 }
 
@@ -996,6 +1052,7 @@ bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
     segment.start = fetch_start;
     segment.data.swap(fetched);
     range_segments_.push_back(segment);
+    merge_range_segments_locked();
   }
   if (stream_source_.filesize > 0U && received_end >= stream_source_.filesize &&
       stream_source_.download_complete) {
