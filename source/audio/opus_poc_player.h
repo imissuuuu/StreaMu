@@ -67,6 +67,7 @@ private:
   int16_t *audioBuffer;
   bool decode_failed_;
   bool ndsp_format_initialized_;
+  u64 webm_decode_call_log_start_ms_;
   OpusDecodeTuning decode_tuning_;
 };
 

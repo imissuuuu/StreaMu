@@ -16,7 +16,15 @@ static constexpr size_t kDefaultWebmPacketPumpLimit = 8U;
 static constexpr size_t kSeekStartupPacketPumpLimit = 48U;
 static constexpr size_t kParserRangeInitialSeekChunkBytes = 128U * 1024U;
 static constexpr size_t kParserRangeFetchChunkBytes = 512U * 1024U;
-static constexpr long kParserRangeFetchTimeoutMs = 15000L;
+static constexpr size_t kParserRangeMidplaybackFetchChunkBytes = 64U * 1024U;
+static constexpr long kParserRangeFetchConnectTimeoutMs = 1500L;
+static constexpr long kParserRangeFetchTimeoutMs = 2000L;
+static constexpr long kParserRangeMidplaybackConnectTimeoutMs = 100L;
+static constexpr long kParserRangeMidplaybackTimeoutMs = 120L;
+static constexpr long kParserRangePrefetchConnectTimeoutMs = 500L;
+static constexpr long kParserRangePrefetchTimeoutMs = 1000L;
+static constexpr u64 kParserRangeMidplaybackRetryDelayMs = 100ULL;
+static constexpr uint64_t kOpusSamplesPerMs = 48ULL;
 
 static bool should_log_webm_perf_event(const char *event) {
   if (!event) {
@@ -25,6 +33,9 @@ static bool should_log_webm_perf_event(const char *event) {
   return strcmp(event, "decoder_session_start") == 0 ||
          strcmp(event, "nestegg_init_failed") == 0 ||
          strcmp(event, "parser_range_fetch_failed") == 0 ||
+         strcmp(event, "parser_range_fetch_done") == 0 ||
+         strcmp(event, "parser_range_fetch_slow") == 0 ||
+         strcmp(event, "parser_range_fetch_midplayback") == 0 ||
          strcmp(event, "parser_offset_seek_done") == 0 ||
          strcmp(event, "parser_offset_seek_failed") == 0 ||
          strcmp(event, "parser_seek_done") == 0 ||
@@ -58,6 +69,138 @@ static void append_webm_perf_log(const char *event, size_t raw_bytes,
           static_cast<unsigned long long>(elapsed_ms), event,
           static_cast<unsigned long>(raw_bytes),
           static_cast<unsigned long>(ogg_bytes), static_cast<int>(error));
+  fclose(f);
+}
+
+static void
+append_webm_parser_range_fetch_log(const char *event, uint64_t fetch_start,
+                                   uint64_t fetch_size, size_t fetched_size,
+                                   size_t min_length, bool seek_startup_fetch,
+                                   bool midplayback_fetch, u64 duration_ms,
+                                   uint32_t fetch_count, u64 start_ms) {
+  if (!should_log_webm_perf_event(event)) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms =
+      (start_ms > 0 && now_ms >= start_ms) ? now_ms - start_ms : 0;
+  fprintf(f,
+          "[webm-perf] +%llums %s start=%llu size=%llu got=%lu min=%lu "
+          "startup=%d mid=%d duration_ms=%llu count=%lu\n",
+          static_cast<unsigned long long>(elapsed_ms), event,
+          static_cast<unsigned long long>(fetch_start),
+          static_cast<unsigned long long>(fetch_size),
+          static_cast<unsigned long>(fetched_size),
+          static_cast<unsigned long>(min_length), seek_startup_fetch ? 1 : 0,
+          midplayback_fetch ? 1 : 0,
+          static_cast<unsigned long long>(duration_ms),
+          static_cast<unsigned long>(fetch_count));
+  fclose(f);
+}
+
+static void append_webm_parser_range_fetch_failed_log(
+    uint64_t fetch_start, uint64_t fetch_size, size_t fetched_size,
+    size_t min_length, bool seek_startup_fetch, bool midplayback_fetch,
+    u64 duration_ms, long response_code, CURLcode curl_code,
+    WebmRemuxError error, u64 start_ms) {
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms =
+      (start_ms > 0 && now_ms >= start_ms) ? now_ms - start_ms : 0;
+  fprintf(f,
+          "[webm-perf] +%llums parser_range_fetch_failed start=%llu "
+          "size=%llu got=%lu min=%lu startup=%d mid=%d duration_ms=%llu "
+          "response=%ld curl=%d error=%d\n",
+          static_cast<unsigned long long>(elapsed_ms),
+          static_cast<unsigned long long>(fetch_start),
+          static_cast<unsigned long long>(fetch_size),
+          static_cast<unsigned long>(fetched_size),
+          static_cast<unsigned long>(min_length), seek_startup_fetch ? 1 : 0,
+          midplayback_fetch ? 1 : 0,
+          static_cast<unsigned long long>(duration_ms), response_code,
+          static_cast<int>(curl_code), static_cast<int>(error));
+  fclose(f);
+}
+
+static u64 webm_perf_elapsed_ms(u64 start_ms) {
+  const u64 now_ms = osGetTime();
+  return (start_ms > 0 && now_ms >= start_ms) ? (now_ms - start_ms) : 0;
+}
+
+static bool should_log_parser_range_fetch_success(bool seek_startup_fetch,
+                                                  bool midplayback_fetch,
+                                                  uint32_t fetch_count,
+                                                  u64 duration_ms, u64 now_ms,
+                                                  u64 last_log_ms) {
+  if (seek_startup_fetch || midplayback_fetch || duration_ms >= 100ULL ||
+      fetch_count <= 3U) {
+    return true;
+  }
+  return last_log_ms == 0 || now_ms >= last_log_ms + 1000ULL;
+}
+
+static const char *parser_range_fetch_event_name(bool seek_startup_fetch,
+                                                 bool midplayback_fetch,
+                                                 u64 duration_ms) {
+  if (midplayback_fetch) {
+    return "parser_range_fetch_midplayback";
+  }
+  if (duration_ms >= 100ULL) {
+    return "parser_range_fetch_slow";
+  }
+  (void)seek_startup_fetch;
+  return "parser_range_fetch_done";
+}
+
+static bool is_transient_parser_range_fetch_failure(CURLcode curl_code,
+                                                    long response_code) {
+  return curl_code == CURLE_OPERATION_TIMEDOUT ||
+         curl_code == CURLE_COULDNT_CONNECT ||
+         curl_code == CURLE_COULDNT_RESOLVE_HOST || response_code == 0L;
+}
+
+static void
+append_webm_seek_decode_breakdown_log(u64 parser_seek_done_elapsed_ms,
+                                      u64 first_decoded_pcm_elapsed_ms,
+                                      u64 first_audible_pcm_elapsed_ms) {
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const long long parser_to_decoded_ms =
+      (parser_seek_done_elapsed_ms > 0 &&
+       first_decoded_pcm_elapsed_ms >= parser_seek_done_elapsed_ms)
+          ? static_cast<long long>(first_decoded_pcm_elapsed_ms -
+                                   parser_seek_done_elapsed_ms)
+          : -1LL;
+  const long long decoded_to_audible_ms =
+      (first_decoded_pcm_elapsed_ms > 0 &&
+       first_audible_pcm_elapsed_ms >= first_decoded_pcm_elapsed_ms)
+          ? static_cast<long long>(first_audible_pcm_elapsed_ms -
+                                   first_decoded_pcm_elapsed_ms)
+          : -1LL;
+  const long long parser_to_audible_ms =
+      (parser_seek_done_elapsed_ms > 0 &&
+       first_audible_pcm_elapsed_ms >= parser_seek_done_elapsed_ms)
+          ? static_cast<long long>(first_audible_pcm_elapsed_ms -
+                                   parser_seek_done_elapsed_ms)
+          : -1LL;
+  fprintf(f,
+          "[webm-seek-decode] parser_seek_done_ms=%llu "
+          "first_decoded_pcm_ms=%llu first_audible_pcm_ms=%llu "
+          "parser_to_decoded_ms=%lld decoded_to_audible_ms=%lld "
+          "parser_to_audible_ms=%lld\n",
+          static_cast<unsigned long long>(parser_seek_done_elapsed_ms),
+          static_cast<unsigned long long>(first_decoded_pcm_elapsed_ms),
+          static_cast<unsigned long long>(first_audible_pcm_elapsed_ms),
+          parser_to_decoded_ms, decoded_to_audible_ms, parser_to_audible_ms);
   fclose(f);
 }
 
@@ -264,12 +407,18 @@ WebmOpusStreamingDecoder::WebmOpusStreamingDecoder()
       last_error_(WebmRemuxError::None), perf_start_ms_(0), seek_start_ms_(0),
       seek_emit_ms_(0), requested_emit_start_ms_(0),
       parser_seek_enabled_(false), parser_offset_seek_preferred_(false),
-      parser_range_fetch_failed_(false), parser_prefetch_offset_(0),
-      pcm_skip_samples_per_channel_(0), first_emitted_packet_tstamp_ms_(-1),
-      pcm_skip_logged_(false), seek_decode_ready_logged_(false),
-      last_seek_runtime_start_byte_(0), last_seek_runtime_timecode_ms_(-1),
-      discarded_packets_before_emit_(0), seek_packet_discard_logged_(false),
-      first_decoded_pcm_logged_(false), first_audible_pcm_logged_(false),
+      parser_range_fetch_failed_(false), parser_range_fetch_count_(0),
+      parser_range_fetch_last_log_ms_(0), parser_range_retry_offset_(0),
+      parser_range_retry_after_ms_(0), parser_range_prefetch_thread_(NULL),
+      parser_range_prefetch_active_(false),
+      parser_range_prefetch_cancel_(false), parser_range_prefetch_offset_(0),
+      parser_prefetch_offset_(0), pcm_skip_samples_per_channel_(0),
+      first_emitted_packet_tstamp_ms_(-1), pcm_skip_logged_(false),
+      seek_decode_ready_logged_(false), last_seek_runtime_start_byte_(0),
+      last_seek_runtime_timecode_ms_(-1), discarded_packets_before_emit_(0),
+      seek_packet_discard_logged_(false), first_decoded_pcm_logged_(false),
+      first_audible_pcm_logged_(false), parser_seek_done_elapsed_ms_(0),
+      first_decoded_pcm_elapsed_ms_(0), first_audible_pcm_elapsed_ms_(0),
       seek_preroll_initialized_(false), range_fetch_curl_(NULL) {
   LightLock_Init(&ogg_lock_);
 }
@@ -296,7 +445,13 @@ int64_t WebmOpusStreamingDecoder::nestegg_read_cb(void *buffer, size_t length,
           static_cast<uint64_t>(source->offset), static_cast<uint8_t *>(buffer),
           length);
       if (copied > 0U) {
+        const uint64_t read_start = static_cast<uint64_t>(source->offset);
+        const uint64_t segment_end =
+            source->owner->range_segment_end_for_offset(read_start);
         source->offset += static_cast<int64_t>(copied);
+        if (segment_end > static_cast<uint64_t>(source->offset)) {
+          (void)source->owner->maybe_start_parser_range_prefetch(segment_end);
+        }
         return static_cast<int64_t>(copied);
       }
       if (source->owner->fetch_range_segment(
@@ -306,6 +461,10 @@ int64_t WebmOpusStreamingDecoder::nestegg_read_cb(void *buffer, size_t length,
       if (source->owner->parser_range_fetch_failed_) {
         return -1;
       }
+      if (*source->download_complete) {
+        return 0;
+      }
+      return -1;
     }
 
     LightLock_Lock(source->lock);
@@ -438,6 +597,13 @@ bool WebmOpusStreamingDecoder::open_streaming(
   requested_emit_start_ms_ = emit_start_ms > 0 ? emit_start_ms : 0;
   parser_seek_enabled_ = enable_parser_seek;
   parser_offset_seek_preferred_ = prefer_offset_seek;
+  parser_range_fetch_failed_ = false;
+  parser_range_fetch_count_ = 0;
+  parser_range_fetch_last_log_ms_ = 0;
+  parser_range_retry_offset_ = 0;
+  parser_range_retry_after_ms_ = 0;
+  parser_range_prefetch_cancel_ = false;
+  parser_range_prefetch_offset_ = 0;
   parser_prefetch_offset_ = parser_prefetch_offset;
   seek_preroll_initialized_ = false;
   seed_initial_range_segment();
@@ -448,6 +614,7 @@ bool WebmOpusStreamingDecoder::open_streaming(
 }
 
 void WebmOpusStreamingDecoder::reset() {
+  cleanup_parser_range_prefetch(true);
   decoder_.reset();
   if (nestegg_ctx_) {
     nestegg_destroy(nestegg_ctx_);
@@ -479,6 +646,12 @@ void WebmOpusStreamingDecoder::reset() {
   requested_emit_start_ms_ = 0;
   parser_offset_seek_preferred_ = false;
   parser_range_fetch_failed_ = false;
+  parser_range_fetch_count_ = 0;
+  parser_range_fetch_last_log_ms_ = 0;
+  parser_range_retry_offset_ = 0;
+  parser_range_retry_after_ms_ = 0;
+  parser_range_prefetch_cancel_ = false;
+  parser_range_prefetch_offset_ = 0;
   parser_prefetch_offset_ = 0;
   range_segments_.clear();
   pcm_skip_samples_per_channel_ = 0;
@@ -491,6 +664,9 @@ void WebmOpusStreamingDecoder::reset() {
   seek_packet_discard_logged_ = false;
   first_decoded_pcm_logged_ = false;
   first_audible_pcm_logged_ = false;
+  parser_seek_done_elapsed_ms_ = 0;
+  first_decoded_pcm_elapsed_ms_ = 0;
+  first_audible_pcm_elapsed_ms_ = 0;
   seek_preroll_initialized_ = false;
 }
 
@@ -528,8 +704,125 @@ size_t WebmOpusStreamingDecoder::copy_from_range_segments(uint64_t offset,
   return 0U;
 }
 
+uint64_t
+WebmOpusStreamingDecoder::range_segment_end_for_offset(uint64_t offset) const {
+  if (!stream_source_.lock) {
+    return 0U;
+  }
+  LightLock_Lock(stream_source_.lock);
+  for (size_t i = 0; i < range_segments_.size(); ++i) {
+    const RangeSegment &segment = range_segments_[i];
+    const uint64_t seg_start = segment.start;
+    const uint64_t seg_end = seg_start + segment.data.size();
+    if (offset >= seg_start && offset < seg_end) {
+      LightLock_Unlock(stream_source_.lock);
+      return seg_end;
+    }
+  }
+  LightLock_Unlock(stream_source_.lock);
+  return 0U;
+}
+
+void WebmOpusStreamingDecoder::parser_range_prefetch_thread(void *user_data) {
+  WebmOpusStreamingDecoder *self =
+      static_cast<WebmOpusStreamingDecoder *>(user_data);
+  if (self) {
+    self->run_parser_range_prefetch();
+  }
+}
+
+bool WebmOpusStreamingDecoder::maybe_start_parser_range_prefetch(
+    uint64_t offset) {
+  if (!parser_seek_enabled_ || offset == 0U || !stream_source_.lock ||
+      stream_source_.range_probe_base_url.empty()) {
+    return false;
+  }
+  if (!logged_audio_ || !seek_decode_ready_logged_) {
+    return false;
+  }
+  cleanup_parser_range_prefetch(false);
+
+  LightLock_Lock(stream_source_.lock);
+  for (size_t i = 0; i < range_segments_.size(); ++i) {
+    const RangeSegment &segment = range_segments_[i];
+    const uint64_t seg_start = segment.start;
+    const uint64_t seg_end = seg_start + segment.data.size();
+    if (offset >= seg_start && offset < seg_end) {
+      LightLock_Unlock(stream_source_.lock);
+      return false;
+    }
+  }
+  if (parser_range_prefetch_active_) {
+    LightLock_Unlock(stream_source_.lock);
+    return false;
+  }
+  parser_range_prefetch_active_ = true;
+  parser_range_prefetch_cancel_ = false;
+  parser_range_prefetch_offset_ = offset;
+  LightLock_Unlock(stream_source_.lock);
+
+  Thread thread = threadCreate(parser_range_prefetch_thread, this, 0x10000,
+                               0x3F, -2, false);
+  if (!thread) {
+    LightLock_Lock(stream_source_.lock);
+    parser_range_prefetch_active_ = false;
+    parser_range_prefetch_offset_ = 0;
+    LightLock_Unlock(stream_source_.lock);
+    return false;
+  }
+
+  parser_range_prefetch_thread_ = thread;
+  return true;
+}
+
+void WebmOpusStreamingDecoder::run_parser_range_prefetch() {
+  uint64_t offset = 0;
+  LightLock_Lock(stream_source_.lock);
+  offset = parser_range_prefetch_offset_;
+  const bool cancel = parser_range_prefetch_cancel_;
+  LightLock_Unlock(stream_source_.lock);
+
+  if (!cancel && offset > 0U) {
+    CURL *curl = curl_easy_init();
+    if (curl) {
+      (void)fetch_range_segment(offset, kParserRangeMidplaybackFetchChunkBytes,
+                                curl, true);
+      curl_easy_cleanup(curl);
+    }
+  }
+
+  LightLock_Lock(stream_source_.lock);
+  parser_range_prefetch_active_ = false;
+  parser_range_prefetch_offset_ = 0;
+  LightLock_Unlock(stream_source_.lock);
+}
+
+void WebmOpusStreamingDecoder::cleanup_parser_range_prefetch(bool cancel) {
+  Thread thread = parser_range_prefetch_thread_;
+  if (!thread) {
+    return;
+  }
+
+  bool active = false;
+  if (stream_source_.lock) {
+    LightLock_Lock(stream_source_.lock);
+    if (cancel) {
+      parser_range_prefetch_cancel_ = true;
+    }
+    active = parser_range_prefetch_active_;
+    LightLock_Unlock(stream_source_.lock);
+  }
+  if (cancel || !active) {
+    threadJoin(thread, U64_MAX);
+    threadFree(thread);
+    parser_range_prefetch_thread_ = NULL;
+  }
+}
+
 bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
-                                                   size_t min_length) {
+                                                   size_t min_length,
+                                                   CURL *curl_override,
+                                                   bool background_prefetch) {
   if (!parser_seek_enabled_ || stream_source_.range_probe_base_url.empty()) {
     return false;
   }
@@ -539,12 +832,28 @@ bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
       seek_start_ms_ > 0 &&
       (!logged_audio_ || first_emitted_packet_tstamp_ms_ < 0 ||
        !seek_decode_ready_logged_);
+  const bool midplayback_fetch =
+      background_prefetch ||
+      (!seek_startup_fetch && logged_audio_ && seek_decode_ready_logged_);
+  const u64 retry_now_ms = osGetTime();
+  if (midplayback_fetch && stream_source_.lock) {
+    LightLock_Lock(stream_source_.lock);
+    const bool retry_deferred = parser_range_retry_after_ms_ > retry_now_ms &&
+                                parser_range_retry_offset_ == fetch_start;
+    LightLock_Unlock(stream_source_.lock);
+    if (retry_deferred) {
+      return false;
+    }
+  }
   const uint64_t preferred_fetch_size =
       seek_startup_fetch
           ? static_cast<uint64_t>(kParserRangeInitialSeekChunkBytes)
-          : static_cast<uint64_t>(kParserRangeFetchChunkBytes);
+          : (midplayback_fetch
+                 ? static_cast<uint64_t>(kParserRangeMidplaybackFetchChunkBytes)
+                 : static_cast<uint64_t>(kParserRangeFetchChunkBytes));
   uint64_t fetch_size = preferred_fetch_size;
-  if (!seek_startup_fetch && min_length > preferred_fetch_size) {
+  if (!seek_startup_fetch && !midplayback_fetch &&
+      min_length > preferred_fetch_size) {
     fetch_size = static_cast<uint64_t>(min_length);
   }
   if (stream_source_.filesize > 0U) {
@@ -580,10 +889,10 @@ bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
   std::string url = stream_source_.range_probe_base_url +
                     "&start=" + std::to_string(fetch_start) +
                     "&size=" + std::to_string(fetch_size);
-  if (!range_fetch_curl_) {
+  if (!curl_override && !range_fetch_curl_) {
     range_fetch_curl_ = curl_easy_init();
   }
-  CURL *curl = range_fetch_curl_;
+  CURL *curl = curl_override ? curl_override : range_fetch_curl_;
   if (!curl) {
     return false;
   }
@@ -599,19 +908,78 @@ bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
   curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, kParserRangeFetchTimeoutMs);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, kParserRangeFetchTimeoutMs);
+  const long connect_timeout_ms =
+      background_prefetch
+          ? kParserRangePrefetchConnectTimeoutMs
+          : (midplayback_fetch ? kParserRangeMidplaybackConnectTimeoutMs
+                               : kParserRangeFetchConnectTimeoutMs);
+  const long timeout_ms =
+      background_prefetch
+          ? kParserRangePrefetchTimeoutMs
+          : (midplayback_fetch ? kParserRangeMidplaybackTimeoutMs
+                               : kParserRangeFetchTimeoutMs);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connect_timeout_ms);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+  const u64 fetch_begin_ms = osGetTime();
   const CURLcode res = curl_easy_perform(curl);
+  const u64 fetch_end_ms = osGetTime();
+  const u64 fetch_duration_ms =
+      fetch_end_ms >= fetch_begin_ms ? fetch_end_ms - fetch_begin_ms : 0;
   (void)curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-  if (res != CURLE_OK || response_code >= 400L || fetched.empty()) {
-    parser_range_fetch_failed_ = true;
-    last_error_ = WebmRemuxError::InvalidBlock;
-    append_webm_perf_log("parser_range_fetch_failed",
-                         static_cast<size_t>(fetch_start), fetched.size(),
-                         last_error_, perf_start_ms_);
+  uint32_t fetch_count_for_log = 0;
+  LightLock_Lock(stream_source_.lock);
+  ++parser_range_fetch_count_;
+  fetch_count_for_log = parser_range_fetch_count_;
+  LightLock_Unlock(stream_source_.lock);
+  const bool usable_response = response_code < 400L;
+  const bool usable_fetch =
+      usable_response &&
+      (res == CURLE_OK ||
+       (res == CURLE_OPERATION_TIMEDOUT && !fetched.empty())) &&
+      !fetched.empty();
+  if (!usable_fetch) {
+    const bool transient_midplayback_failure =
+        !background_prefetch && midplayback_fetch &&
+        is_transient_parser_range_fetch_failure(res, response_code);
+    if (transient_midplayback_failure) {
+      LightLock_Lock(stream_source_.lock);
+      parser_range_retry_offset_ = fetch_start;
+      parser_range_retry_after_ms_ =
+          fetch_end_ms + kParserRangeMidplaybackRetryDelayMs;
+      LightLock_Unlock(stream_source_.lock);
+    } else if (!background_prefetch) {
+      parser_range_fetch_failed_ = true;
+      last_error_ = WebmRemuxError::InvalidBlock;
+    }
+    append_webm_parser_range_fetch_failed_log(
+        fetch_start, fetch_size, fetched.size(), min_length, seek_startup_fetch,
+        midplayback_fetch, fetch_duration_ms, response_code, res, last_error_,
+        perf_start_ms_);
     return false;
   }
+  bool should_log_fetch = false;
+  LightLock_Lock(stream_source_.lock);
+  if (parser_range_retry_offset_ == fetch_start) {
+    parser_range_retry_offset_ = 0;
+    parser_range_retry_after_ms_ = 0;
+  }
+  should_log_fetch = should_log_parser_range_fetch_success(
+      seek_startup_fetch, midplayback_fetch, fetch_count_for_log,
+      fetch_duration_ms, fetch_end_ms, parser_range_fetch_last_log_ms_);
+  if (should_log_fetch) {
+    parser_range_fetch_last_log_ms_ = fetch_end_ms;
+  }
+  LightLock_Unlock(stream_source_.lock);
+  if (should_log_fetch) {
+    append_webm_parser_range_fetch_log(
+        parser_range_fetch_event_name(seek_startup_fetch, midplayback_fetch,
+                                      fetch_duration_ms),
+        fetch_start, fetch_size, fetched.size(), min_length, seek_startup_fetch,
+        midplayback_fetch, fetch_duration_ms, fetch_count_for_log,
+        perf_start_ms_);
+  }
 
+  const uint64_t received_end = fetch_start + fetched.size();
   LightLock_Lock(stream_source_.lock);
   bool covered = false;
   for (size_t i = 0; i < range_segments_.size(); ++i) {
@@ -629,8 +997,7 @@ bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
     segment.data.swap(fetched);
     range_segments_.push_back(segment);
   }
-  if (stream_source_.filesize > 0U &&
-      fetch_start + fetch_size >= stream_source_.filesize &&
+  if (stream_source_.filesize > 0U && received_end >= stream_source_.filesize &&
       stream_source_.download_complete) {
     *stream_source_.download_complete = true;
   }
@@ -730,7 +1097,6 @@ bool WebmOpusStreamingDecoder::init_nestegg() {
     last_error_ = WebmRemuxError::InvalidCodecPrivate;
     return false;
   }
-
   if (!emit_headers()) {
     remux_failed_ = true;
     return false;
@@ -891,6 +1257,7 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
   append_webm_perf_log(
       "parser_seek_done", static_cast<size_t>(stream_source_.offset),
       ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+  parser_seek_done_elapsed_ms_ = webm_perf_elapsed_ms(perf_start_ms_);
   last_seek_runtime_start_byte_ = static_cast<uint64_t>(stream_source_.offset);
   last_seek_runtime_timecode_ms_ = -1;
   return true;
@@ -944,7 +1311,14 @@ bool WebmOpusStreamingDecoder::emit_packet(const unsigned char *data,
     last_error_ = WebmRemuxError::InvalidBlock;
     return false;
   }
-  granule_position_ += duration_samples;
+  if (seek_start_ms_ > 0 && packet_tstamp_ns > 0U) {
+    const uint64_t packet_time_ms = packet_tstamp_ns / 1000000ULL;
+    granule_position_ =
+        static_cast<int64_t>(packet_time_ms * kOpusSamplesPerMs +
+                             static_cast<uint64_t>(duration_samples));
+  } else {
+    granule_position_ += duration_samples;
+  }
   OggPagePacket packet;
   packet.data.assign(data, data + length);
   packet.granule_position = granule_position_;
@@ -972,6 +1346,7 @@ void WebmOpusStreamingDecoder::log_first_decoded_pcm_if_needed(
     return;
   }
   first_decoded_pcm_logged_ = true;
+  first_decoded_pcm_elapsed_ms_ = webm_perf_elapsed_ms(perf_start_ms_);
   append_webm_perf_log(
       "first_decoded_pcm", static_cast<size_t>(stream_source_.offset),
       ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
@@ -984,9 +1359,16 @@ void WebmOpusStreamingDecoder::log_first_audible_pcm_if_needed(
     return;
   }
   first_audible_pcm_logged_ = true;
+  first_audible_pcm_elapsed_ms_ = webm_perf_elapsed_ms(perf_start_ms_);
   append_webm_perf_log(
       "first_audible_pcm", static_cast<size_t>(stream_source_.offset),
       ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+  if (seek_start_ms_ > 0 && parser_seek_done_elapsed_ms_ > 0 &&
+      first_decoded_pcm_elapsed_ms_ > 0) {
+    append_webm_seek_decode_breakdown_log(parser_seek_done_elapsed_ms_,
+                                          first_decoded_pcm_elapsed_ms_,
+                                          first_audible_pcm_elapsed_ms_);
+  }
 }
 
 bool WebmOpusStreamingDecoder::finalize_stream() {
@@ -1005,8 +1387,8 @@ bool WebmOpusStreamingDecoder::open_decoder_if_ready() {
     return decoder_open_;
   }
   if (!decoder_.open_streaming(&ogg_buffer_, &ogg_lock_, &ogg_complete_,
-                               &WebmOpusStreamingDecoder::pump_callback,
-                               this)) {
+                               &WebmOpusStreamingDecoder::pump_callback, this,
+                               true)) {
     remux_failed_ = true;
     last_error_ = WebmRemuxError::InvalidBlock;
     append_webm_perf_log("decoder_open_failed",

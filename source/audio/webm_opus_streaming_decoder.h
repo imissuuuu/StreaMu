@@ -69,6 +69,7 @@ private:
   };
 
   static bool pump_callback(void *user_data);
+  static void parser_range_prefetch_thread(void *user_data);
   static int64_t nestegg_read_cb(void *buffer, size_t length, void *userdata);
   static int nestegg_seek_cb(int64_t offset, int whence, void *userdata);
   static int64_t nestegg_tell_cb(void *userdata);
@@ -92,7 +93,13 @@ private:
   bool ensure_stream_bytes(size_t required_size);
   size_t copy_from_range_segments(uint64_t offset, uint8_t *dst,
                                   size_t length) const;
-  bool fetch_range_segment(uint64_t offset, size_t min_length);
+  uint64_t range_segment_end_for_offset(uint64_t offset) const;
+  bool fetch_range_segment(uint64_t offset, size_t min_length,
+                           CURL *curl_override = NULL,
+                           bool background_prefetch = false);
+  bool maybe_start_parser_range_prefetch(uint64_t offset);
+  void run_parser_range_prefetch();
+  void cleanup_parser_range_prefetch(bool cancel);
   void seed_initial_range_segment();
 
   StreamSource stream_source_;
@@ -123,6 +130,14 @@ private:
   bool parser_seek_enabled_;
   bool parser_offset_seek_preferred_;
   bool parser_range_fetch_failed_;
+  uint32_t parser_range_fetch_count_;
+  u64 parser_range_fetch_last_log_ms_;
+  uint64_t parser_range_retry_offset_;
+  u64 parser_range_retry_after_ms_;
+  Thread parser_range_prefetch_thread_;
+  bool parser_range_prefetch_active_;
+  bool parser_range_prefetch_cancel_;
+  uint64_t parser_range_prefetch_offset_;
   uint64_t parser_prefetch_offset_;
   std::vector<RangeSegment> range_segments_;
   int pcm_skip_samples_per_channel_;
@@ -136,6 +151,9 @@ private:
   bool seek_packet_discard_logged_;
   bool first_decoded_pcm_logged_;
   bool first_audible_pcm_logged_;
+  u64 parser_seek_done_elapsed_ms_;
+  u64 first_decoded_pcm_elapsed_ms_;
+  u64 first_audible_pcm_elapsed_ms_;
   bool seek_preroll_initialized_;
   CURL *range_fetch_curl_;
   OpusMemoryDecoder decoder_;

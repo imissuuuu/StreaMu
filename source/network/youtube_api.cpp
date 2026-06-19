@@ -16,6 +16,7 @@ static bool g_webm_perf_active = false;
 static bool g_webm_perf_first_byte_logged = false;
 static size_t g_webm_perf_bytes = 0;
 static u64 g_webm_perf_start_ms = 0;
+static u64 g_webm_perf_last_buffer_observe_ms = 0;
 
 static void append_webm_perf_log(const char *event, size_t bytes,
                                  size_t stream_buffer_bytes,
@@ -132,6 +133,13 @@ static size_t StreamingWriteCallback(void *contents, size_t size, size_t nmemb,
       playback_observer_log_simple(PlaybackCompareEvent::FirstByte,
                                    StreamContainerMode::ProxyWebmOpus,
                                    stream_buffer_size);
+    }
+    const u64 now_ms = osGetTime();
+    if (g_webm_perf_last_buffer_observe_ms == 0 ||
+        now_ms >= g_webm_perf_last_buffer_observe_ms + 1000ULL) {
+      append_webm_perf_log("stream_buffer_observe", g_webm_perf_bytes,
+                           stream_buffer_size, total_size);
+      g_webm_perf_last_buffer_observe_ms = now_ms;
     }
   }
   return total_size;
@@ -282,6 +290,7 @@ bool YouTubeAPI::start_streaming(const std::string &url,
   g_webm_perf_first_byte_logged = false;
   g_webm_perf_bytes = 0;
   g_webm_perf_start_ms = is_webm_opus ? osGetTime() : 0;
+  g_webm_perf_last_buffer_observe_ms = 0;
   if (is_webm_opus) {
     append_webm_perf_log("stream_request_start", 0, 0, 0);
   }

@@ -33,13 +33,18 @@ static int opus_stream_read(void *stream, unsigned char *ptr, int nbytes) {
         source->pump_callback(source->pump_user_data)) {
       continue;
     }
+    if (source->nonblocking_pump) {
+      source->pump_would_block = true;
+      return OP_EREAD;
+    }
     svcSleepThread(10 * 1000 * 1000);
   }
 }
 
 OpusMemoryDecoder::OpusMemoryDecoder()
-    : file_(NULL), stream_source_{NULL, NULL, NULL, 0, NULL, NULL}, eof_(false),
-      failed_(false) {}
+    : file_(NULL),
+      stream_source_{NULL, NULL, NULL, 0, NULL, NULL, false, false},
+      eof_(false), failed_(false) {}
 
 OpusMemoryDecoder::~OpusMemoryDecoder() { reset(); }
 
@@ -74,7 +79,8 @@ bool OpusMemoryDecoder::open_streaming(const std::vector<uint8_t> *buffer,
                                        LightLock *lock,
                                        const bool *download_complete,
                                        OpusStreamPumpCallback pump_callback,
-                                       void *pump_user_data) {
+                                       void *pump_user_data,
+                                       bool nonblocking_pump) {
   reset();
   if (!buffer || !lock || !download_complete) {
     failed_ = true;
@@ -87,6 +93,8 @@ bool OpusMemoryDecoder::open_streaming(const std::vector<uint8_t> *buffer,
   stream_source_.offset = 0;
   stream_source_.pump_callback = pump_callback;
   stream_source_.pump_user_data = pump_user_data;
+  stream_source_.nonblocking_pump = nonblocking_pump;
+  stream_source_.pump_would_block = false;
 
   OpusFileCallbacks callbacks = {};
   callbacks.read = opus_stream_read;
@@ -116,6 +124,7 @@ void OpusMemoryDecoder::reset() {
     op_free(file_);
     file_ = NULL;
   }
+  stream_source_.pump_would_block = false;
   eof_ = false;
   failed_ = false;
 }
@@ -139,6 +148,10 @@ OpusDecodeResult OpusMemoryDecoder::decode(int16_t *pcm_out,
     return result;
   }
   if (decoded < 0) {
+    if (stream_source_.pump_would_block) {
+      stream_source_.pump_would_block = false;
+      return result;
+    }
     failed_ = true;
     return result;
   }
@@ -147,6 +160,7 @@ OpusDecodeResult OpusMemoryDecoder::decode(int16_t *pcm_out,
   result.samples_per_channel = decoded;
   result.channels = 2;
   result.eof = false;
+  stream_source_.pump_would_block = false;
   return result;
 }
 

@@ -27,7 +27,8 @@ public:
   bool open_streaming(const std::vector<uint8_t> *buffer, LightLock *lock,
                       const bool *download_complete,
                       OpusStreamPumpCallback pump_callback = NULL,
-                      void *pump_user_data = NULL);
+                      void *pump_user_data = NULL,
+                      bool nonblocking_pump = false);
   void reset();
   OpusDecodeResult decode(int16_t *pcm_out, size_t pcm_capacity_samples);
   bool is_open() const;
@@ -41,6 +42,8 @@ public:
     size_t offset;
     OpusStreamPumpCallback pump_callback;
     void *pump_user_data;
+    bool nonblocking_pump;
+    bool pump_would_block;
   };
 
 private:

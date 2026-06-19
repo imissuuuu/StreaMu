@@ -2,15 +2,48 @@
 
 #include <3ds.h>
 #include <malloc.h>
+#include <stdio.h>
 #include <string.h>
 
 bool OpusPocPlayer::is_playing = false;
 
 static constexpr size_t OPUS_PCM_CAPACITY_SAMPLES = 8192;
 static constexpr int OPUS_WAVE_BUF_COUNT = 8;
+static constexpr u64 WEBM_DECODE_CALL_SLOW_MS = 100ULL;
+
+static void append_webm_decode_call_log(
+    u64 start_ms, int wavebuf_index, u64 duration_ms,
+    const OpusDecodeResult &decoded, int queued_before_update,
+    int queued_before_call, int queued_after_call, int free_before_update,
+    int target_queued_wavebufs, int max_decode_buffers) {
+  if (duration_ms < WEBM_DECODE_CALL_SLOW_MS) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms =
+      (start_ms > 0 && now_ms >= start_ms) ? now_ms - start_ms : 0;
+  fprintf(f,
+          "[webm-decode-call] +%llums slow_decode_call index=%d "
+          "duration_ms=%llu ok=%d eof=%d samples=%d channels=%d rate=%d "
+          "queued_before_update=%d queued_before_call=%d queued_after_call=%d "
+          "free_before_update=%d target=%d max_decode=%d\n",
+          static_cast<unsigned long long>(elapsed_ms), wavebuf_index,
+          static_cast<unsigned long long>(duration_ms), decoded.ok ? 1 : 0,
+          decoded.eof ? 1 : 0, decoded.samples_per_channel, decoded.channels,
+          decoded.sample_rate, queued_before_update, queued_before_call,
+          queued_after_call, free_before_update, target_queued_wavebufs,
+          max_decode_buffers);
+  fclose(f);
+}
+
 OpusPocPlayer::OpusPocPlayer()
     : input_kind_(OpusInputKind::None), audioBuffer(NULL),
       decode_failed_(false), ndsp_format_initialized_(false),
+      webm_decode_call_log_start_ms_(0),
       decode_tuning_(default_opus_decode_tuning()) {
   memset(waveBuf, 0, sizeof(waveBuf));
 }
@@ -43,6 +76,7 @@ bool OpusPocPlayer::start(const uint8_t *data, size_t size) {
   stop();
   decode_failed_ = false;
   ndsp_format_initialized_ = false;
+  webm_decode_call_log_start_ms_ = 0;
   input_kind_ = OpusInputKind::OggBytes;
   if (!audioBuffer || !decoder_.open(data, size)) {
     decode_failed_ = true;
@@ -62,6 +96,7 @@ bool OpusPocPlayer::start_streaming(const std::vector<uint8_t> *buffer,
   stop();
   decode_failed_ = false;
   ndsp_format_initialized_ = false;
+  webm_decode_call_log_start_ms_ = 0;
   input_kind_ = OpusInputKind::OggStream;
   if (!audioBuffer ||
       !decoder_.open_streaming(buffer, lock, download_complete)) {
@@ -84,6 +119,7 @@ bool OpusPocPlayer::start_webm_streaming(
   stop();
   decode_failed_ = false;
   ndsp_format_initialized_ = false;
+  webm_decode_call_log_start_ms_ = osGetTime();
   input_kind_ = OpusInputKind::WebmStream;
   if (!audioBuffer ||
       !webm_decoder_.open_streaming(
@@ -92,6 +128,7 @@ bool OpusPocPlayer::start_webm_streaming(
           range_filesize, parser_prefetch_offset)) {
     decode_failed_ = true;
     input_kind_ = OpusInputKind::None;
+    webm_decode_call_log_start_ms_ = 0;
     return false;
   }
   ndspSetOutputMode(NDSP_OUTPUT_STEREO);
@@ -137,6 +174,9 @@ OpusPlayerUpdateStats OpusPocPlayer::update_with_stats() {
     }
     if (waveBuf[i].status == NDSP_WBUF_DONE ||
         waveBuf[i].status == NDSP_WBUF_FREE) {
+      const int queued_before_call = queued_wavebuf_count();
+      const u64 decode_call_start_ms =
+          (input_kind_ == OpusInputKind::WebmStream) ? osGetTime() : 0;
       OpusDecodeResult decoded =
           (input_kind_ == OpusInputKind::WebmStream)
               ? webm_decoder_.decode(
@@ -147,6 +187,17 @@ OpusPlayerUpdateStats OpusPocPlayer::update_with_stats() {
                     const_cast<int16_t *>(
                         static_cast<const int16_t *>(waveBuf[i].data_vaddr)),
                     OPUS_PCM_CAPACITY_SAMPLES);
+      if (input_kind_ == OpusInputKind::WebmStream) {
+        const u64 decode_call_end_ms = osGetTime();
+        const u64 decode_call_duration_ms =
+            decode_call_end_ms >= decode_call_start_ms
+                ? decode_call_end_ms - decode_call_start_ms
+                : 0;
+        append_webm_decode_call_log(
+            webm_decode_call_log_start_ms_, i, decode_call_duration_ms, decoded,
+            queued_before_update, queued_before_call, queued_wavebuf_count(),
+            free_before_update, target_queued_wavebufs, max_decode_buffers);
+      }
       if (decoded.ok) {
         u16 format = (decoded.channels == 2) ? NDSP_FORMAT_STEREO_PCM16
                                              : NDSP_FORMAT_MONO_PCM16;
@@ -221,6 +272,7 @@ void OpusPocPlayer::stop() {
   webm_decoder_.reset();
   input_kind_ = OpusInputKind::None;
   ndsp_format_initialized_ = false;
+  webm_decode_call_log_start_ms_ = 0;
 }
 
 OpusPocPlayer::~OpusPocPlayer() {

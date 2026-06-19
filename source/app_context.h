@@ -1,4 +1,5 @@
 #pragma once
+#include "audio/non_audio_interference_gate.h"
 #include "audio/webm_seek_types.h"
 #include "audio/webm_playback_controller.h"
 #include "network/youtube_api.h"
@@ -81,4 +82,13 @@ struct AppContext : public RenderContext {
   bool compare_thumbnail_done_logged = false;
   bool compare_thumbnail_upload_logged = false;
   bool compare_audio_audible_logged = false;
+  NonAudioInterferenceReason thumbnail_fetch_defer_reason =
+      NonAudioInterferenceReason::None;
+  NonAudioInterferenceReason thumbnail_upload_defer_reason =
+      NonAudioInterferenceReason::None;
+  u64 thumbnail_fetch_defer_since_ms = 0;
+  u64 thumbnail_upload_defer_since_ms = 0;
+  u64 thumbnail_fetch_defer_last_log_ms = 0;
+  u64 thumbnail_upload_defer_last_log_ms = 0;
+  std::string thumbnail_defer_video_id;
 };

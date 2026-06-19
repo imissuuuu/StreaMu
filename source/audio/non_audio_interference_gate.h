@@ -16,6 +16,32 @@ struct NonAudioInterferenceInput {
   bool audio_started = false;
 };
 
+enum class NonAudioInterferenceReason {
+  None,
+  NotWebmOpusDirect,
+  WaitingForDecoderStart,
+  Prebuffering,
+  Failed,
+  IdleBeforeAudio,
+  Idle,
+  AudioNotStarted,
+  QueueBelowFetchTarget,
+  QueueBelowUploadTarget,
+  BytesBelowFetchTarget,
+};
+
+struct NonAudioInterferenceDecision {
+  bool defer = false;
+  NonAudioInterferenceReason reason = NonAudioInterferenceReason::None;
+};
+
+NonAudioInterferenceDecision
+evaluate_thumbnail_fetch_interference(const NonAudioInterferenceInput &input);
+NonAudioInterferenceDecision
+evaluate_thumbnail_upload_interference(const NonAudioInterferenceInput &input);
+const char *
+non_audio_interference_reason_name(NonAudioInterferenceReason reason);
+
 bool should_defer_thumbnail_fetch(const NonAudioInterferenceInput &input);
 bool should_defer_thumbnail_upload(const NonAudioInterferenceInput &input);
 
