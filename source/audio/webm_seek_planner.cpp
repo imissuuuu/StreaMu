@@ -6,6 +6,8 @@ static const uint64_t kSeekBacktrackBytes = 128ULL * 1024ULL;
 static const int kMaxSeekSeconds = 86400;
 static const int kSeekProbeWarmupMs = 1200;
 static const int kSeekCacheReuseSlackMs = 2000;
+// Wide enough to skip another network probe on nearby repeated seeks, while
+// still starting before the target so the parser can discard preroll safely.
 static const int kSeekCacheWarmStartMaxGapMs = 15000;
 
 static int desired_cluster_time_ms(const WebmSeekSourceInfo &source_info,

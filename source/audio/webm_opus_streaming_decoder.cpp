@@ -73,22 +73,6 @@ static void append_webm_perf_log(const char *event, size_t raw_bytes,
   fclose(f);
 }
 
-static const char *webm_seek_plan_source_name(WebmSeekPlanSource source) {
-  switch (source) {
-    case WebmSeekPlanSource::ExactClusterCache:
-      return "cache";
-    case WebmSeekPlanSource::CueIndex:
-      return "cue";
-    case WebmSeekPlanSource::ProbeCluster:
-      return "probe";
-    case WebmSeekPlanSource::CoarseEstimate:
-      return "coarse";
-    case WebmSeekPlanSource::Invalid:
-    default:
-      return "invalid";
-  }
-}
-
 static void append_webm_seek_execution_log(
     const char *event, const WebmSeekExecutionContext &context, uint64_t offset,
     int packet_ms, uint64_t elapsed_ms) {

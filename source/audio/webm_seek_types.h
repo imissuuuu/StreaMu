@@ -43,6 +43,38 @@ enum class WebmSeekCacheStoreStatus {
   EvictedOldest,
 };
 
+inline const char *webm_seek_plan_source_name(WebmSeekPlanSource source) {
+  switch (source) {
+    case WebmSeekPlanSource::Invalid:
+      return "invalid";
+    case WebmSeekPlanSource::ExactClusterCache:
+      return "cache";
+    case WebmSeekPlanSource::RuntimeClusterCacheWarmStart:
+      return "cache_warm_start";
+    case WebmSeekPlanSource::CueIndex:
+      return "cues";
+    case WebmSeekPlanSource::ProbeCluster:
+      return "probe";
+    case WebmSeekPlanSource::CoarseEstimate:
+      return "coarse";
+  }
+  return "unknown";
+}
+
+inline const char *webm_seek_reuse_class_name(WebmSeekReuseClass value) {
+  switch (value) {
+    case WebmSeekReuseClass::Cold:
+      return "cold";
+    case WebmSeekReuseClass::MetadataWarm:
+      return "metadata";
+    case WebmSeekReuseClass::CuesWarm:
+      return "cues";
+    case WebmSeekReuseClass::ClusterCacheWarm:
+      return "cluster_cache";
+  }
+  return "unknown";
+}
+
 struct WebmSeekSourceInfo {
   bool has_filesize = false;
   uint64_t filesize = 0;
@@ -75,6 +107,8 @@ struct WebmSeekCacheLookupTrace {
       WebmSeekCacheLookupStatus::NotChecked;
   WebmSeekCacheLookupStatus probe_status =
       WebmSeekCacheLookupStatus::NotChecked;
+  // Candidate counts describe the last cache lookup that populated this trace:
+  // exact/warm-start cluster selection, or probe-byte estimation on fallback.
   size_t cache_size = 0;
   size_t valid_point_count = 0;
   size_t invalid_point_count = 0;
@@ -82,6 +116,7 @@ struct WebmSeekCacheLookupTrace {
   int target_ms = 0;
   int desired_cluster_ms = 0;
   int max_reuse_gap_ms = 0;
+  // This is the configured warm-start limit, not an observed maximum gap.
   int max_warm_start_gap_ms = 0;
   int best_cluster_ms = -1;
   int best_gap_ms = -1;
