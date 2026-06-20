@@ -46,6 +46,7 @@ public:
                       const std::string &range_probe_base_url,
                       uint64_t range_filesize, uint64_t parser_prefetch_offset);
   void reset();
+  void request_cancel();
   OpusDecodeResult decode(int16_t *pcm_out, size_t pcm_capacity_samples);
   bool is_open() const;
   bool is_eof() const;
@@ -99,6 +100,7 @@ private:
   bool fetch_range_segment(uint64_t offset, size_t min_length,
                            CURL *curl_override = NULL,
                            bool background_prefetch = false);
+  bool is_cancel_requested() const;
   bool maybe_start_parser_range_prefetch(uint64_t offset);
   void run_parser_range_prefetch();
   void cleanup_parser_range_prefetch(bool cancel);
@@ -107,6 +109,8 @@ private:
   void seed_initial_range_segment();
 
   StreamSource stream_source_;
+  mutable LightLock cancel_lock_;
+  bool cancel_requested_;
   nestegg *nestegg_ctx_;
   bool nestegg_inited_;
   unsigned int opus_track_;

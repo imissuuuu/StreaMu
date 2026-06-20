@@ -419,15 +419,15 @@ static size_t append_fetch_bytes_cb(char *ptr, size_t size, size_t nmemb,
 } // namespace
 
 WebmOpusStreamingDecoder::WebmOpusStreamingDecoder()
-    : stream_source_{NULL, NULL, NULL, 0, 0, "", NULL}, nestegg_ctx_(NULL),
-      nestegg_inited_(false), opus_track_(0), ogg_complete_(false),
-      decoder_open_(false), remux_failed_(false), logged_init_(false),
-      logged_track_(false), logged_headers_(false), logged_audio_(false),
-      logged_decoder_open_(false), ogg_sequence_(0), granule_position_(0),
-      audio_page_bytes_(0), audio_page_segments_(0),
-      last_error_(WebmRemuxError::None), perf_start_ms_(0),
-      seek_context_(WebmSeekExecutionContext{}), seek_start_ms_(0),
-      seek_emit_ms_(0), requested_emit_start_ms_(0),
+    : stream_source_{NULL, NULL, NULL, 0, 0, "", NULL},
+      cancel_requested_(false), nestegg_ctx_(NULL), nestegg_inited_(false),
+      opus_track_(0), ogg_complete_(false), decoder_open_(false),
+      remux_failed_(false), logged_init_(false), logged_track_(false),
+      logged_headers_(false), logged_audio_(false), logged_decoder_open_(false),
+      ogg_sequence_(0), granule_position_(0), audio_page_bytes_(0),
+      audio_page_segments_(0), last_error_(WebmRemuxError::None),
+      perf_start_ms_(0), seek_context_(WebmSeekExecutionContext{}),
+      seek_start_ms_(0), seek_emit_ms_(0), requested_emit_start_ms_(0),
       parser_seek_enabled_(false), parser_offset_seek_preferred_(false),
       parser_range_fetch_failed_(false), parser_range_fetch_count_(0),
       parser_range_fetch_last_log_ms_(0), parser_range_retry_offset_(0),
@@ -442,6 +442,7 @@ WebmOpusStreamingDecoder::WebmOpusStreamingDecoder()
       first_audible_pcm_logged_(false), parser_seek_done_elapsed_ms_(0),
       first_decoded_pcm_elapsed_ms_(0), first_audible_pcm_elapsed_ms_(0),
       seek_preroll_initialized_(false), range_fetch_curl_(NULL) {
+  LightLock_Init(&cancel_lock_);
   LightLock_Init(&ogg_lock_);
 }
 
@@ -462,6 +463,9 @@ int64_t WebmOpusStreamingDecoder::nestegg_read_cb(void *buffer, size_t length,
   }
 
   while (true) {
+    if (source->owner && source->owner->is_cancel_requested()) {
+      return -1;
+    }
     if (source->owner && source->owner->parser_seek_enabled_) {
       const size_t copied = source->owner->copy_from_range_segments(
           static_cast<uint64_t>(source->offset), static_cast<uint8_t *>(buffer),
@@ -506,6 +510,9 @@ int64_t WebmOpusStreamingDecoder::nestegg_read_cb(void *buffer, size_t length,
     if (complete) {
       return 0;
     }
+    if (source->owner && source->owner->is_cancel_requested()) {
+      return -1;
+    }
     if (source->owner && source->owner->ensure_stream_bytes(
                              static_cast<size_t>(source->offset) + length)) {
       continue;
@@ -529,6 +536,9 @@ int WebmOpusStreamingDecoder::nestegg_seek_cb(int64_t offset, int whence,
   }
 
   while (true) {
+    if (source->owner && source->owner->is_cancel_requested()) {
+      return -1;
+    }
     if (source->owner && source->owner->parser_seek_enabled_) {
       int64_t target = 0;
       if (whence == NESTEGG_SEEK_SET) {
@@ -562,6 +572,9 @@ int WebmOpusStreamingDecoder::nestegg_seek_cb(int64_t offset, int whence,
     } else if (whence == NESTEGG_SEEK_END) {
       if (!complete) {
         LightLock_Unlock(source->lock);
+        if (source->owner && source->owner->is_cancel_requested()) {
+          return -1;
+        }
         if (source->owner && source->owner->logged_audio_) {
           return -1;
         }
@@ -589,6 +602,9 @@ int WebmOpusStreamingDecoder::nestegg_seek_cb(int64_t offset, int whence,
       continue;
     }
     if (complete) {
+      return -1;
+    }
+    if (source->owner && source->owner->is_cancel_requested()) {
       return -1;
     }
     if (source->owner && source->owner->logged_audio_) {
@@ -630,6 +646,9 @@ bool WebmOpusStreamingDecoder::open_streaming(
   parser_seek_enabled_ = enable_parser_seek;
   parser_offset_seek_preferred_ = prefer_offset_seek;
   parser_range_fetch_failed_ = false;
+  LightLock_Lock(&cancel_lock_);
+  cancel_requested_ = false;
+  LightLock_Unlock(&cancel_lock_);
   parser_range_fetch_count_ = 0;
   parser_range_fetch_last_log_ms_ = 0;
   parser_range_retry_offset_ = 0;
@@ -647,6 +666,7 @@ bool WebmOpusStreamingDecoder::open_streaming(
 }
 
 void WebmOpusStreamingDecoder::reset() {
+  request_cancel();
   cleanup_parser_range_prefetch(true);
   decoder_.reset();
   if (nestegg_ctx_) {
@@ -673,6 +693,9 @@ void WebmOpusStreamingDecoder::reset() {
   audio_page_bytes_ = 0;
   audio_page_segments_ = 0;
   last_error_ = WebmRemuxError::None;
+  LightLock_Lock(&cancel_lock_);
+  cancel_requested_ = false;
+  LightLock_Unlock(&cancel_lock_);
   perf_start_ms_ = 0;
   seek_context_ = WebmSeekExecutionContext{};
   seek_start_ms_ = 0;
@@ -704,6 +727,12 @@ void WebmOpusStreamingDecoder::reset() {
   first_decoded_pcm_elapsed_ms_ = 0;
   first_audible_pcm_elapsed_ms_ = 0;
   seek_preroll_initialized_ = false;
+}
+
+void WebmOpusStreamingDecoder::request_cancel() {
+  LightLock_Lock(&cancel_lock_);
+  cancel_requested_ = true;
+  LightLock_Unlock(&cancel_lock_);
 }
 
 bool WebmOpusStreamingDecoder::ensure_stream_bytes(size_t required_size) {
@@ -915,6 +944,9 @@ bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
   if (!parser_seek_enabled_ || stream_source_.range_probe_base_url.empty()) {
     return false;
   }
+  if (is_cancel_requested()) {
+    return false;
+  }
 
   const uint64_t fetch_start = offset;
   const bool seek_startup_fetch =
@@ -1093,6 +1125,13 @@ bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
   }
   LightLock_Unlock(stream_source_.lock);
   return true;
+}
+
+bool WebmOpusStreamingDecoder::is_cancel_requested() const {
+  LightLock_Lock(&cancel_lock_);
+  const bool value = cancel_requested_;
+  LightLock_Unlock(&cancel_lock_);
+  return value;
 }
 
 void WebmOpusStreamingDecoder::seed_initial_range_segment() {

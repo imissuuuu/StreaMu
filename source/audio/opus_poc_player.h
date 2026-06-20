@@ -8,7 +8,7 @@
 
 #include "opus_decode_tuning.h"
 #include "opus_memory_decoder.h"
-#include "webm_opus_streaming_decoder.h"
+#include "webm_pcm_decode_worker.h"
 
 struct OpusPlayerUpdateStats {
   int decoded_buffers = 0;
@@ -61,14 +61,16 @@ public:
   static bool is_playing;
 
 private:
+  bool submit_decoded_pcm_to_wavebuf(int wavebuf_index,
+                                     const OpusDecodeResult &decoded);
+
   OpusMemoryDecoder decoder_;
-  WebmOpusStreamingDecoder webm_decoder_;
+  WebmPcmDecodeWorker webm_worker_;
   OpusInputKind input_kind_;
   ndspWaveBuf waveBuf[8];
   int16_t *audioBuffer;
   bool decode_failed_;
   bool ndsp_format_initialized_;
-  u64 webm_decode_call_log_start_ms_;
   OpusDecodeTuning decode_tuning_;
 };
 
