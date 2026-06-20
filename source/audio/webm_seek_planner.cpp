@@ -6,6 +6,7 @@ static const uint64_t kSeekBacktrackBytes = 128ULL * 1024ULL;
 static const int kMaxSeekSeconds = 86400;
 static const int kSeekProbeWarmupMs = 1200;
 static const int kSeekCacheReuseSlackMs = 2000;
+static const int kSeekCacheWarmStartMaxGapMs = 15000;
 
 static int desired_cluster_time_ms(const WebmSeekSourceInfo &source_info,
                                    int target_ms) {
@@ -65,6 +66,18 @@ static bool build_coarse_seek_plan(int seek_seconds,
   return true;
 }
 
+static bool is_valid_cache_point(const WebmSeekSourceInfo &source_info,
+                                 const WebmSeekClusterPoint &point) {
+  if (point.timecode_ms < 0 || point.start_byte == 0U) {
+    return false;
+  }
+  if (source_info.has_filesize && source_info.filesize > 0U &&
+      point.start_byte > source_info.filesize) {
+    return false;
+  }
+  return true;
+}
+
 } // namespace
 
 WebmSeekPlan build_webm_seek_plan(int seek_seconds,
@@ -83,7 +96,16 @@ bool choose_webm_seek_cluster_from_cache(const WebmSeekSourceInfo &source_info,
   if (out_trace) {
     out_trace->exact_status = WebmSeekCacheLookupStatus::NotChecked;
     out_trace->cache_size = point_count;
+    out_trace->valid_point_count = 0U;
+    out_trace->invalid_point_count = 0U;
+    out_trace->future_point_count = 0U;
     out_trace->target_ms = inout_plan ? inout_plan->seek_target_ms : 0;
+    out_trace->desired_cluster_ms = 0;
+    out_trace->max_reuse_gap_ms = 0;
+    out_trace->max_warm_start_gap_ms = 0;
+    out_trace->best_cluster_ms = -1;
+    out_trace->best_gap_ms = -1;
+    out_trace->best_start_byte = 0U;
   }
   if (!points || point_count == 0U || !inout_plan || !inout_plan->valid) {
     if (out_trace) {
@@ -103,33 +125,63 @@ bool choose_webm_seek_cluster_from_cache(const WebmSeekSourceInfo &source_info,
     out_trace->desired_cluster_ms =
         desired_cluster_time_ms(source_info, inout_plan->seek_target_ms);
     out_trace->max_reuse_gap_ms = max_reuse_gap_ms;
+    out_trace->max_warm_start_gap_ms = kSeekCacheWarmStartMaxGapMs;
   }
 
-  const WebmSeekClusterPoint *best = NULL;
+  const WebmSeekClusterPoint *best_exact = NULL;
+  const WebmSeekClusterPoint *best_warm_start = NULL;
   const WebmSeekClusterPoint *best_before_target = NULL;
+  bool saw_future_candidate = false;
   for (size_t i = 0; i < point_count; ++i) {
-    const int reuse_gap_ms = inout_plan->seek_target_ms - points[i].timecode_ms;
-    if (reuse_gap_ms >= 0) {
-      if (!best_before_target ||
-          points[i].timecode_ms > best_before_target->timecode_ms) {
-        best_before_target = &points[i];
+    if (!is_valid_cache_point(source_info, points[i])) {
+      if (out_trace) {
+        ++out_trace->invalid_point_count;
       }
-    }
-    if (reuse_gap_ms < 0 || reuse_gap_ms > max_reuse_gap_ms) {
       continue;
     }
-    if (!best || points[i].timecode_ms > best->timecode_ms) {
-      best = &points[i];
+    if (out_trace) {
+      ++out_trace->valid_point_count;
+    }
+    const int reuse_gap_ms = inout_plan->seek_target_ms - points[i].timecode_ms;
+    if (reuse_gap_ms < 0) {
+      saw_future_candidate = true;
+      if (out_trace) {
+        ++out_trace->future_point_count;
+      }
+      continue;
+    }
+
+    if (!best_before_target ||
+        points[i].timecode_ms > best_before_target->timecode_ms) {
+      best_before_target = &points[i];
+    }
+    if (reuse_gap_ms <= max_reuse_gap_ms) {
+      if (!best_exact || points[i].timecode_ms > best_exact->timecode_ms) {
+        best_exact = &points[i];
+      }
+      continue;
+    }
+    if (reuse_gap_ms <= kSeekCacheWarmStartMaxGapMs &&
+        (!best_warm_start ||
+         points[i].timecode_ms > best_warm_start->timecode_ms)) {
+      best_warm_start = &points[i];
     }
   }
+  const WebmSeekClusterPoint *best = best_exact ? best_exact : best_warm_start;
   if (!best) {
     if (out_trace) {
       if (best_before_target) {
-        out_trace->exact_status = WebmSeekCacheLookupStatus::ExactRejectedGap;
+        out_trace->exact_status =
+            WebmSeekCacheLookupStatus::WarmStartRejectedGap;
         out_trace->best_cluster_ms = best_before_target->timecode_ms;
         out_trace->best_start_byte = best_before_target->start_byte;
         out_trace->best_gap_ms =
             inout_plan->seek_target_ms - best_before_target->timecode_ms;
+      } else if (saw_future_candidate) {
+        out_trace->exact_status = WebmSeekCacheLookupStatus::RejectedFuture;
+      } else if (out_trace->invalid_point_count > 0U &&
+                 out_trace->valid_point_count == 0U) {
+        out_trace->exact_status = WebmSeekCacheLookupStatus::RejectedInvalid;
       } else {
         out_trace->exact_status =
             WebmSeekCacheLookupStatus::ExactMissNoCandidate;
@@ -140,11 +192,15 @@ bool choose_webm_seek_cluster_from_cache(const WebmSeekSourceInfo &source_info,
 
   inout_plan->reconnect_start_byte = best->start_byte;
   inout_plan->selected_cluster_ms = best->timecode_ms;
-  inout_plan->source = WebmSeekPlanSource::ExactClusterCache;
+  inout_plan->source = best_exact
+                           ? WebmSeekPlanSource::ExactClusterCache
+                           : WebmSeekPlanSource::RuntimeClusterCacheWarmStart;
   inout_plan->cluster_aligned = true;
   inout_plan->cache_hit = true;
   if (out_trace) {
-    out_trace->exact_status = WebmSeekCacheLookupStatus::ExactHit;
+    out_trace->exact_status = best_exact
+                                  ? WebmSeekCacheLookupStatus::ExactHit
+                                  : WebmSeekCacheLookupStatus::WarmStartHit;
     out_trace->best_cluster_ms = best->timecode_ms;
     out_trace->best_start_byte = best->start_byte;
     out_trace->best_gap_ms = inout_plan->seek_target_ms - best->timecode_ms;
@@ -162,9 +218,13 @@ bool estimate_webm_seek_probe_start_byte_from_cache(
   if (out_trace) {
     out_trace->probe_status = WebmSeekCacheLookupStatus::NotChecked;
     out_trace->cache_size = point_count;
+    out_trace->valid_point_count = 0U;
+    out_trace->invalid_point_count = 0U;
+    out_trace->future_point_count = 0U;
     out_trace->target_ms = target_ms;
     out_trace->desired_cluster_ms =
         desired_cluster_time_ms(source_info, target_ms);
+    out_trace->max_warm_start_gap_ms = kSeekCacheWarmStartMaxGapMs;
   }
   if (!points || point_count == 0U || !out_start_byte || target_ms <= 0 ||
       !source_info.has_filesize || source_info.filesize == 0U) {
@@ -185,6 +245,15 @@ bool estimate_webm_seek_probe_start_byte_from_cache(
 
   for (size_t i = 0; i < point_count; ++i) {
     const WebmSeekClusterPoint *point = &points[i];
+    if (!is_valid_cache_point(source_info, *point)) {
+      if (out_trace) {
+        ++out_trace->invalid_point_count;
+      }
+      continue;
+    }
+    if (out_trace) {
+      ++out_trace->valid_point_count;
+    }
     if (point->timecode_ms <= desired_ms) {
       if (!best_before || point->timecode_ms > best_before->timecode_ms) {
         prev_before = best_before;
@@ -194,6 +263,9 @@ bool estimate_webm_seek_probe_start_byte_from_cache(
         prev_before = point;
       }
       continue;
+    }
+    if (out_trace) {
+      ++out_trace->future_point_count;
     }
     if (!best_after || point->timecode_ms < best_after->timecode_ms) {
       best_after = point;

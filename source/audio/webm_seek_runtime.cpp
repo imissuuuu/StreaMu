@@ -181,7 +181,15 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
     return result;
   }
 
-  if (!track_state->cluster_cache.empty() && !result.seek_plan.cache_hit) {
+  if (!track_state->cluster_cache.empty() &&
+      choose_webm_seek_cluster_from_cache(
+          result.source_info, track_state->cluster_cache.data(),
+          track_state->cluster_cache.size(), &result.seek_plan, NULL,
+          &result.cache_trace)) {
+    result.parser_cluster_aligned = true;
+  }
+  if (!track_state->cluster_cache.empty() && !result.parser_cluster_aligned &&
+      !result.seek_plan.cache_hit) {
     uint64_t cached_probe_start_byte = 0;
     if (estimate_webm_seek_probe_start_byte_from_cache(
             result.source_info, track_state->cluster_cache.data(),
@@ -190,14 +198,6 @@ PreparedWebmSeekPlanResult prepare_webm_seek_plan(
       result.seek_plan.reconnect_start_byte = cached_probe_start_byte;
       clamp_seek_plan_start_byte(result.source_info, &result.seek_plan);
     }
-  }
-
-  if (!track_state->cluster_cache.empty() &&
-      choose_webm_seek_cluster_from_cache(
-          result.source_info, track_state->cluster_cache.data(),
-          track_state->cluster_cache.size(), &result.seek_plan, NULL,
-          &result.cache_trace)) {
-    result.parser_cluster_aligned = true;
   }
   trace_log("seek_index_lookup_done", request.seek_seq, request, repeated_seek,
             result.reuse_class, &result.seek_plan, &result.cache_trace,

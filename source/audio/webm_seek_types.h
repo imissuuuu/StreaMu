@@ -9,6 +9,7 @@
 enum class WebmSeekPlanSource {
   Invalid,
   ExactClusterCache,
+  RuntimeClusterCacheWarmStart,
   CueIndex,
   ProbeCluster,
   CoarseEstimate,
@@ -25,8 +26,12 @@ enum class WebmSeekCacheLookupStatus {
   NotChecked,
   Empty,
   ExactHit,
+  WarmStartHit,
   ExactMissNoCandidate,
   ExactRejectedGap,
+  WarmStartRejectedGap,
+  RejectedFuture,
+  RejectedInvalid,
   ProbeEstimateHit,
   ProbeEstimateMiss,
 };
@@ -71,9 +76,13 @@ struct WebmSeekCacheLookupTrace {
   WebmSeekCacheLookupStatus probe_status =
       WebmSeekCacheLookupStatus::NotChecked;
   size_t cache_size = 0;
+  size_t valid_point_count = 0;
+  size_t invalid_point_count = 0;
+  size_t future_point_count = 0;
   int target_ms = 0;
   int desired_cluster_ms = 0;
   int max_reuse_gap_ms = 0;
+  int max_warm_start_gap_ms = 0;
   int best_cluster_ms = -1;
   int best_gap_ms = -1;
   uint64_t best_start_byte = 0;

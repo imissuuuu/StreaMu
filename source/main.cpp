@@ -267,6 +267,8 @@ static const char *webm_seek_plan_source_name(WebmSeekPlanSource source) {
       return "invalid";
     case WebmSeekPlanSource::ExactClusterCache:
       return "cache";
+    case WebmSeekPlanSource::RuntimeClusterCacheWarmStart:
+      return "cache_warm_start";
     case WebmSeekPlanSource::CueIndex:
       return "cues";
     case WebmSeekPlanSource::ProbeCluster:
@@ -300,10 +302,18 @@ webm_seek_cache_lookup_status_name(WebmSeekCacheLookupStatus value) {
       return "empty";
     case WebmSeekCacheLookupStatus::ExactHit:
       return "exact_hit";
+    case WebmSeekCacheLookupStatus::WarmStartHit:
+      return "warm_start_hit";
     case WebmSeekCacheLookupStatus::ExactMissNoCandidate:
       return "exact_miss_no_candidate";
     case WebmSeekCacheLookupStatus::ExactRejectedGap:
       return "exact_rejected_gap";
+    case WebmSeekCacheLookupStatus::WarmStartRejectedGap:
+      return "warm_start_rejected_gap";
+    case WebmSeekCacheLookupStatus::RejectedFuture:
+      return "rejected_future";
+    case WebmSeekCacheLookupStatus::RejectedInvalid:
+      return "rejected_invalid";
     case WebmSeekCacheLookupStatus::ProbeEstimateHit:
       return "probe_estimate_hit";
     case WebmSeekCacheLookupStatus::ProbeEstimateMiss:
@@ -493,6 +503,13 @@ static void append_webm_seek_trace_log(
                          ? (request.target_ms - plan_cluster_ms)
                          : -1;
   const size_t cache_size = cache_trace ? cache_trace->cache_size : 0U;
+  const size_t valid_points = cache_trace ? cache_trace->valid_point_count : 0U;
+  const size_t invalid_points =
+      cache_trace ? cache_trace->invalid_point_count : 0U;
+  const size_t future_points =
+      cache_trace ? cache_trace->future_point_count : 0U;
+  const int max_warm_start_gap_ms =
+      cache_trace ? cache_trace->max_warm_start_gap_ms : 0;
   const int best_cluster_ms = cache_trace ? cache_trace->best_cluster_ms : -1;
   const int best_gap_ms = cache_trace ? cache_trace->best_gap_ms : -1;
   const uint64_t best_start_byte =
@@ -504,6 +521,8 @@ static void append_webm_seek_trace_log(
       "[webm-seek] %s seek_seq=%d target_ms=%d reuse=%s cold_or_repeated=%s "
       "plan_source=%s cluster_aligned=%d start_byte=%llu cluster_ms=%d "
       "gap_ms=%d cache_hit=%d cache_size=%lu exact=%s probe=%s "
+      "valid_points=%lu invalid_points=%lu future_points=%lu "
+      "max_warm_start_gap_ms=%d "
       "best_cluster_ms=%d best_gap_ms=%d best_start_byte=%llu "
       "estimated_probe_start_byte=%llu elapsed_ms=%llu\n",
       event, seek_seq, request.target_ms,
@@ -517,6 +536,9 @@ static void append_webm_seek_trace_log(
       webm_seek_cache_lookup_status_name(
           cache_trace ? cache_trace->probe_status
                       : WebmSeekCacheLookupStatus::NotChecked),
+      static_cast<unsigned long>(valid_points),
+      static_cast<unsigned long>(invalid_points),
+      static_cast<unsigned long>(future_points), max_warm_start_gap_ms,
       best_cluster_ms, best_gap_ms,
       static_cast<unsigned long long>(best_start_byte),
       static_cast<unsigned long long>(estimated_probe_start_byte),
