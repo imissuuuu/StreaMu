@@ -6,7 +6,6 @@
 
 namespace {
 
-static constexpr int kWebmWorkerQueueCapacity = 4;
 static constexpr size_t kWebmPcmCapacitySamples = 8192;
 static constexpr u64 kWebmWorkerQueueFullLogIntervalMs = 1000ULL;
 static constexpr u64 kWebmWorkerDecodeSlowMs = 100ULL;
@@ -50,7 +49,7 @@ bool WebmPcmDecodeWorker::allocate_buffers() {
       return false;
     }
   }
-  for (int i = 0; i < kWebmWorkerQueueCapacity; ++i) {
+  for (int i = 0; i < kQueueCapacity; ++i) {
     if (!queue_[i].samples) {
       queue_[i].samples = static_cast<int16_t *>(
           linearAlloc(kWebmPcmCapacitySamples * sizeof(int16_t)));
@@ -70,7 +69,7 @@ void WebmPcmDecodeWorker::release_buffers() {
     linearFree(decode_scratch_);
     decode_scratch_ = NULL;
   }
-  for (int i = 0; i < kWebmWorkerQueueCapacity; ++i) {
+  for (int i = 0; i < kQueueCapacity; ++i) {
     if (queue_[i].samples) {
       linearFree(queue_[i].samples);
       queue_[i].samples = NULL;
@@ -213,7 +212,7 @@ bool WebmPcmDecodeWorker::pop_decoded_pcm(int16_t *pcm_out,
   }
   memcpy(pcm_out, chunk.samples, sample_count * sizeof(int16_t));
   chunk.samples_per_channel = 0;
-  read_index_ = (read_index_ + 1) % kWebmWorkerQueueCapacity;
+  read_index_ = (read_index_ + 1) % kQueueCapacity;
   --queued_chunks_;
   ++consumed_chunks_;
   *out_result = decoded;
@@ -279,7 +278,7 @@ void WebmPcmDecodeWorker::run() {
   while (true) {
     LightLock_Lock(&lock_);
     const bool should_stop = stop_requested_;
-    const bool queue_full = queued_chunks_ >= kWebmWorkerQueueCapacity;
+    const bool queue_full = queued_chunks_ >= kQueueCapacity;
     if (queue_full) {
       ++queue_full_count_;
     }
@@ -351,7 +350,7 @@ void WebmPcmDecodeWorker::run() {
 
 bool WebmPcmDecodeWorker::push_chunk_locked(const OpusDecodeResult &decoded,
                                             const int16_t *samples) {
-  if (!samples || queued_chunks_ >= kWebmWorkerQueueCapacity) {
+  if (!samples || queued_chunks_ >= kQueueCapacity) {
     return false;
   }
   const size_t sample_count = decoded_sample_count(decoded);
@@ -367,7 +366,7 @@ bool WebmPcmDecodeWorker::push_chunk_locked(const OpusDecodeResult &decoded,
   chunk.samples_per_channel = decoded.samples_per_channel;
   chunk.sample_rate = decoded.sample_rate;
   chunk.channels = decoded.channels;
-  write_index_ = (write_index_ + 1) % kWebmWorkerQueueCapacity;
+  write_index_ = (write_index_ + 1) % kQueueCapacity;
   ++queued_chunks_;
   ++produced_chunks_;
   return true;
@@ -377,7 +376,7 @@ void WebmPcmDecodeWorker::clear_queue_locked() {
   read_index_ = 0;
   write_index_ = 0;
   queued_chunks_ = 0;
-  for (int i = 0; i < kWebmWorkerQueueCapacity; ++i) {
+  for (int i = 0; i < kQueueCapacity; ++i) {
     queue_[i].samples_per_channel = 0;
     queue_[i].sample_rate = 48000;
     queue_[i].channels = 2;
@@ -393,6 +392,9 @@ void WebmPcmDecodeWorker::append_worker_log(
   if (!f) {
     return;
   }
+  // webm_perf.log is diagnostic append-only output shared with the main
+  // decoder path. Each event is emitted with one fprintf followed by fclose;
+  // occasional line ordering races are acceptable for this hidden telemetry.
   fprintf(
       f,
       "[webm-worker] +%llums %s queued=%d produced=%d consumed=%d "

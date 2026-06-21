@@ -56,6 +56,8 @@ public:
                                    int *out_timecode_ms) const;
 
 private:
+  static constexpr int kQueueCapacity = 4;
+
   struct PcmChunk {
     int16_t *samples = NULL;
     int samples_per_channel = 0;
@@ -85,7 +87,7 @@ private:
   WebmRemuxError error_;
   WebmPcmDecodeWorkerConfig config_;
   WebmOpusStreamingDecoder decoder_;
-  PcmChunk queue_[4];
+  PcmChunk queue_[kQueueCapacity];
   int read_index_;
   int write_index_;
   int queued_chunks_;

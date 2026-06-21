@@ -11,6 +11,7 @@
 
 #include "opus_memory_decoder.h"
 #include "webm_audible_start_policy.h"
+#include "webm_opus_packet_decoder.h"
 #include "webm_seek_types.h"
 
 struct nestegg;
@@ -26,6 +27,11 @@ enum class WebmRemuxError {
   InvalidBlock,
   SeekPrerollInsufficient,
   UnsupportedFeature,
+};
+
+enum class WebmDecodeBackend {
+  OggBridge,
+  DirectOpusPacket,
 };
 
 class WebmOpusStreamingDecoder {
@@ -61,6 +67,12 @@ private:
     std::vector<uint8_t> data;
   };
 
+  struct DirectOpusPacket {
+    std::vector<uint8_t> data;
+    uint64_t tstamp_ns = 0;
+    int tstamp_ms = -1;
+  };
+
   struct StreamSource {
     std::vector<uint8_t> *buffer;
     LightLock *lock;
@@ -78,11 +90,23 @@ private:
   static int64_t nestegg_tell_cb(void *userdata);
 
   bool init_nestegg();
+  bool choose_decode_backend();
   bool open_decoder_if_ready();
   bool pump_more_data();
   bool emit_headers();
   bool emit_packet(const unsigned char *data, size_t length,
                    uint64_t packet_tstamp_ns);
+  bool emit_packet_to_ogg_bridge(const unsigned char *data, size_t length,
+                                 uint64_t packet_tstamp_ns,
+                                 int packet_tstamp_ms);
+  bool enqueue_direct_packet(const unsigned char *data, size_t length,
+                             uint64_t packet_tstamp_ns, int packet_tstamp_ms);
+  OpusDecodeResult decode_direct_packet(int16_t *pcm_out,
+                                        size_t pcm_capacity_samples);
+  bool direct_packet_queue_full() const;
+  void clear_direct_packet_queue();
+  WebmRemuxError
+  packet_decode_error_to_remux_error(WebmOpusPacketDecodeError error) const;
   bool flush_audio_page(uint8_t header_type);
   bool append_audio_packet(const OggPagePacket &packet);
   bool finalize_stream();
@@ -168,6 +192,10 @@ private:
   bool seek_preroll_initialized_;
   CURL *range_fetch_curl_;
   OpusMemoryDecoder decoder_;
+  WebmDecodeBackend decode_backend_;
+  WebmOpusPacketDecoder packet_decoder_;
+  std::vector<DirectOpusPacket> direct_packet_queue_;
+  bool direct_packets_complete_;
 };
 
 #endif
