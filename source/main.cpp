@@ -348,6 +348,8 @@ static void reset_thumbnail_interference_log_state(AppContext *context) {
   context->thumbnail_upload_defer_since_ms = 0;
   context->thumbnail_fetch_defer_last_log_ms = 0;
   context->thumbnail_upload_defer_last_log_ms = 0;
+  context->thumbnail_track_change_detected_at_ms = 0;
+  context->thumbnail_fetch_started_at_ms = 0;
 }
 
 static bool
@@ -387,7 +389,8 @@ should_log_thumbnail_interference(NonAudioInterferenceReason current_reason,
 static void append_webm_thumbnail_interference_log(
     const char *event, const NonAudioInterferenceInput &input,
     const NonAudioInterferenceDecision &decision, bool track_changed,
-    bool thumbnail_loading, bool thumbnail_ready, u64 waited_ms) {
+    bool thumbnail_loading, bool thumbnail_ready, u64 waited_ms,
+    u64 total_wait_ms) {
   if (!event) {
     return;
   }
@@ -402,14 +405,15 @@ static void append_webm_thumbnail_interference_log(
   fprintf(f,
           "[webm-thumb] +%llums %s reason=%s stage=%s queued=%d bytes=%lu "
           "complete=%d audio_started=%d loading=%d ready=%d track_changed=%d "
-          "waited_ms=%llu\n",
+          "waited_ms=%llu total_wait_ms=%llu\n",
           static_cast<unsigned long long>(elapsed_ms), event,
           non_audio_interference_reason_name(decision.reason),
           webm_stage_name_for_log(input.webm_stage), input.queued_wavebufs,
           static_cast<unsigned long>(input.stream_buffer_bytes),
           input.download_complete ? 1 : 0, input.audio_started ? 1 : 0,
           thumbnail_loading ? 1 : 0, thumbnail_ready ? 1 : 0,
-          track_changed ? 1 : 0, static_cast<unsigned long long>(waited_ms));
+          track_changed ? 1 : 0, static_cast<unsigned long long>(waited_ms),
+          static_cast<unsigned long long>(total_wait_ms));
   fclose(f);
 }
 
@@ -518,8 +522,8 @@ static void append_webm_seek_trace_log(
       static_cast<unsigned long>(valid_points),
       static_cast<unsigned long>(invalid_points),
       static_cast<unsigned long>(future_points), cache_trace_basis,
-      max_warm_start_gap_ms, max_warm_start_gap_ms, best_cluster_ms, best_gap_ms,
-      static_cast<unsigned long long>(best_start_byte),
+      max_warm_start_gap_ms, max_warm_start_gap_ms, best_cluster_ms,
+      best_gap_ms, static_cast<unsigned long long>(best_start_byte),
       static_cast<unsigned long long>(estimated_probe_start_byte),
       static_cast<unsigned long long>(elapsed_ms));
   fclose(f);
@@ -757,11 +761,14 @@ make_webm_controller_input(const PlaybackCoreSnapshot &core_snapshot,
   return input;
 }
 
-static void append_webm_queue_state_log(
-    const char *event, PlaybackSessionKind session_kind,
-    WebmPlaybackStage stage, const WebmPlaybackControllerInput &input,
-    const WebmPlaybackControllerDecision &decision,
-    const OpusPlayerUpdateStats &stats, bool seek_active, bool user_paused) {
+static void
+append_webm_queue_state_log(const char *event, PlaybackSessionKind session_kind,
+                            WebmPlaybackStage stage,
+                            const WebmPlaybackControllerInput &input,
+                            const WebmPlaybackControllerDecision &decision,
+                            const OpusPlayerUpdateStats &stats,
+                            const WebmPcmWorkerSnapshot &worker_snapshot,
+                            bool seek_active, bool user_paused) {
   if (!event) {
     return;
   }
@@ -777,7 +784,9 @@ static void append_webm_queue_state_log(
           "[webm-queue] +%llums %s kind=%s stage=%d seek_active=%d "
           "queued_before=%d queued_after=%d free_before=%d free_after=%d "
           "decoded=%d target=%d max_decode=%d release=%d keep_paused=%d "
-          "user_paused=%d has_started=%d hold=%s\n",
+          "user_paused=%d has_started=%d hold=%s worker_queued=%d "
+          "worker_produced=%d worker_consumed=%d worker_full=%d "
+          "worker_failed=%d worker_eof=%d\n",
           static_cast<unsigned long long>(elapsed_ms), event,
           playback_session_kind_name(session_kind), static_cast<int>(stage),
           seek_active ? 1 : 0, stats.queued_before_update,
@@ -786,7 +795,10 @@ static void append_webm_queue_state_log(
           stats.target_queued_wavebufs, stats.max_decode_buffers,
           decision.release_prebuffer ? 1 : 0, decision.keep_ndsp_paused ? 1 : 0,
           user_paused ? 1 : 0, input.has_started_playing ? 1 : 0,
-          webm_prebuffer_hold_reason_name(decision.hold_reason));
+          webm_prebuffer_hold_reason_name(decision.hold_reason),
+          worker_snapshot.queued_chunks, worker_snapshot.produced_chunks,
+          worker_snapshot.consumed_chunks, worker_snapshot.queue_full_count,
+          worker_snapshot.failed ? 1 : 0, worker_snapshot.eof ? 1 : 0);
   fclose(f);
 }
 
@@ -1171,7 +1183,7 @@ controller_config_for_seek(bool seek_active) {
   if (seek_active) {
     config.decoder_start_bytes = 0U;
     config.playback_release_bytes = 0U;
-    config.initial_wavebuf_target = 2;
+    config.initial_wavebuf_target = 4;
   }
   return config;
 }
@@ -1326,6 +1338,7 @@ static void thumbnail_dl_thread(void *arg) {
   if (!api || vid_id.empty()) {
     LightLock_Lock(&c->lock);
     c->thumbnail_loading = false;
+    c->thumbnail_fetch_started_at_ms = 0;
     LightLock_Unlock(&c->lock);
     return;
   }
@@ -1361,6 +1374,7 @@ static void thumbnail_dl_thread(void *arg) {
 
   LightLock_Lock(&c->lock);
   c->thumbnail_loading = false;
+  c->thumbnail_fetch_started_at_ms = 0;
   LightLock_Unlock(&c->lock);
 }
 
@@ -3551,6 +3565,7 @@ int main(int argc, char *argv[]) {
       bool thumb_fetch_log_loading = false;
       bool thumb_fetch_log_ready = false;
       u64 thumb_fetch_log_waited_ms = 0;
+      u64 thumb_fetch_log_total_wait_ms = 0;
       LightLock_Lock(&ctx.lock);
       bool track_changed = !ctx.playing_id.empty() &&
                            ctx.playing_id != ctx.thumbnail_vid_id &&
@@ -3563,6 +3578,9 @@ int main(int argc, char *argv[]) {
       const u64 now_ms = osGetTime();
       const bool base_delay_elapsed =
           now_ms - ctx.playback_start_time > 3000ULL;
+      if (track_changed && ctx.thumbnail_track_change_detected_at_ms == 0) {
+        ctx.thumbnail_track_change_detected_at_ms = now_ms;
+      }
       bool need_fetch =
           track_changed && !fetch_decision.defer && base_delay_elapsed;
       NonAudioInterferenceReason fetch_log_reason =
@@ -3585,12 +3603,18 @@ int main(int argc, char *argv[]) {
           thumb_fetch_log_track_changed = track_changed;
           thumb_fetch_log_loading = ctx.thumbnail_loading;
           thumb_fetch_log_ready = ctx.thumbnail_ready;
+          if (ctx.thumbnail_track_change_detected_at_ms > 0 &&
+              now_ms >= ctx.thumbnail_track_change_detected_at_ms) {
+            thumb_fetch_log_total_wait_ms =
+                now_ms - ctx.thumbnail_track_change_detected_at_ms;
+          }
         }
       }
       if (need_fetch) {
         ctx.thumbnail_vid_id = ctx.playing_id;
         ctx.thumbnail_loading = true;
         ctx.thumbnail_ready = false;
+        ctx.thumbnail_fetch_started_at_ms = now_ms;
         ctx.compare_thumbnail_fetch_logged = false;
         ctx.compare_thumbnail_done_logged = false;
         ctx.compare_thumbnail_upload_logged = false;
@@ -3601,7 +3625,8 @@ int main(int argc, char *argv[]) {
         append_webm_thumbnail_interference_log(
             thumb_fetch_event, thumb_fetch_log_input, thumb_fetch_log_decision,
             thumb_fetch_log_track_changed, thumb_fetch_log_loading,
-            thumb_fetch_log_ready, thumb_fetch_log_waited_ms);
+            thumb_fetch_log_ready, thumb_fetch_log_waited_ms,
+            thumb_fetch_log_total_wait_ms);
       }
 
       if (track_changed)
@@ -3623,6 +3648,7 @@ int main(int argc, char *argv[]) {
           LightLock_Lock(&ctx.lock);
           ctx.thumbnail_loading = false;
           ctx.thumbnail_vid_id.clear();
+          ctx.thumbnail_fetch_started_at_ms = 0;
           LightLock_Unlock(&ctx.lock);
         }
       }
@@ -3647,12 +3673,14 @@ int main(int argc, char *argv[]) {
       bool thumb_upload_log_loading = false;
       bool thumb_upload_log_ready = false;
       u64 thumb_upload_log_waited_ms = 0;
+      u64 thumb_upload_log_total_wait_ms = 0;
       LightLock_Lock(&ctx.lock);
       const NonAudioInterferenceInput non_audio_input =
           make_non_audio_interference_input(
               stream_buffer_size, stream_download_complete, opus_player, ctx);
       const NonAudioInterferenceDecision upload_decision =
           evaluate_thumbnail_upload_interference(non_audio_input);
+      const u64 upload_log_now_ms = osGetTime();
       allow_upload = !upload_decision.defer;
       const bool upload_ready_for_log = ctx.thumbnail_ready;
       if (upload_ready_for_log && upload_decision.defer) {
@@ -3668,13 +3696,18 @@ int main(int argc, char *argv[]) {
             should_log_thumbnail_interference(
                 upload_log_reason, &ctx.thumbnail_upload_defer_reason,
                 &ctx.thumbnail_upload_defer_since_ms,
-                &ctx.thumbnail_upload_defer_last_log_ms, osGetTime(),
+                &ctx.thumbnail_upload_defer_last_log_ms, upload_log_now_ms,
                 &thumb_upload_log_waited_ms);
         if (should_log_thumb_upload_interference) {
           thumb_upload_log_input = non_audio_input;
           thumb_upload_log_decision = upload_decision;
           thumb_upload_log_loading = ctx.thumbnail_loading;
           thumb_upload_log_ready = ctx.thumbnail_ready;
+          if (ctx.thumbnail_fetch_started_at_ms > 0 &&
+              upload_log_now_ms >= ctx.thumbnail_fetch_started_at_ms) {
+            thumb_upload_log_total_wait_ms =
+                upload_log_now_ms - ctx.thumbnail_fetch_started_at_ms;
+          }
         }
       }
       LightLock_Unlock(&ctx.lock);
@@ -3683,7 +3716,8 @@ int main(int argc, char *argv[]) {
         append_webm_thumbnail_interference_log(
             thumb_upload_event, thumb_upload_log_input,
             thumb_upload_log_decision, false, thumb_upload_log_loading,
-            thumb_upload_log_ready, thumb_upload_log_waited_ms);
+            thumb_upload_log_ready, thumb_upload_log_waited_ms,
+            thumb_upload_log_total_wait_ms);
       }
 
       LightLock_Lock(&ctx.lock);
@@ -3698,6 +3732,8 @@ int main(int argc, char *argv[]) {
         pixels = std::move(ctx.thumbnail_pixels);
         crop_size = ctx.thumbnail_crop_size;
         ctx.thumbnail_ready = false;
+        ctx.thumbnail_track_change_detected_at_ms = 0;
+        ctx.thumbnail_fetch_started_at_ms = 0;
       }
       LightLock_Unlock(&ctx.lock);
 
@@ -3866,9 +3902,11 @@ int main(int argc, char *argv[]) {
     }
 
     OpusPlayerUpdateStats opus_update_stats = {};
+    WebmPcmWorkerSnapshot webm_worker_snapshot = {};
     const bool use_opus_poc_for_update = OpusPocPlayer::is_playing;
     if (use_opus_poc_for_update) {
       opus_update_stats = opus_player.update_with_stats();
+      webm_worker_snapshot = opus_player.webm_worker_snapshot();
       if (opus_update_stats.decoded_buffers >
           g_opus_observed_max_decoded_buffers) {
         g_opus_observed_max_decoded_buffers = opus_update_stats.decoded_buffers;
@@ -3948,17 +3986,18 @@ int main(int argc, char *argv[]) {
         append_webm_queue_state_log(
             "prebuffer_release", playback_observer_current_session_kind(),
             playback_stage, controller_input, controller_decision,
-            opus_update_stats, seek_active, controller_input.user_paused);
+            opus_update_stats, webm_worker_snapshot, seek_active,
+            controller_input.user_paused);
         ndspChnSetPaused(0, false);
       }
       if (use_webm_poc && playback_stage == WebmPlaybackStage::Prebuffering &&
           opus_update_stats.decoded_buffers > 0 &&
           !controller_decision.release_prebuffer) {
-        append_webm_queue_state_log("prebuffer_hold_after_pcm",
-                                    playback_observer_current_session_kind(),
-                                    playback_stage, controller_input,
-                                    controller_decision, opus_update_stats,
-                                    seek_active, controller_input.user_paused);
+        append_webm_queue_state_log(
+            "prebuffer_hold_after_pcm",
+            playback_observer_current_session_kind(), playback_stage,
+            controller_input, controller_decision, opus_update_stats,
+            webm_worker_snapshot, seek_active, controller_input.user_paused);
       }
       if (use_webm_poc && next_stage == WebmPlaybackStage::Steady) {
         bool keep_seek_tuning = false;
@@ -3988,11 +4027,11 @@ int main(int argc, char *argv[]) {
         OpusPocPlayer::is_playing = false;
         ctx.webm_playback_stage = WebmPlaybackStage::Failed;
         if (failed_during_seek) {
-          append_webm_queue_state_log("decode_failure_during_seek",
-                                      playback_observer_current_session_kind(),
-                                      playback_stage, controller_input,
-                                      controller_decision, opus_update_stats,
-                                      true, ctx.is_paused);
+          append_webm_queue_state_log(
+              "decode_failure_during_seek",
+              playback_observer_current_session_kind(), playback_stage,
+              controller_input, controller_decision, opus_update_stats,
+              webm_worker_snapshot, true, ctx.is_paused);
           clear_active_webm_seek_runtime(&ctx);
         }
         LightLock_Unlock(&ctx.lock);
@@ -4034,7 +4073,8 @@ int main(int argc, char *argv[]) {
       append_webm_queue_state_log(
           "first_pcm_queued", playback_observer_current_session_kind(),
           playback_stage, controller_input, controller_decision,
-          opus_update_stats, ctx.active_stream_seek_seq > 0, ctx.is_paused);
+          opus_update_stats, webm_worker_snapshot,
+          ctx.active_stream_seek_seq > 0, ctx.is_paused);
       PlaybackObserverEventTimes phase5a_times = {};
       if (playback_observer_get_event_times(&phase5a_times)) {
         append_webm_phase5a_summary_log(
@@ -4102,7 +4142,7 @@ int main(int argc, char *argv[]) {
       append_webm_queue_state_log(
           "queue_to_playing_slow", playback_observer_current_session_kind(),
           playback_stage, controller_input, controller_decision,
-          opus_update_stats, true, ctx.is_paused);
+          opus_update_stats, webm_worker_snapshot, true, ctx.is_paused);
       LightLock_Lock(&ctx.lock);
       ctx.active_stream_first_pcm_queued_at_ms = osGetTime();
       LightLock_Unlock(&ctx.lock);

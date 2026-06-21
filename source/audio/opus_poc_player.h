@@ -53,6 +53,7 @@ public:
   bool has_started_playing() const;
   bool has_decode_failed() const;
   WebmRemuxError webm_remux_error() const;
+  WebmPcmWorkerSnapshot webm_worker_snapshot() const;
   bool get_webm_last_seek_runtime_point(uint64_t *out_start_byte,
                                         int *out_timecode_ms) const;
   int queued_wavebuf_count() const;

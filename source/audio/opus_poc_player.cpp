@@ -296,6 +296,13 @@ WebmRemuxError OpusPocPlayer::webm_remux_error() const {
                                                     : WebmRemuxError::None;
 }
 
+WebmPcmWorkerSnapshot OpusPocPlayer::webm_worker_snapshot() const {
+  if (input_kind_ != OpusInputKind::WebmStream) {
+    return WebmPcmWorkerSnapshot{};
+  }
+  return webm_worker_.snapshot();
+}
+
 bool OpusPocPlayer::get_webm_last_seek_runtime_point(
     uint64_t *out_start_byte, int *out_timecode_ms) const {
   if (input_kind_ != OpusInputKind::WebmStream) {

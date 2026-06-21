@@ -27,13 +27,13 @@ inline OpusDecodeTuning webm_startup_decode_tuning() {
 
 inline OpusDecodeTuning webm_seek_decode_tuning() {
   OpusDecodeTuning tuning = {};
-  tuning.steady_target_queued_wavebufs = 2;
+  tuning.steady_target_queued_wavebufs = 4;
   tuning.steady_max_decode_buffers_per_update = 2;
-  tuning.refill_target_queued_wavebufs = 3;
-  tuning.refill_decode_buffers_per_update = 2;
-  tuning.low_queue_wavebuf_threshold = 1;
-  tuning.prestart_target_queued_wavebufs = 2;
-  tuning.prestart_max_decode_buffers_per_update = 2;
+  tuning.refill_target_queued_wavebufs = 5;
+  tuning.refill_decode_buffers_per_update = 3;
+  tuning.low_queue_wavebuf_threshold = 2;
+  tuning.prestart_target_queued_wavebufs = 4;
+  tuning.prestart_max_decode_buffers_per_update = 3;
   return tuning;
 }
 

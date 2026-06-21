@@ -90,4 +90,6 @@ struct AppContext : public RenderContext {
   u64 thumbnail_upload_defer_since_ms = 0;
   u64 thumbnail_fetch_defer_last_log_ms = 0;
   u64 thumbnail_upload_defer_last_log_ms = 0;
+  u64 thumbnail_track_change_detected_at_ms = 0;
+  u64 thumbnail_fetch_started_at_ms = 0;
 };
