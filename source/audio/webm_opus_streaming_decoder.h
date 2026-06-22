@@ -62,6 +62,8 @@ public:
                                    int *out_timecode_ms) const;
 
 private:
+  static constexpr size_t kDirectOpusPacketQueueLimit = 8U;
+
   struct RangeSegment {
     uint64_t start = 0;
     std::vector<uint8_t> data;
@@ -103,8 +105,13 @@ private:
                              uint64_t packet_tstamp_ns, int packet_tstamp_ms);
   OpusDecodeResult decode_direct_packet(int16_t *pcm_out,
                                         size_t pcm_capacity_samples);
+  bool push_direct_packet(DirectOpusPacket *packet);
+  bool pop_direct_packet(DirectOpusPacket *out_packet);
+  size_t direct_packet_queue_active_count() const;
+  bool direct_packet_queue_empty() const;
   bool direct_packet_queue_full() const;
   void clear_direct_packet_queue();
+  void compact_direct_packet_queue_if_needed();
   WebmRemuxError
   packet_decode_error_to_remux_error(WebmOpusPacketDecodeError error) const;
   bool flush_audio_page(uint8_t header_type);
@@ -195,6 +202,7 @@ private:
   WebmDecodeBackend decode_backend_;
   WebmOpusPacketDecoder packet_decoder_;
   std::vector<DirectOpusPacket> direct_packet_queue_;
+  size_t direct_packet_read_index_;
   bool direct_packets_complete_;
 };
 

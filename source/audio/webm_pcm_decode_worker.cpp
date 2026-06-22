@@ -9,6 +9,8 @@ namespace {
 static constexpr size_t kWebmPcmCapacitySamples = 8192;
 static constexpr u64 kWebmWorkerQueueFullLogIntervalMs = 1000ULL;
 static constexpr u64 kWebmWorkerDecodeSlowMs = 100ULL;
+static constexpr u64 kWebmWorkerQueueFullInitialSleepMs = 2ULL;
+static constexpr u64 kWebmWorkerQueueFullMaxSleepMs = 4ULL;
 
 static size_t decoded_sample_count(const OpusDecodeResult &decoded) {
   if (!decoded.ok || decoded.samples_per_channel <= 0 ||
@@ -31,8 +33,10 @@ WebmPcmDecodeWorker::WebmPcmDecodeWorker()
       eof_(false), error_(WebmRemuxError::None), read_index_(0),
       write_index_(0), queued_chunks_(0), produced_chunks_(0),
       consumed_chunks_(0), queue_full_count_(0), last_decode_ticks_(0),
-      last_queue_full_log_ms_(0), last_seek_runtime_start_byte_(0),
-      last_seek_runtime_timecode_ms_(-1), decode_scratch_(NULL) {
+      last_queue_full_log_ms_(0), queue_full_wait_ms_(0),
+      queue_full_backoff_ms_(kWebmWorkerQueueFullInitialSleepMs),
+      last_seek_runtime_start_byte_(0), last_seek_runtime_timecode_ms_(-1),
+      decode_scratch_(NULL) {
   LightLock_Init(&lock_);
 }
 
@@ -104,6 +108,8 @@ bool WebmPcmDecodeWorker::start(const WebmPcmDecodeWorkerConfig &config) {
   queue_full_count_ = 0;
   last_decode_ticks_ = 0;
   last_queue_full_log_ms_ = 0;
+  queue_full_wait_ms_ = 0;
+  queue_full_backoff_ms_ = kWebmWorkerQueueFullInitialSleepMs;
   last_seek_runtime_start_byte_ = 0;
   last_seek_runtime_timecode_ms_ = -1;
   LightLock_Unlock(&lock_);
@@ -165,6 +171,7 @@ void WebmPcmDecodeWorker::stop() {
     stop_snapshot.consumed_chunks = consumed_chunks_;
     stop_snapshot.queue_full_count = queue_full_count_;
     stop_snapshot.last_decode_ticks = last_decode_ticks_;
+    stop_snapshot.queue_full_wait_ms = queue_full_wait_ms_;
   }
   thread_ = NULL;
   running_ = false;
@@ -178,6 +185,8 @@ void WebmPcmDecodeWorker::stop() {
   queue_full_count_ = 0;
   last_decode_ticks_ = 0;
   last_queue_full_log_ms_ = 0;
+  queue_full_wait_ms_ = 0;
+  queue_full_backoff_ms_ = kWebmWorkerQueueFullInitialSleepMs;
   last_seek_runtime_start_byte_ = 0;
   last_seek_runtime_timecode_ms_ = -1;
   LightLock_Unlock(&lock_);
@@ -247,6 +256,7 @@ WebmPcmWorkerSnapshot WebmPcmDecodeWorker::snapshot() const {
   value.consumed_chunks = consumed_chunks_;
   value.queue_full_count = queue_full_count_;
   value.last_decode_ticks = last_decode_ticks_;
+  value.queue_full_wait_ms = queue_full_wait_ms_;
   LightLock_Unlock(&lock_);
   return value;
 }
@@ -276,11 +286,14 @@ void WebmPcmDecodeWorker::thread_entry(void *arg) {
 
 void WebmPcmDecodeWorker::run() {
   while (true) {
+    u64 queue_full_sleep_ms = 0;
     LightLock_Lock(&lock_);
     const bool should_stop = stop_requested_;
     const bool queue_full = queued_chunks_ >= kQueueCapacity;
-    if (queue_full) {
-      ++queue_full_count_;
+    if (!should_stop && queue_full) {
+      queue_full_sleep_ms = next_queue_full_sleep_ms_locked();
+    } else if (!should_stop) {
+      reset_queue_full_backoff_locked();
     }
     const u64 now_ms = osGetTime();
     const bool should_log_queue_full =
@@ -299,7 +312,7 @@ void WebmPcmDecodeWorker::run() {
       if (should_log_queue_full) {
         append_worker_log("worker_queue_full", snapshot());
       }
-      svcSleepThread(2 * 1000 * 1000);
+      svcSleepThread(static_cast<s64>(queue_full_sleep_ms * 1000ULL * 1000ULL));
       continue;
     }
 
@@ -383,6 +396,24 @@ void WebmPcmDecodeWorker::clear_queue_locked() {
   }
 }
 
+u64 WebmPcmDecodeWorker::next_queue_full_sleep_ms_locked() {
+  u64 sleep_ms = queue_full_backoff_ms_;
+  if (sleep_ms == 0) {
+    sleep_ms = kWebmWorkerQueueFullInitialSleepMs;
+  }
+  ++queue_full_count_;
+  queue_full_wait_ms_ += sleep_ms;
+  const u64 next_sleep_ms = sleep_ms * 2ULL;
+  queue_full_backoff_ms_ = next_sleep_ms > kWebmWorkerQueueFullMaxSleepMs
+                               ? kWebmWorkerQueueFullMaxSleepMs
+                               : next_sleep_ms;
+  return sleep_ms;
+}
+
+void WebmPcmDecodeWorker::reset_queue_full_backoff_locked() {
+  queue_full_backoff_ms_ = kWebmWorkerQueueFullInitialSleepMs;
+}
+
 void WebmPcmDecodeWorker::append_worker_log(
     const char *event, const WebmPcmWorkerSnapshot &state) const {
   if (!event) {
@@ -398,11 +429,14 @@ void WebmPcmDecodeWorker::append_worker_log(
   fprintf(
       f,
       "[webm-worker] +%llums %s queued=%d produced=%d consumed=%d "
-      "full=%d running=%d failed=%d eof=%d error=%d decode_ticks=%llu\n",
+      "full=%d wait_ms=%llu running=%d failed=%d eof=%d error=%d "
+      "decode_ticks=%llu\n",
       static_cast<unsigned long long>(elapsed_ms_since(config_.perf_start_ms)),
       event, state.queued_chunks, state.produced_chunks, state.consumed_chunks,
-      state.queue_full_count, state.running ? 1 : 0, state.failed ? 1 : 0,
-      state.eof ? 1 : 0, static_cast<int>(state.error),
+      state.queue_full_count,
+      static_cast<unsigned long long>(state.queue_full_wait_ms),
+      state.running ? 1 : 0, state.failed ? 1 : 0, state.eof ? 1 : 0,
+      static_cast<int>(state.error),
       static_cast<unsigned long long>(state.last_decode_ticks));
   fclose(f);
 }

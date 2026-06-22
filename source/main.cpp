@@ -4062,10 +4062,18 @@ int main(int argc, char *argv[]) {
     WebmPcmWorkerSnapshot webm_worker_snapshot_before_update = {};
     WebmPcmWorkerSnapshot webm_worker_snapshot = {};
     const bool use_opus_poc_for_update = OpusPocPlayer::is_playing;
+    // This frame-start WebM mode only gates optional worker telemetry here; the
+    // controller state is re-read below after the audio update.
+    const bool collect_webm_worker_snapshot =
+        use_opus_poc_for_update && use_webm_poc;
     if (use_opus_poc_for_update) {
-      webm_worker_snapshot_before_update = opus_player.webm_worker_snapshot();
+      if (collect_webm_worker_snapshot) {
+        webm_worker_snapshot_before_update = opus_player.webm_worker_snapshot();
+      }
       opus_update_stats = opus_player.update_with_stats();
-      webm_worker_snapshot = opus_player.webm_worker_snapshot();
+      if (collect_webm_worker_snapshot) {
+        webm_worker_snapshot = opus_player.webm_worker_snapshot();
+      }
       if (opus_update_stats.decoded_buffers >
           g_opus_observed_max_decoded_buffers) {
         g_opus_observed_max_decoded_buffers = opus_update_stats.decoded_buffers;
@@ -4105,7 +4113,6 @@ int main(int argc, char *argv[]) {
       controller_input =
           make_webm_controller_input(collect_playback_core_snapshot(),
                                      opus_update_stats, opus_player, ctx);
-      dropout_telemetry = make_webm_dropout_telemetry(ctx, osGetTime());
       LightLock_Unlock(&ctx.lock);
       const WebmPlaybackControllerConfig controller_config =
           controller_config_for_seek(seek_active);
@@ -4135,6 +4142,9 @@ int main(int argc, char *argv[]) {
               playback_stage, controller_input, opus_update_stats,
               webm_worker_snapshot, controller_input.user_paused, osGetTime(),
               &webm_dropout_event)) {
+        LightLock_Lock(&ctx.lock);
+        dropout_telemetry = make_webm_dropout_telemetry(ctx, osGetTime());
+        LightLock_Unlock(&ctx.lock);
         append_webm_dropout_telemetry_log(
             webm_dropout_event, playback_observer_current_session_kind(),
             playback_stage, controller_input, opus_update_stats,

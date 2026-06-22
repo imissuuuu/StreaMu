@@ -36,6 +36,7 @@ struct WebmPcmWorkerSnapshot {
   int consumed_chunks = 0;
   int queue_full_count = 0;
   u64 last_decode_ticks = 0;
+  u64 queue_full_wait_ms = 0;
 };
 
 class WebmPcmDecodeWorker {
@@ -72,6 +73,8 @@ private:
   bool push_chunk_locked(const OpusDecodeResult &decoded,
                          const int16_t *samples);
   void clear_queue_locked();
+  u64 next_queue_full_sleep_ms_locked();
+  void reset_queue_full_backoff_locked();
   void append_worker_log(const char *event,
                          const WebmPcmWorkerSnapshot &snapshot) const;
   void mark_failed(WebmRemuxError error);
@@ -96,6 +99,8 @@ private:
   int queue_full_count_;
   u64 last_decode_ticks_;
   u64 last_queue_full_log_ms_;
+  u64 queue_full_wait_ms_;
+  u64 queue_full_backoff_ms_;
   uint64_t last_seek_runtime_start_byte_;
   int last_seek_runtime_timecode_ms_;
   int16_t *decode_scratch_;
