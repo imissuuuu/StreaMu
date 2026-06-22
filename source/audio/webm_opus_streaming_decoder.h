@@ -11,42 +11,15 @@
 
 #include "opus_memory_decoder.h"
 #include "webm_audible_start_policy.h"
-#include "webm_opus_packet_decoder.h"
+#include "webm_decode_types.h"
+#include "webm_direct_opus_packet_path.h"
+#include "webm_ogg_bridge_path.h"
 #include "webm_seek_types.h"
 
 struct nestegg;
 
-enum class WebmRemuxError {
-  None,
-  SegmentNotFound,
-  OpusTrackNotFound,
-  UnsupportedTrackCount,
-  UnsupportedChannels,
-  InvalidCodecPrivate,
-  InvalidEbml,
-  InvalidBlock,
-  SeekPrerollInsufficient,
-  UnsupportedFeature,
-};
-
-enum class WebmDecodeBackend {
-  OggBridge,
-  DirectOpusPacket,
-};
-
-struct WebmDirectPacketQueueSnapshot {
-  size_t queued_packets = 0;
-  size_t read_index = 0;
-  bool complete = false;
-};
-
 class WebmOpusStreamingDecoder {
 public:
-  struct OggPagePacket {
-    std::vector<uint8_t> data;
-    int64_t granule_position;
-  };
-
   WebmOpusStreamingDecoder();
   ~WebmOpusStreamingDecoder();
 
@@ -69,17 +42,9 @@ public:
                                    int *out_timecode_ms) const;
 
 private:
-  static constexpr size_t kDirectOpusPacketQueueLimit = 8U;
-
   struct RangeSegment {
     uint64_t start = 0;
     std::vector<uint8_t> data;
-  };
-
-  struct DirectOpusPacket {
-    std::vector<uint8_t> data;
-    uint64_t tstamp_ns = 0;
-    int tstamp_ms = -1;
   };
 
   struct StreamSource {
@@ -102,33 +67,27 @@ private:
   bool choose_decode_backend();
   bool open_decoder_if_ready();
   bool pump_more_data();
-  bool emit_headers();
   bool emit_packet(const unsigned char *data, size_t length,
                    uint64_t packet_tstamp_ns);
-  bool emit_packet_to_ogg_bridge(const unsigned char *data, size_t length,
-                                 uint64_t packet_tstamp_ns,
-                                 int packet_tstamp_ms);
-  bool enqueue_direct_packet(const unsigned char *data, size_t length,
-                             uint64_t packet_tstamp_ns, int packet_tstamp_ms);
-  OpusDecodeResult decode_direct_packet(int16_t *pcm_out,
-                                        size_t pcm_capacity_samples);
-  bool push_direct_packet(DirectOpusPacket *packet);
-  bool pop_direct_packet(DirectOpusPacket *out_packet);
-  size_t direct_packet_queue_active_count() const;
-  bool direct_packet_queue_empty() const;
-  bool direct_packet_queue_full() const;
-  void clear_direct_packet_queue();
-  void compact_direct_packet_queue_if_needed();
-  WebmRemuxError
-  packet_decode_error_to_remux_error(WebmOpusPacketDecodeError error) const;
-  bool flush_audio_page(uint8_t header_type);
-  bool append_audio_packet(const OggPagePacket &packet);
-  bool finalize_stream();
+  bool emit_packet_to_active_path(const unsigned char *data, size_t length,
+                                  uint64_t packet_tstamp_ns,
+                                  int packet_tstamp_ms);
+  bool emit_packet_to_direct_path(const unsigned char *data, size_t length,
+                                  uint64_t packet_tstamp_ns,
+                                  int packet_tstamp_ms);
+  bool emit_packet_to_ogg_bridge_path(const unsigned char *data, size_t length,
+                                      int packet_tstamp_ms);
+  OpusDecodeResult decode_from_direct_path(int16_t *pcm_out,
+                                           size_t pcm_capacity_samples);
+  OpusDecodeResult decode_from_ogg_bridge(int16_t *pcm_out,
+                                          size_t pcm_capacity_samples);
+  bool finalize_active_path();
   bool init_seek_preroll();
   bool apply_parser_seek();
   bool should_emit_packet(uint64_t packet_tstamp_ns,
                           int *out_packet_tstamp_ms) const;
   size_t current_audio_page_target_bytes() const;
+  size_t active_bridge_buffer_size() const;
   void log_first_decoded_pcm_if_needed(const OpusDecodeResult &decoded);
   void log_first_audible_pcm_if_needed(const OpusDecodeResult &decoded);
   bool ensure_stream_bytes(size_t required_size);
@@ -153,10 +112,6 @@ private:
   bool nestegg_inited_;
   unsigned int opus_track_;
   std::vector<uint8_t> codec_private_;
-  std::vector<uint8_t> ogg_buffer_;
-  std::vector<OggPagePacket> audio_page_packets_;
-  LightLock ogg_lock_;
-  bool ogg_complete_;
   bool decoder_open_;
   bool remux_failed_;
   bool logged_init_;
@@ -166,10 +121,7 @@ private:
   // fail fast instead of sleeping on unavailable bytes in the main update loop.
   bool logged_audio_;
   bool logged_decoder_open_;
-  uint32_t ogg_sequence_;
-  int64_t granule_position_;
-  size_t audio_page_bytes_;
-  size_t audio_page_segments_;
+  int64_t ogg_granule_position_;
   WebmRemuxError last_error_;
   u64 perf_start_ms_;
   WebmSeekExecutionContext seek_context_;
@@ -205,12 +157,10 @@ private:
   u64 first_audible_pcm_elapsed_ms_;
   bool seek_preroll_initialized_;
   CURL *range_fetch_curl_;
-  OpusMemoryDecoder decoder_;
+  OpusMemoryDecoder ogg_decoder_;
   WebmDecodeBackend decode_backend_;
-  WebmOpusPacketDecoder packet_decoder_;
-  std::vector<DirectOpusPacket> direct_packet_queue_;
-  size_t direct_packet_read_index_;
-  bool direct_packets_complete_;
+  WebmDirectOpusPacketPath direct_path_;
+  WebmOggBridgePath ogg_bridge_;
 };
 
 #endif

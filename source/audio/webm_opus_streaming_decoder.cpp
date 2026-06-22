@@ -11,8 +11,6 @@ extern "C" {
 
 namespace {
 
-static const uint32_t OGG_SERIAL = 0x5354524DU;
-static const size_t MAX_OGG_PAGE_SEGMENTS = 255U;
 static constexpr size_t kDefaultWebmPacketPumpLimit = 8U;
 static constexpr size_t kSeekStartupPacketPumpLimit = 48U;
 static constexpr bool kPreferDirectOpusPacketDecode = true;
@@ -226,140 +224,6 @@ append_webm_seek_decode_breakdown_log(u64 parser_seek_done_elapsed_ms,
   fclose(f);
 }
 
-static void append_u32_le(std::vector<uint8_t> *out, uint32_t value) {
-  out->push_back(static_cast<uint8_t>(value & 0xFFU));
-  out->push_back(static_cast<uint8_t>((value >> 8) & 0xFFU));
-  out->push_back(static_cast<uint8_t>((value >> 16) & 0xFFU));
-  out->push_back(static_cast<uint8_t>((value >> 24) & 0xFFU));
-}
-
-static void append_u64_le(std::vector<uint8_t> *out, uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    out->push_back(static_cast<uint8_t>((value >> (8 * i)) & 0xFFU));
-  }
-}
-
-static uint32_t ogg_crc_entry(int index) {
-  uint32_t value = static_cast<uint32_t>(index) << 24;
-  for (int i = 0; i < 8; ++i) {
-    if ((value & 0x80000000U) != 0U) {
-      value = (value << 1) ^ 0x04C11DB7U;
-    } else {
-      value <<= 1;
-    }
-  }
-  return value;
-}
-
-static uint32_t ogg_crc(const std::vector<uint8_t> &data) {
-  static uint32_t table[256];
-  static bool init = false;
-  if (!init) {
-    for (int i = 0; i < 256; ++i) {
-      table[i] = ogg_crc_entry(i);
-    }
-    init = true;
-  }
-
-  uint32_t crc = 0;
-  for (size_t i = 0; i < data.size(); ++i) {
-    crc = (crc << 8) ^ table[((crc >> 24) & 0xFFU) ^ data[i]];
-  }
-  return crc;
-}
-
-static bool packet_segments(const std::vector<uint8_t> &packet,
-                            std::vector<uint8_t> *segments) {
-  if (!segments) {
-    return false;
-  }
-  segments->clear();
-  const size_t full_segments = packet.size() / 255U;
-  const size_t last_segment = packet.size() % 255U;
-  for (size_t i = 0; i < full_segments; ++i) {
-    segments->push_back(255U);
-  }
-  segments->push_back(static_cast<uint8_t>(last_segment));
-  return true;
-}
-
-static int packet_segment_count(const std::vector<uint8_t> &packet) {
-  return static_cast<int>((packet.size() / 255U) + 1U);
-}
-
-static bool build_ogg_page_from_packets(
-    const std::vector<WebmOpusStreamingDecoder::OggPagePacket> &packets,
-    uint8_t header_type, uint32_t sequence, std::vector<uint8_t> *page_out) {
-  if (!page_out || packets.empty()) {
-    return false;
-  }
-
-  std::vector<uint8_t> segments;
-  std::vector<uint8_t> body;
-  for (size_t i = 0; i < packets.size(); ++i) {
-    std::vector<uint8_t> packet_segment_bytes;
-    if (!packet_segments(packets[i].data, &packet_segment_bytes)) {
-      return false;
-    }
-    if (packet_segment_bytes.size() > MAX_OGG_PAGE_SEGMENTS ||
-        segments.size() + packet_segment_bytes.size() > MAX_OGG_PAGE_SEGMENTS) {
-      return false;
-    }
-    segments.insert(segments.end(), packet_segment_bytes.begin(),
-                    packet_segment_bytes.end());
-    body.insert(body.end(), packets[i].data.begin(), packets[i].data.end());
-  }
-
-  page_out->clear();
-  page_out->push_back('O');
-  page_out->push_back('g');
-  page_out->push_back('g');
-  page_out->push_back('S');
-  page_out->push_back(0U);
-  page_out->push_back(header_type);
-  append_u64_le(page_out,
-                static_cast<uint64_t>(packets.back().granule_position));
-  append_u32_le(page_out, OGG_SERIAL);
-  append_u32_le(page_out, sequence);
-  append_u32_le(page_out, 0U);
-  page_out->push_back(static_cast<uint8_t>(segments.size()));
-  page_out->insert(page_out->end(), segments.begin(), segments.end());
-  page_out->insert(page_out->end(), body.begin(), body.end());
-
-  const uint32_t crc = ogg_crc(*page_out);
-  (*page_out)[22] = static_cast<uint8_t>(crc & 0xFFU);
-  (*page_out)[23] = static_cast<uint8_t>((crc >> 8) & 0xFFU);
-  (*page_out)[24] = static_cast<uint8_t>((crc >> 16) & 0xFFU);
-  (*page_out)[25] = static_cast<uint8_t>((crc >> 24) & 0xFFU);
-  return true;
-}
-
-static std::vector<uint8_t> build_opus_tags() {
-  static const char kVendor[] = "StreaMu";
-  std::vector<uint8_t> tags;
-  tags.push_back('O');
-  tags.push_back('p');
-  tags.push_back('u');
-  tags.push_back('s');
-  tags.push_back('T');
-  tags.push_back('a');
-  tags.push_back('g');
-  tags.push_back('s');
-  append_u32_le(&tags, static_cast<uint32_t>(sizeof(kVendor) - 1));
-  tags.insert(tags.end(), kVendor, kVendor + sizeof(kVendor) - 1);
-  append_u32_le(&tags, 0U);
-  return tags;
-}
-
-static bool build_ogg_page(const std::vector<uint8_t> &packet,
-                           uint8_t header_type, int64_t granule_position,
-                           uint32_t sequence, std::vector<uint8_t> *page_out) {
-  std::vector<WebmOpusStreamingDecoder::OggPagePacket> packets;
-  packets.push_back(
-      WebmOpusStreamingDecoder::OggPagePacket{packet, granule_position});
-  return build_ogg_page_from_packets(packets, header_type, sequence, page_out);
-}
-
 static bool opus_packet_duration_samples(const unsigned char *packet,
                                          size_t length, int *duration_samples) {
   if (!packet || length == 0U || !duration_samples) {
@@ -422,11 +286,10 @@ static size_t append_fetch_bytes_cb(char *ptr, size_t size, size_t nmemb,
 WebmOpusStreamingDecoder::WebmOpusStreamingDecoder()
     : stream_source_{NULL, NULL, NULL, 0, 0, "", NULL},
       cancel_requested_(false), nestegg_ctx_(NULL), nestegg_inited_(false),
-      opus_track_(0), ogg_complete_(false), decoder_open_(false),
-      remux_failed_(false), logged_init_(false), logged_track_(false),
-      logged_headers_(false), logged_audio_(false), logged_decoder_open_(false),
-      ogg_sequence_(0), granule_position_(0), audio_page_bytes_(0),
-      audio_page_segments_(0), last_error_(WebmRemuxError::None),
+      opus_track_(0), decoder_open_(false), remux_failed_(false),
+      logged_init_(false), logged_track_(false), logged_headers_(false),
+      logged_audio_(false), logged_decoder_open_(false),
+      ogg_granule_position_(0), last_error_(WebmRemuxError::None),
       perf_start_ms_(0), seek_context_(WebmSeekExecutionContext{}),
       seek_start_ms_(0), seek_emit_ms_(0), requested_emit_start_ms_(0),
       parser_seek_enabled_(false), parser_offset_seek_preferred_(false),
@@ -443,11 +306,8 @@ WebmOpusStreamingDecoder::WebmOpusStreamingDecoder()
       first_audible_pcm_logged_(false), parser_seek_done_elapsed_ms_(0),
       first_decoded_pcm_elapsed_ms_(0), first_audible_pcm_elapsed_ms_(0),
       seek_preroll_initialized_(false), range_fetch_curl_(NULL),
-      decode_backend_(WebmDecodeBackend::OggBridge),
-      direct_packet_read_index_(0), direct_packets_complete_(false) {
+      decode_backend_(WebmDecodeBackend::OggBridge) {
   LightLock_Init(&cancel_lock_);
-  LightLock_Init(&ogg_lock_);
-  direct_packet_queue_.reserve(kDirectOpusPacketQueueLimit);
 }
 
 WebmOpusStreamingDecoder::~WebmOpusStreamingDecoder() {
@@ -672,8 +532,9 @@ bool WebmOpusStreamingDecoder::open_streaming(
 void WebmOpusStreamingDecoder::reset() {
   request_cancel();
   cleanup_parser_range_prefetch(true);
-  decoder_.reset();
-  packet_decoder_.reset();
+  ogg_decoder_.reset();
+  direct_path_.reset();
+  ogg_bridge_.reset();
   if (nestegg_ctx_) {
     nestegg_destroy(nestegg_ctx_);
     nestegg_ctx_ = NULL;
@@ -681,12 +542,6 @@ void WebmOpusStreamingDecoder::reset() {
   nestegg_inited_ = false;
   stream_source_ = {NULL, NULL, NULL, 0, 0, "", NULL};
   codec_private_.clear();
-  audio_page_packets_.clear();
-  clear_direct_packet_queue();
-  LightLock_Lock(&ogg_lock_);
-  ogg_buffer_.clear();
-  LightLock_Unlock(&ogg_lock_);
-  ogg_complete_ = false;
   decoder_open_ = false;
   remux_failed_ = false;
   logged_init_ = false;
@@ -694,10 +549,7 @@ void WebmOpusStreamingDecoder::reset() {
   logged_headers_ = false;
   logged_audio_ = false;
   logged_decoder_open_ = false;
-  ogg_sequence_ = 0;
-  granule_position_ = 0;
-  audio_page_bytes_ = 0;
-  audio_page_segments_ = 0;
+  ogg_granule_position_ = 0;
   last_error_ = WebmRemuxError::None;
   LightLock_Lock(&cancel_lock_);
   cancel_requested_ = false;
@@ -734,13 +586,6 @@ void WebmOpusStreamingDecoder::reset() {
   first_audible_pcm_elapsed_ms_ = 0;
   seek_preroll_initialized_ = false;
   decode_backend_ = WebmDecodeBackend::OggBridge;
-  direct_packets_complete_ = false;
-}
-
-void WebmOpusStreamingDecoder::clear_direct_packet_queue() {
-  direct_packet_queue_.clear();
-  direct_packet_queue_.reserve(kDirectOpusPacketQueueLimit);
-  direct_packet_read_index_ = 0;
 }
 
 void WebmOpusStreamingDecoder::request_cancel() {
@@ -1244,12 +1089,6 @@ bool WebmOpusStreamingDecoder::init_nestegg() {
     remux_failed_ = true;
     return false;
   }
-  if (decode_backend_ == WebmDecodeBackend::OggBridge) {
-    if (!emit_headers()) {
-      remux_failed_ = true;
-      return false;
-    }
-  }
   if (parser_seek_enabled_ && parser_prefetch_offset_ > 0) {
     (void)fetch_range_segment(parser_prefetch_offset_,
                               kParserRangeInitialSeekChunkBytes);
@@ -1263,15 +1102,21 @@ bool WebmOpusStreamingDecoder::init_nestegg() {
 
 bool WebmOpusStreamingDecoder::choose_decode_backend() {
   decode_backend_ = WebmDecodeBackend::OggBridge;
-  packet_decoder_.reset();
-  clear_direct_packet_queue();
-  direct_packets_complete_ = false;
+  direct_path_.reset();
+  ogg_bridge_.reset();
+  decoder_open_ = false;
 
   if (!kPreferDirectOpusPacketDecode) {
+    if (!ogg_bridge_.emit_headers(codec_private_, &last_error_)) {
+      return false;
+    }
+    logged_headers_ = true;
     return true;
   }
 
-  if (packet_decoder_.open(codec_private_.data(), codec_private_.size())) {
+  const WebmDirectPathOpenResult direct_open =
+      direct_path_.open(codec_private_.data(), codec_private_.size());
+  if (direct_open.status == WebmDirectPathOpenStatus::Ready) {
     decode_backend_ = WebmDecodeBackend::DirectOpusPacket;
     decoder_open_ = true;
     logged_headers_ = true;
@@ -1284,89 +1129,28 @@ bool WebmOpusStreamingDecoder::choose_decode_backend() {
     return true;
   }
 
-  const WebmOpusPacketDecodeError packet_error = packet_decoder_.error();
-  if (packet_error == WebmOpusPacketDecodeError::DecoderCreateFailed) {
-    last_error_ = WebmRemuxError::UnsupportedFeature;
+  if (direct_open.status == WebmDirectPathOpenStatus::Fatal) {
+    last_error_ = direct_open.error;
     return false;
   }
 
-  packet_decoder_.reset();
   decode_backend_ = WebmDecodeBackend::OggBridge;
-  return true;
-}
-
-bool WebmOpusStreamingDecoder::emit_headers() {
-  if (logged_headers_) {
-    return true;
-  }
-  std::vector<uint8_t> page;
-  if (!build_ogg_page(codec_private_, 0x02U, 0, ogg_sequence_, &page)) {
-    last_error_ = WebmRemuxError::InvalidCodecPrivate;
+  if (!ogg_bridge_.emit_headers(codec_private_, &last_error_)) {
     return false;
   }
-  LightLock_Lock(&ogg_lock_);
-  ogg_buffer_.insert(ogg_buffer_.end(), page.begin(), page.end());
-  LightLock_Unlock(&ogg_lock_);
-  ++ogg_sequence_;
-
-  const std::vector<uint8_t> tags = build_opus_tags();
-  if (!build_ogg_page(tags, 0x00U, 0, ogg_sequence_, &page)) {
-    last_error_ = WebmRemuxError::InvalidCodecPrivate;
-    return false;
-  }
-  LightLock_Lock(&ogg_lock_);
-  ogg_buffer_.insert(ogg_buffer_.end(), page.begin(), page.end());
-  LightLock_Unlock(&ogg_lock_);
-  ++ogg_sequence_;
-
   logged_headers_ = true;
-  return true;
-}
-
-bool WebmOpusStreamingDecoder::flush_audio_page(uint8_t header_type) {
-  if (audio_page_packets_.empty()) {
-    return true;
-  }
-  std::vector<uint8_t> page;
-  if (!build_ogg_page_from_packets(audio_page_packets_, header_type,
-                                   ogg_sequence_, &page)) {
-    last_error_ = WebmRemuxError::InvalidBlock;
-    return false;
-  }
-  LightLock_Lock(&ogg_lock_);
-  ogg_buffer_.insert(ogg_buffer_.end(), page.begin(), page.end());
-  LightLock_Unlock(&ogg_lock_);
-  ++ogg_sequence_;
-  audio_page_packets_.clear();
-  audio_page_bytes_ = 0;
-  audio_page_segments_ = 0;
-  return true;
-}
-
-bool WebmOpusStreamingDecoder::append_audio_packet(
-    const OggPagePacket &packet) {
-  const int segment_count = packet_segment_count(packet.data);
-  if (!audio_page_packets_.empty() &&
-      audio_page_segments_ + static_cast<size_t>(segment_count) >
-          MAX_OGG_PAGE_SEGMENTS) {
-    if (!flush_audio_page(0x00U)) {
-      return false;
-    }
-  }
-  audio_page_packets_.push_back(packet);
-  audio_page_bytes_ += packet.data.size();
-  audio_page_segments_ += static_cast<size_t>(segment_count);
-  if (audio_page_bytes_ >= current_audio_page_target_bytes()) {
-    if (!flush_audio_page(0x00U)) {
-      return false;
-    }
-  }
   return true;
 }
 
 size_t WebmOpusStreamingDecoder::current_audio_page_target_bytes() const {
   return webm_audio_page_target_bytes(seek_start_ms_ > 0, !logged_audio_,
                                       audible_policy_);
+}
+
+size_t WebmOpusStreamingDecoder::active_bridge_buffer_size() const {
+  return decode_backend_ == WebmDecodeBackend::OggBridge
+             ? ogg_bridge_.buffered_bytes()
+             : 0U;
 }
 
 bool WebmOpusStreamingDecoder::init_seek_preroll() {
@@ -1409,7 +1193,7 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
     if (nestegg_offset_seek(nestegg_ctx_, parser_prefetch_offset_) == 0) {
       append_webm_perf_log(
           "parser_offset_seek_done", static_cast<size_t>(stream_source_.offset),
-          ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+          active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
       append_webm_seek_execution_log(
           "parser_offset_seek_done", seek_context_,
           static_cast<uint64_t>(stream_source_.offset), -1,
@@ -1419,7 +1203,7 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
     if (!offset_seek_applied) {
       append_webm_perf_log("parser_offset_seek_failed",
                            static_cast<size_t>(stream_source_.offset),
-                           ogg_buffer_.size(), WebmRemuxError::None,
+                           active_bridge_buffer_size(), WebmRemuxError::None,
                            perf_start_ms_);
       append_webm_seek_execution_log(
           "parser_offset_seek_failed", seek_context_,
@@ -1436,7 +1220,7 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
     if (offset_seek_applied) {
       append_webm_perf_log(
           "parser_seek_failed", static_cast<size_t>(stream_source_.offset),
-          ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+          active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
       append_webm_seek_execution_log(
           "parser_seek_failed", seek_context_,
           static_cast<uint64_t>(stream_source_.offset), -1,
@@ -1444,9 +1228,9 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
       return true;
     }
     last_error_ = WebmRemuxError::InvalidBlock;
-    append_webm_perf_log("parser_seek_failed",
-                         static_cast<size_t>(stream_source_.offset),
-                         ogg_buffer_.size(), last_error_, perf_start_ms_);
+    append_webm_perf_log(
+        "parser_seek_failed", static_cast<size_t>(stream_source_.offset),
+        active_bridge_buffer_size(), last_error_, perf_start_ms_);
     append_webm_seek_execution_log("parser_seek_failed", seek_context_,
                                    static_cast<uint64_t>(stream_source_.offset),
                                    -1, webm_perf_elapsed_ms(perf_start_ms_));
@@ -1454,7 +1238,7 @@ bool WebmOpusStreamingDecoder::apply_parser_seek() {
   }
   append_webm_perf_log(
       "parser_seek_done", static_cast<size_t>(stream_source_.offset),
-      ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+      active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
   parser_seek_done_elapsed_ms_ = webm_perf_elapsed_ms(perf_start_ms_);
   append_webm_seek_execution_log("parser_seek_done", seek_context_,
                                  static_cast<uint64_t>(stream_source_.offset),
@@ -1495,7 +1279,7 @@ bool WebmOpusStreamingDecoder::emit_packet(const unsigned char *data,
       seek_packet_discard_logged_ = true;
       append_webm_perf_log("seek_packet_discard_done",
                            static_cast<size_t>(stream_source_.offset),
-                           ogg_buffer_.size(), WebmRemuxError::None,
+                           active_bridge_buffer_size(), WebmRemuxError::None,
                            perf_start_ms_);
     }
     const WebmFirstEmitDecision first_emit = webm_first_emit_decision(
@@ -1503,7 +1287,7 @@ bool WebmOpusStreamingDecoder::emit_packet(const unsigned char *data,
     if (first_emit.preroll_short) {
       append_webm_perf_log(
           "seek_preroll_short", static_cast<size_t>(stream_source_.offset),
-          ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+          active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
     }
     pcm_skip_samples_per_channel_ = first_emit.pcm_skip_samples_per_channel;
   }
@@ -1514,68 +1298,37 @@ bool WebmOpusStreamingDecoder::emit_packet(const unsigned char *data,
   }
   if (seek_start_ms_ > 0 && packet_tstamp_ns > 0U) {
     const uint64_t packet_time_ms = packet_tstamp_ns / 1000000ULL;
-    granule_position_ =
+    ogg_granule_position_ =
         static_cast<int64_t>(packet_time_ms * kOpusSamplesPerMs +
                              static_cast<uint64_t>(duration_samples));
   } else {
-    granule_position_ += duration_samples;
+    ogg_granule_position_ += duration_samples;
   }
 
-  if (decode_backend_ == WebmDecodeBackend::DirectOpusPacket) {
-    if (pcm_skip_samples_per_channel_ > 0) {
-      packet_decoder_.add_skip_samples_per_channel(
-          pcm_skip_samples_per_channel_);
-      pcm_skip_samples_per_channel_ = 0;
-    }
-    return enqueue_direct_packet(data, length, packet_tstamp_ns,
-                                 packet_tstamp_ms);
-  }
-  return emit_packet_to_ogg_bridge(data, length, packet_tstamp_ns,
-                                   packet_tstamp_ms);
+  return emit_packet_to_active_path(data, length, packet_tstamp_ns,
+                                    packet_tstamp_ms);
 }
 
-bool WebmOpusStreamingDecoder::emit_packet_to_ogg_bridge(
+bool WebmOpusStreamingDecoder::emit_packet_to_active_path(
     const unsigned char *data, size_t length, uint64_t packet_tstamp_ns,
     int packet_tstamp_ms) {
-  OggPagePacket packet;
-  packet.data.assign(data, data + length);
-  packet.granule_position = granule_position_;
-  if (!append_audio_packet(packet)) {
-    return false;
+  if (decode_backend_ == WebmDecodeBackend::DirectOpusPacket) {
+    return emit_packet_to_direct_path(data, length, packet_tstamp_ns,
+                                      packet_tstamp_ms);
   }
-  if (!logged_audio_) {
-    if (!flush_audio_page(0x00U)) {
-      return false;
-    }
-  }
-  if (!logged_audio_) {
-    logged_audio_ = true;
-    append_webm_perf_log(
-        "first_audio_data", static_cast<size_t>(stream_source_.offset),
-        ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
-    append_webm_seek_execution_log("first_audio_data", seek_context_,
-                                   static_cast<uint64_t>(stream_source_.offset),
-                                   packet_tstamp_ms,
-                                   webm_perf_elapsed_ms(perf_start_ms_));
-  }
-  return true;
+  return emit_packet_to_ogg_bridge_path(data, length, packet_tstamp_ms);
 }
 
-bool WebmOpusStreamingDecoder::enqueue_direct_packet(const unsigned char *data,
-                                                     size_t length,
-                                                     uint64_t packet_tstamp_ns,
-                                                     int packet_tstamp_ms) {
-  if (!data || length == 0U) {
-    last_error_ = WebmRemuxError::InvalidBlock;
-    return false;
+bool WebmOpusStreamingDecoder::emit_packet_to_direct_path(
+    const unsigned char *data, size_t length, uint64_t packet_tstamp_ns,
+    int packet_tstamp_ms) {
+  if (pcm_skip_samples_per_channel_ > 0) {
+    direct_path_.add_skip_samples_per_channel(pcm_skip_samples_per_channel_);
+    pcm_skip_samples_per_channel_ = 0;
   }
-
-  DirectOpusPacket packet;
-  packet.data.assign(data, data + length);
-  packet.tstamp_ns = packet_tstamp_ns;
-  packet.tstamp_ms = packet_tstamp_ms;
-  if (!push_direct_packet(&packet)) {
-    last_error_ = WebmRemuxError::InvalidBlock;
+  if (!direct_path_.enqueue_packet(data, length, packet_tstamp_ns,
+                                   packet_tstamp_ms)) {
+    last_error_ = direct_path_.error();
     return false;
   }
 
@@ -1584,6 +1337,30 @@ bool WebmOpusStreamingDecoder::enqueue_direct_packet(const unsigned char *data,
     append_webm_perf_log("first_audio_data",
                          static_cast<size_t>(stream_source_.offset), 0,
                          WebmRemuxError::None, perf_start_ms_);
+    append_webm_seek_execution_log("first_audio_data", seek_context_,
+                                   static_cast<uint64_t>(stream_source_.offset),
+                                   packet_tstamp_ms,
+                                   webm_perf_elapsed_ms(perf_start_ms_));
+  }
+  return true;
+}
+
+bool WebmOpusStreamingDecoder::emit_packet_to_ogg_bridge_path(
+    const unsigned char *data, size_t length, int packet_tstamp_ms) {
+  if (!ogg_bridge_.emit_packet(data, length, ogg_granule_position_,
+                               current_audio_page_target_bytes(),
+                               &last_error_)) {
+    return false;
+  }
+
+  if (!logged_audio_) {
+    if (!ogg_bridge_.flush_audio_page(0x00U, &last_error_)) {
+      return false;
+    }
+    logged_audio_ = true;
+    append_webm_perf_log(
+        "first_audio_data", static_cast<size_t>(stream_source_.offset),
+        active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
     append_webm_seek_execution_log("first_audio_data", seek_context_,
                                    static_cast<uint64_t>(stream_source_.offset),
                                    packet_tstamp_ms,
@@ -1602,7 +1379,7 @@ void WebmOpusStreamingDecoder::log_first_decoded_pcm_if_needed(
   first_decoded_pcm_elapsed_ms_ = webm_perf_elapsed_ms(perf_start_ms_);
   append_webm_perf_log(
       "first_decoded_pcm", static_cast<size_t>(stream_source_.offset),
-      ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+      active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
   append_webm_seek_execution_log("first_decoded_pcm", seek_context_,
                                  static_cast<uint64_t>(stream_source_.offset),
                                  -1, first_decoded_pcm_elapsed_ms_);
@@ -1618,7 +1395,7 @@ void WebmOpusStreamingDecoder::log_first_audible_pcm_if_needed(
   first_audible_pcm_elapsed_ms_ = webm_perf_elapsed_ms(perf_start_ms_);
   append_webm_perf_log(
       "first_audible_pcm", static_cast<size_t>(stream_source_.offset),
-      ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+      active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
   append_webm_seek_execution_log("first_audible_pcm", seek_context_,
                                  static_cast<uint64_t>(stream_source_.offset),
                                  -1, first_audible_pcm_elapsed_ms_);
@@ -1630,20 +1407,19 @@ void WebmOpusStreamingDecoder::log_first_audible_pcm_if_needed(
   }
 }
 
-bool WebmOpusStreamingDecoder::finalize_stream() {
+bool WebmOpusStreamingDecoder::finalize_active_path() {
   if (decode_backend_ == WebmDecodeBackend::DirectOpusPacket) {
-    direct_packets_complete_ = true;
+    direct_path_.mark_complete();
     append_webm_perf_log("remux_done",
                          static_cast<size_t>(stream_source_.offset), 0,
                          WebmRemuxError::None, perf_start_ms_);
     return true;
   }
-  if (!flush_audio_page(0x04U)) {
+  if (!ogg_bridge_.finalize(&last_error_)) {
     return false;
   }
-  ogg_complete_ = true;
   append_webm_perf_log("remux_done", static_cast<size_t>(stream_source_.offset),
-                       ogg_buffer_.size(), WebmRemuxError::None,
+                       active_bridge_buffer_size(), WebmRemuxError::None,
                        perf_start_ms_);
   return true;
 }
@@ -1652,14 +1428,17 @@ bool WebmOpusStreamingDecoder::open_decoder_if_ready() {
   if (decoder_open_ || remux_failed_ || !logged_headers_ || !logged_audio_) {
     return decoder_open_;
   }
-  if (!decoder_.open_streaming(&ogg_buffer_, &ogg_lock_, &ogg_complete_,
-                               &WebmOpusStreamingDecoder::pump_callback, this,
-                               true)) {
+  if (decode_backend_ == WebmDecodeBackend::DirectOpusPacket) {
+    return decoder_open_;
+  }
+  if (!ogg_decoder_.open_streaming(
+          ogg_bridge_.buffer(), ogg_bridge_.lock(), ogg_bridge_.complete_flag(),
+          &WebmOpusStreamingDecoder::pump_callback, this, true)) {
     remux_failed_ = true;
     last_error_ = WebmRemuxError::InvalidBlock;
-    append_webm_perf_log("decoder_open_failed",
-                         static_cast<size_t>(stream_source_.offset),
-                         ogg_buffer_.size(), last_error_, perf_start_ms_);
+    append_webm_perf_log(
+        "decoder_open_failed", static_cast<size_t>(stream_source_.offset),
+        active_bridge_buffer_size(), last_error_, perf_start_ms_);
     return false;
   }
   decoder_open_ = true;
@@ -1667,7 +1446,7 @@ bool WebmOpusStreamingDecoder::open_decoder_if_ready() {
     logged_decoder_open_ = true;
     append_webm_perf_log(
         "decoder_open_ok", static_cast<size_t>(stream_source_.offset),
-        ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+        active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
   }
   return true;
 }
@@ -1689,7 +1468,7 @@ bool WebmOpusStreamingDecoder::pump_more_data() {
     // packet is read, all of its chunks must be preserved even if that nudges
     // the direct queue over the soft limit until decode drains it.
     if (decode_backend_ == WebmDecodeBackend::DirectOpusPacket &&
-        direct_packet_queue_full()) {
+        direct_path_.queue_full()) {
       break;
     }
 
@@ -1732,7 +1511,7 @@ bool WebmOpusStreamingDecoder::pump_more_data() {
     }
 
     if (result == 0) {
-      return finalize_stream();
+      return finalize_active_path();
     }
 
     if (parser_range_fetch_failed_) {
@@ -1740,18 +1519,18 @@ bool WebmOpusStreamingDecoder::pump_more_data() {
       if (last_error_ == WebmRemuxError::None) {
         last_error_ = WebmRemuxError::InvalidBlock;
       }
-      append_webm_perf_log("remux_failed",
-                           static_cast<size_t>(stream_source_.offset),
-                           ogg_buffer_.size(), last_error_, perf_start_ms_);
+      append_webm_perf_log(
+          "remux_failed", static_cast<size_t>(stream_source_.offset),
+          active_bridge_buffer_size(), last_error_, perf_start_ms_);
       return false;
     }
 
     if (stream_source_.download_complete && *stream_source_.download_complete) {
       remux_failed_ = true;
       last_error_ = WebmRemuxError::InvalidBlock;
-      append_webm_perf_log("remux_failed",
-                           static_cast<size_t>(stream_source_.offset),
-                           ogg_buffer_.size(), last_error_, perf_start_ms_);
+      append_webm_perf_log(
+          "remux_failed", static_cast<size_t>(stream_source_.offset),
+          active_bridge_buffer_size(), last_error_, perf_start_ms_);
       return false;
     }
     if (nestegg_read_reset(nestegg_ctx_) != 0) {
@@ -1771,9 +1550,14 @@ bool WebmOpusStreamingDecoder::pump_more_data() {
 OpusDecodeResult WebmOpusStreamingDecoder::decode(int16_t *pcm_out,
                                                   size_t pcm_capacity_samples) {
   if (decode_backend_ == WebmDecodeBackend::DirectOpusPacket) {
-    return decode_direct_packet(pcm_out, pcm_capacity_samples);
+    return decode_from_direct_path(pcm_out, pcm_capacity_samples);
   }
+  return decode_from_ogg_bridge(pcm_out, pcm_capacity_samples);
+}
 
+OpusDecodeResult
+WebmOpusStreamingDecoder::decode_from_ogg_bridge(int16_t *pcm_out,
+                                                 size_t pcm_capacity_samples) {
   for (int attempt = 0; attempt < 8; ++attempt) {
     if (!decoder_open_ && !pump_more_data()) {
       OpusDecodeResult failed = {false, 0, 48000, 0, false};
@@ -1786,7 +1570,8 @@ OpusDecodeResult WebmOpusStreamingDecoder::decode(int16_t *pcm_out,
       return waiting;
     }
 
-    OpusDecodeResult decoded = decoder_.decode(pcm_out, pcm_capacity_samples);
+    OpusDecodeResult decoded =
+        ogg_decoder_.decode(pcm_out, pcm_capacity_samples);
     log_first_decoded_pcm_if_needed(decoded);
     if (decoded.ok && !decoded.eof && pcm_skip_samples_per_channel_ <= 0 &&
         seek_start_ms_ > 0 && !seek_decode_ready_logged_ &&
@@ -1794,7 +1579,7 @@ OpusDecodeResult WebmOpusStreamingDecoder::decode(int16_t *pcm_out,
       seek_decode_ready_logged_ = true;
       append_webm_perf_log(
           "seek_decode_ready", static_cast<size_t>(stream_source_.offset),
-          ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+          active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
     }
     if (!decoded.ok || decoded.eof || pcm_skip_samples_per_channel_ <= 0) {
       log_first_audible_pcm_if_needed(decoded);
@@ -1810,7 +1595,7 @@ OpusDecodeResult WebmOpusStreamingDecoder::decode(int16_t *pcm_out,
       pcm_skip_logged_ = true;
       append_webm_perf_log(
           "seek_pcm_skip_done", static_cast<size_t>(stream_source_.offset),
-          ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+          active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
     }
     if (skip_samples == decoded.samples_per_channel) {
       continue;
@@ -1826,7 +1611,7 @@ OpusDecodeResult WebmOpusStreamingDecoder::decode(int16_t *pcm_out,
       seek_decode_ready_logged_ = true;
       append_webm_perf_log(
           "seek_decode_ready", static_cast<size_t>(stream_source_.offset),
-          ogg_buffer_.size(), WebmRemuxError::None, perf_start_ms_);
+          active_bridge_buffer_size(), WebmRemuxError::None, perf_start_ms_);
     }
     log_first_audible_pcm_if_needed(decoded);
     return decoded;
@@ -1837,45 +1622,35 @@ OpusDecodeResult WebmOpusStreamingDecoder::decode(int16_t *pcm_out,
 }
 
 OpusDecodeResult
-WebmOpusStreamingDecoder::decode_direct_packet(int16_t *pcm_out,
-                                               size_t pcm_capacity_samples) {
+WebmOpusStreamingDecoder::decode_from_direct_path(int16_t *pcm_out,
+                                                  size_t pcm_capacity_samples) {
   for (int attempt = 0; attempt < 8; ++attempt) {
-    if (direct_packet_queue_empty() && !direct_packets_complete_) {
+    WebmDirectPacketQueueSnapshot snapshot = direct_path_.snapshot();
+    if (snapshot.queued_packets == 0U && !snapshot.complete) {
       if (!pump_more_data() && remux_failed_) {
         OpusDecodeResult failed = {false, 0, 48000, 0, false};
         return failed;
       }
+      snapshot = direct_path_.snapshot();
     }
 
-    if (direct_packet_queue_empty()) {
-      OpusDecodeResult result = {false, 0, 48000, 0, direct_packets_complete_};
+    if (snapshot.queued_packets == 0U) {
+      OpusDecodeResult result = {false, 0, 48000, 0, snapshot.complete};
       return result;
     }
 
-    DirectOpusPacket packet;
-    if (!pop_direct_packet(&packet)) {
-      OpusDecodeResult result = {false, 0, 48000, 0, direct_packets_complete_};
-      return result;
-    }
-    if (packet.data.empty()) {
+    const WebmDirectOpusDecodeStep decoded =
+        direct_path_.decode_next(pcm_out, pcm_capacity_samples);
+    if (decoded.failed) {
       remux_failed_ = true;
-      last_error_ = WebmRemuxError::InvalidBlock;
-      OpusDecodeResult failed = {false, 0, 48000, 0, false};
-      return failed;
-    }
-
-    WebmOpusPacketDecodeResult decoded = packet_decoder_.decode_packet(
-        packet.data.data(), packet.data.size(), pcm_out, pcm_capacity_samples);
-    if (packet_decoder_.has_failed()) {
-      remux_failed_ = true;
-      last_error_ = packet_decode_error_to_remux_error(packet_decoder_.error());
+      last_error_ = decoded.error;
       OpusDecodeResult failed = {false, 0, 48000, 0, false};
       return failed;
     }
     if (decoded.consumed_packet && !decoded.has_output) {
       log_first_decoded_pcm_if_needed(decoded.decoded);
       if (seek_start_ms_ > 0 && !pcm_skip_logged_ &&
-          packet_decoder_.pending_skip_samples_per_channel() <= 0) {
+          direct_path_.pending_skip_samples_per_channel() <= 0) {
         pcm_skip_logged_ = true;
         append_webm_perf_log("seek_pcm_skip_done",
                              static_cast<size_t>(stream_source_.offset), 0,
@@ -1890,7 +1665,7 @@ WebmOpusStreamingDecoder::decode_direct_packet(int16_t *pcm_out,
 
     log_first_decoded_pcm_if_needed(decoded.decoded);
     if (seek_start_ms_ > 0 && !pcm_skip_logged_ &&
-        packet_decoder_.pending_skip_samples_per_channel() <= 0) {
+        direct_path_.pending_skip_samples_per_channel() <= 0) {
       pcm_skip_logged_ = true;
       append_webm_perf_log("seek_pcm_skip_done",
                            static_cast<size_t>(stream_source_.offset), 0,
@@ -1911,108 +1686,26 @@ WebmOpusStreamingDecoder::decode_direct_packet(int16_t *pcm_out,
   return waiting;
 }
 
-bool WebmOpusStreamingDecoder::direct_packet_queue_full() const {
-  return direct_packet_queue_active_count() >= kDirectOpusPacketQueueLimit;
-}
-
 WebmDirectPacketQueueSnapshot
 WebmOpusStreamingDecoder::direct_packet_queue_snapshot() const {
-  WebmDirectPacketQueueSnapshot snapshot = {};
-  snapshot.queued_packets = direct_packet_queue_active_count();
-  snapshot.read_index = direct_packet_read_index_;
-  snapshot.complete = direct_packets_complete_;
-  return snapshot;
-}
-
-bool WebmOpusStreamingDecoder::push_direct_packet(DirectOpusPacket *packet) {
-  if (!packet || packet->data.empty()) {
-    return false;
-  }
-  // Queue fullness is enforced before nestegg_read_packet(); push still accepts
-  // chunks from an already-read packet so a multi-chunk packet stays intact.
-  direct_packet_queue_.push_back(std::move(*packet));
-  return true;
-}
-
-bool WebmOpusStreamingDecoder::pop_direct_packet(DirectOpusPacket *out_packet) {
-  if (!out_packet || direct_packet_queue_empty()) {
-    return false;
-  }
-  DirectOpusPacket &slot = direct_packet_queue_[direct_packet_read_index_];
-  *out_packet = std::move(slot);
-  slot.data.clear();
-  slot.tstamp_ns = 0;
-  slot.tstamp_ms = -1;
-  ++direct_packet_read_index_;
-  compact_direct_packet_queue_if_needed();
-  return true;
-}
-
-size_t WebmOpusStreamingDecoder::direct_packet_queue_active_count() const {
-  if (direct_packet_read_index_ >= direct_packet_queue_.size()) {
-    return 0U;
-  }
-  return direct_packet_queue_.size() - direct_packet_read_index_;
-}
-
-bool WebmOpusStreamingDecoder::direct_packet_queue_empty() const {
-  return direct_packet_queue_active_count() == 0U;
-}
-
-void WebmOpusStreamingDecoder::compact_direct_packet_queue_if_needed() {
-  if (direct_packet_read_index_ == 0U) {
-    return;
-  }
-  const size_t active_count = direct_packet_queue_active_count();
-  if (active_count == 0U) {
-    direct_packet_queue_.clear();
-    direct_packet_read_index_ = 0;
-    return;
-  }
-  if (direct_packet_read_index_ < kDirectOpusPacketQueueLimit) {
-    return;
-  }
-  for (size_t i = 0; i < active_count; ++i) {
-    direct_packet_queue_[i] =
-        std::move(direct_packet_queue_[direct_packet_read_index_ + i]);
-  }
-  direct_packet_queue_.resize(active_count);
-  direct_packet_read_index_ = 0;
-}
-
-WebmRemuxError WebmOpusStreamingDecoder::packet_decode_error_to_remux_error(
-    WebmOpusPacketDecodeError error) const {
-  switch (error) {
-    case WebmOpusPacketDecodeError::InvalidCodecPrivate:
-      return WebmRemuxError::InvalidCodecPrivate;
-    case WebmOpusPacketDecodeError::UnsupportedChannels:
-    case WebmOpusPacketDecodeError::UnsupportedMappingFamily:
-    case WebmOpusPacketDecodeError::DecoderCreateFailed:
-    case WebmOpusPacketDecodeError::PacketTooLarge:
-      return WebmRemuxError::UnsupportedFeature;
-    case WebmOpusPacketDecodeError::DecodeFailed:
-      return WebmRemuxError::InvalidBlock;
-    case WebmOpusPacketDecodeError::None:
-      return WebmRemuxError::None;
-  }
-  return WebmRemuxError::InvalidBlock;
+  return direct_path_.snapshot();
 }
 
 bool WebmOpusStreamingDecoder::is_open() const { return decoder_open_; }
 
 bool WebmOpusStreamingDecoder::is_eof() const {
   if (decode_backend_ == WebmDecodeBackend::DirectOpusPacket) {
-    return direct_packets_complete_ && direct_packet_queue_empty();
+    return direct_path_.is_eof();
   }
-  return decoder_open_ && decoder_.is_eof();
+  return decoder_open_ && ogg_decoder_.is_eof();
 }
 
 bool WebmOpusStreamingDecoder::has_failed() const {
   return remux_failed_ ||
          (decode_backend_ == WebmDecodeBackend::OggBridge && decoder_open_ &&
-          decoder_.has_failed()) ||
+          ogg_decoder_.has_failed()) ||
          (decode_backend_ == WebmDecodeBackend::DirectOpusPacket &&
-          packet_decoder_.has_failed());
+          direct_path_.has_failed());
 }
 
 WebmRemuxError WebmOpusStreamingDecoder::remux_error() const {

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "opus_memory_decoder.h"
+#include "webm_decode_types.h"
 #include "webm_opus_streaming_decoder.h"
 #include "webm_seek_types.h"
 
