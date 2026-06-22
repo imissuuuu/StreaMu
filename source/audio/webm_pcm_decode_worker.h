@@ -118,6 +118,7 @@ private:
   int queue_full_count_;
   u64 last_decode_ticks_;
   u64 last_queue_full_log_ms_;
+  u64 last_decode_slow_log_ms_;
   u64 queue_full_wait_ms_;
   u64 queue_full_backoff_ms_;
   uint64_t last_seek_runtime_start_byte_;

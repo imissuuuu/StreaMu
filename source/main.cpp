@@ -44,6 +44,7 @@ static int g_opus_observed_max_decoded_buffers = 0;
 static bool g_opus_observed_decode_failure = false;
 static u64 g_webm_update_pressure_last_log_ms = 0;
 static u64 g_webm_dropout_last_log_ms = 0;
+static u64 g_webm_prebuffer_hold_after_pcm_last_log_ms = 0;
 static int g_webm_dropout_last_queue_level = -1;
 static u64 g_startup_perf_start_ms = 0;
 static int g_webm_seek_trace_seq = 0;
@@ -1045,6 +1046,15 @@ should_log_webm_update_pressure(const OpusPlayerUpdateStats &stats,
   }
   g_webm_update_pressure_last_log_ms = now_ms;
   return true;
+}
+
+static bool should_log_webm_prebuffer_hold_after_pcm(u64 now_ms) {
+  if (g_webm_prebuffer_hold_after_pcm_last_log_ms == 0 ||
+      now_ms >= g_webm_prebuffer_hold_after_pcm_last_log_ms + 500ULL) {
+    g_webm_prebuffer_hold_after_pcm_last_log_ms = now_ms;
+    return true;
+  }
+  return false;
 }
 
 static void
@@ -2289,6 +2299,7 @@ int main(int argc, char *argv[]) {
     g_opus_observed_decode_failure = false;
     g_webm_update_pressure_last_log_ms = 0;
     g_webm_dropout_last_log_ms = 0;
+    g_webm_prebuffer_hold_after_pcm_last_log_ms = 0;
     g_webm_dropout_last_queue_level = -1;
     cleanup_finished_webm_startup_warmup_thread(&ctx, false);
     append_opus_playback_perf_log(OpusPerfEvent::PlaybackRequest, 0);
@@ -4204,7 +4215,8 @@ int main(int argc, char *argv[]) {
       }
       if (use_webm_poc && playback_stage == WebmPlaybackStage::Prebuffering &&
           opus_update_stats.decoded_buffers > 0 &&
-          !controller_decision.release_prebuffer) {
+          !controller_decision.release_prebuffer &&
+          should_log_webm_prebuffer_hold_after_pcm(osGetTime())) {
         append_webm_queue_state_log(
             "prebuffer_hold_after_pcm",
             playback_observer_current_session_kind(), playback_stage,

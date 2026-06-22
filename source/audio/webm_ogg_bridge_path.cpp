@@ -59,7 +59,8 @@ static std::vector<uint8_t> build_opus_tags() {
   return tags;
 }
 
-static std::vector<uint8_t> packet_segments(const std::vector<uint8_t> &packet) {
+static std::vector<uint8_t>
+packet_segments(const std::vector<uint8_t> &packet) {
   std::vector<uint8_t> segments;
   size_t remaining = packet.size();
   while (remaining >= 255U) {
@@ -121,8 +122,7 @@ static bool build_ogg_page_from_packets(
 
 static bool build_ogg_page(const std::vector<uint8_t> &packet,
                            uint8_t header_type, int64_t granule_position,
-                           uint32_t sequence,
-                           std::vector<uint8_t> *page_out) {
+                           uint32_t sequence, std::vector<uint8_t> *page_out) {
   std::vector<WebmOggBridgePath::Packet> packets;
   packets.push_back(WebmOggBridgePath::Packet{packet, granule_position});
   return build_ogg_page_from_packets(packets, header_type, sequence, page_out);
@@ -155,8 +155,20 @@ void WebmOggBridgePath::reset() {
   audio_page_segments_ = 0;
 }
 
-bool WebmOggBridgePath::emit_headers(
-    const std::vector<uint8_t> &codec_private, WebmRemuxError *out_error) {
+void WebmOggBridgePath::release_storage() {
+  audio_page_packets_.clear();
+  std::vector<Packet>().swap(audio_page_packets_);
+  LightLock_Lock(&lock_);
+  std::vector<uint8_t>().swap(buffer_);
+  LightLock_Unlock(&lock_);
+  complete_ = false;
+  sequence_ = 0;
+  audio_page_bytes_ = 0;
+  audio_page_segments_ = 0;
+}
+
+bool WebmOggBridgePath::emit_headers(const std::vector<uint8_t> &codec_private,
+                                     WebmRemuxError *out_error) {
   std::vector<uint8_t> page;
   if (!build_ogg_page(codec_private, 0x02U, 0, sequence_, &page)) {
     set_error(out_error, WebmRemuxError::InvalidCodecPrivate);

@@ -94,6 +94,9 @@ private:
   size_t copy_from_range_segments(uint64_t offset, uint8_t *dst,
                                   size_t length) const;
   uint64_t range_segment_end_for_offset(uint64_t offset) const;
+  size_t cached_range_bytes_locked() const;
+  void trim_range_segments_locked(uint64_t protected_start,
+                                  uint64_t protected_end);
   bool fetch_range_segment(uint64_t offset, size_t min_length,
                            CURL *curl_override = NULL,
                            bool background_prefetch = false);

@@ -17,6 +17,7 @@ static constexpr bool kPreferDirectOpusPacketDecode = true;
 static constexpr size_t kParserRangeInitialSeekChunkBytes = 128U * 1024U;
 static constexpr size_t kParserRangeFetchChunkBytes = 512U * 1024U;
 static constexpr size_t kParserRangeMidplaybackFetchChunkBytes = 64U * 1024U;
+static constexpr size_t kParserRangeMaxCachedBytes = 1024U * 1024U;
 static constexpr long kParserRangeFetchConnectTimeoutMs = 1500L;
 static constexpr long kParserRangeFetchTimeoutMs = 2000L;
 static constexpr long kParserRangeMidplaybackConnectTimeoutMs = 100L;
@@ -177,6 +178,11 @@ static const char *parser_range_fetch_event_name(bool seek_startup_fetch,
   }
   (void)seek_startup_fetch;
   return "parser_range_fetch_done";
+}
+
+static bool ranges_overlap(uint64_t a_start, uint64_t a_end, uint64_t b_start,
+                           uint64_t b_end) {
+  return a_start < b_end && b_start < a_end;
 }
 
 static bool is_transient_parser_range_fetch_failure(CURLcode curl_code,
@@ -533,8 +539,8 @@ void WebmOpusStreamingDecoder::reset() {
   request_cancel();
   cleanup_parser_range_prefetch(true);
   ogg_decoder_.reset();
-  direct_path_.reset();
-  ogg_bridge_.reset();
+  direct_path_.release_storage();
+  ogg_bridge_.release_storage();
   if (nestegg_ctx_) {
     nestegg_destroy(nestegg_ctx_);
     nestegg_ctx_ = NULL;
@@ -570,7 +576,7 @@ void WebmOpusStreamingDecoder::reset() {
   parser_range_prefetch_cancel_ = false;
   parser_range_prefetch_offset_ = 0;
   parser_prefetch_offset_ = 0;
-  range_segments_.clear();
+  std::vector<RangeSegment>().swap(range_segments_);
   pcm_skip_samples_per_channel_ = 0;
   first_emitted_packet_tstamp_ms_ = -1;
   pcm_skip_logged_ = false;
@@ -683,6 +689,102 @@ void WebmOpusStreamingDecoder::merge_range_segments_locked() {
   }
   merged.push_back(std::move(current));
   range_segments_.swap(merged);
+}
+
+size_t WebmOpusStreamingDecoder::cached_range_bytes_locked() const {
+  size_t total = 0U;
+  for (size_t i = 0; i < range_segments_.size(); ++i) {
+    total += range_segments_[i].data.size();
+  }
+  return total;
+}
+
+void WebmOpusStreamingDecoder::trim_range_segments_locked(
+    uint64_t protected_start, uint64_t protected_end) {
+  size_t cached_bytes = cached_range_bytes_locked();
+  if (cached_bytes <= kParserRangeMaxCachedBytes) {
+    return;
+  }
+
+  const bool has_protected_range = protected_start < protected_end;
+  const uint64_t current_offset =
+      stream_source_.offset > 0 ? static_cast<uint64_t>(stream_source_.offset)
+                                : 0U;
+  bool removed_any = false;
+  while (cached_bytes > kParserRangeMaxCachedBytes) {
+    size_t remove_index = range_segments_.size();
+    for (size_t i = 0; i < range_segments_.size(); ++i) {
+      const RangeSegment &segment = range_segments_[i];
+      const uint64_t seg_start = segment.start;
+      const uint64_t seg_end = seg_start + segment.data.size();
+      const bool protects_fetch =
+          has_protected_range &&
+          ranges_overlap(seg_start, seg_end, protected_start, protected_end);
+      const bool protects_reader =
+          current_offset >= seg_start && current_offset < seg_end;
+      if (!protects_fetch && !protects_reader) {
+        remove_index = i;
+        break;
+      }
+    }
+    if (remove_index >= range_segments_.size()) {
+      bool trimmed_prefix = false;
+      for (size_t i = 0; i < range_segments_.size(); ++i) {
+        RangeSegment &segment = range_segments_[i];
+        const uint64_t seg_start = segment.start;
+        const uint64_t seg_end = seg_start + segment.data.size();
+        uint64_t earliest_keep = seg_end;
+        if (has_protected_range &&
+            ranges_overlap(seg_start, seg_end, protected_start,
+                           protected_end)) {
+          const uint64_t overlap_start =
+              protected_start > seg_start ? protected_start : seg_start;
+          if (overlap_start < earliest_keep) {
+            earliest_keep = overlap_start;
+          }
+        }
+        if (current_offset >= seg_start && current_offset < seg_end &&
+            current_offset < earliest_keep) {
+          earliest_keep = current_offset;
+        }
+        if (earliest_keep <= seg_start || earliest_keep >= seg_end) {
+          continue;
+        }
+        size_t trim_bytes = static_cast<size_t>(earliest_keep - seg_start);
+        const size_t excess_bytes = cached_bytes - kParserRangeMaxCachedBytes;
+        if (trim_bytes > excess_bytes) {
+          trim_bytes = excess_bytes;
+        }
+        if (trim_bytes == 0U || trim_bytes >= segment.data.size()) {
+          continue;
+        }
+        std::vector<uint8_t> trimmed(segment.data.begin() + trim_bytes,
+                                     segment.data.end());
+        segment.start += trim_bytes;
+        segment.data.swap(trimmed);
+        cached_bytes -= trim_bytes;
+        removed_any = true;
+        trimmed_prefix = true;
+        break;
+      }
+      if (!trimmed_prefix) {
+        break;
+      }
+      continue;
+    }
+    cached_bytes -= range_segments_[remove_index].data.size();
+    range_segments_.erase(range_segments_.begin() + remove_index);
+    removed_any = true;
+  }
+
+  if (removed_any) {
+    std::vector<RangeSegment> compacted;
+    compacted.reserve(range_segments_.size());
+    for (size_t i = 0; i < range_segments_.size(); ++i) {
+      compacted.push_back(std::move(range_segments_[i]));
+    }
+    range_segments_.swap(compacted);
+  }
 }
 
 void WebmOpusStreamingDecoder::parser_range_prefetch_thread(void *user_data) {
@@ -975,8 +1077,9 @@ bool WebmOpusStreamingDecoder::fetch_range_segment(uint64_t offset,
     RangeSegment segment = {};
     segment.start = fetch_start;
     segment.data.swap(fetched);
-    range_segments_.push_back(segment);
+    range_segments_.push_back(std::move(segment));
     merge_range_segments_locked();
+    trim_range_segments_locked(fetch_start, received_end);
   }
   if (stream_source_.filesize > 0U && received_end >= stream_source_.filesize &&
       stream_source_.download_complete) {
@@ -1003,7 +1106,9 @@ void WebmOpusStreamingDecoder::seed_initial_range_segment() {
     RangeSegment segment = {};
     segment.start = 0;
     segment.data = *stream_source_.buffer;
-    range_segments_.push_back(segment);
+    const uint64_t seed_end = segment.data.size();
+    range_segments_.push_back(std::move(segment));
+    trim_range_segments_locked(0, seed_end);
   }
   LightLock_Unlock(stream_source_.lock);
 }
@@ -1119,6 +1224,7 @@ bool WebmOpusStreamingDecoder::choose_decode_backend() {
   if (direct_open.status == WebmDirectPathOpenStatus::Ready) {
     decode_backend_ = WebmDecodeBackend::DirectOpusPacket;
     decoder_open_ = true;
+    ogg_bridge_.release_storage();
     logged_headers_ = true;
     if (!logged_decoder_open_) {
       logged_decoder_open_ = true;
@@ -1135,6 +1241,7 @@ bool WebmOpusStreamingDecoder::choose_decode_backend() {
   }
 
   decode_backend_ = WebmDecodeBackend::OggBridge;
+  direct_path_.release_storage();
   if (!ogg_bridge_.emit_headers(codec_private_, &last_error_)) {
     return false;
   }

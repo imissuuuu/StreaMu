@@ -20,6 +20,7 @@ public:
   ~WebmOggBridgePath();
 
   void reset();
+  void release_storage();
   bool emit_headers(const std::vector<uint8_t> &codec_private,
                     WebmRemuxError *out_error);
   bool emit_packet(const unsigned char *data, size_t length,

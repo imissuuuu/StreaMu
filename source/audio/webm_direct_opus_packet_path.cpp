@@ -44,6 +44,15 @@ void WebmDirectOpusPacketPath::reset() {
   error_ = WebmRemuxError::None;
 }
 
+void WebmDirectOpusPacketPath::release_storage() {
+  decoder_.reset();
+  std::vector<Packet>().swap(queue_);
+  read_index_ = 0;
+  complete_ = false;
+  failed_ = false;
+  error_ = WebmRemuxError::None;
+}
+
 bool WebmDirectOpusPacketPath::is_open() const {
   return decoder_.is_open() && !failed_;
 }
@@ -52,9 +61,7 @@ bool WebmDirectOpusPacketPath::has_failed() const { return failed_; }
 
 WebmRemuxError WebmDirectOpusPacketPath::error() const { return error_; }
 
-bool WebmDirectOpusPacketPath::is_eof() const {
-  return complete_ && empty();
-}
+bool WebmDirectOpusPacketPath::is_eof() const { return complete_ && empty(); }
 
 bool WebmDirectOpusPacketPath::queue_full() const {
   return active_count() >= kQueueLimit;
@@ -170,9 +177,7 @@ size_t WebmDirectOpusPacketPath::active_count() const {
   return queue_.size() - read_index_;
 }
 
-bool WebmDirectOpusPacketPath::empty() const {
-  return active_count() == 0U;
-}
+bool WebmDirectOpusPacketPath::empty() const { return active_count() == 0U; }
 
 void WebmDirectOpusPacketPath::compact_if_needed() {
   if (read_index_ == 0U) {
@@ -199,8 +204,8 @@ void WebmDirectOpusPacketPath::mark_failed(WebmRemuxError error) {
   error_ = error == WebmRemuxError::None ? WebmRemuxError::InvalidBlock : error;
 }
 
-WebmRemuxError WebmDirectOpusPacketPath::map_packet_error(
-    WebmOpusPacketDecodeError error) {
+WebmRemuxError
+WebmDirectOpusPacketPath::map_packet_error(WebmOpusPacketDecodeError error) {
   switch (error) {
     case WebmOpusPacketDecodeError::InvalidCodecPrivate:
       return WebmRemuxError::InvalidCodecPrivate;

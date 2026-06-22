@@ -34,7 +34,8 @@ WebmPcmDecodeWorker::WebmPcmDecodeWorker()
       write_index_(0), queued_chunks_(0), packet_queued_(0),
       packet_read_index_(0), packet_complete_(false), produced_chunks_(0),
       consumed_chunks_(0), queue_full_count_(0), last_decode_ticks_(0),
-      last_queue_full_log_ms_(0), queue_full_wait_ms_(0),
+      last_queue_full_log_ms_(0), last_decode_slow_log_ms_(0),
+      queue_full_wait_ms_(0),
       queue_full_backoff_ms_(kWebmWorkerQueueFullInitialSleepMs),
       last_seek_runtime_start_byte_(0), last_seek_runtime_timecode_ms_(-1),
       decode_scratch_(NULL) {
@@ -110,6 +111,7 @@ bool WebmPcmDecodeWorker::start(const WebmPcmDecodeWorkerConfig &config) {
   queue_full_count_ = 0;
   last_decode_ticks_ = 0;
   last_queue_full_log_ms_ = 0;
+  last_decode_slow_log_ms_ = 0;
   queue_full_wait_ms_ = 0;
   queue_full_backoff_ms_ = kWebmWorkerQueueFullInitialSleepMs;
   last_seek_runtime_start_byte_ = 0;
@@ -191,6 +193,7 @@ void WebmPcmDecodeWorker::stop() {
   queue_full_count_ = 0;
   last_decode_ticks_ = 0;
   last_queue_full_log_ms_ = 0;
+  last_decode_slow_log_ms_ = 0;
   queue_full_wait_ms_ = 0;
   queue_full_backoff_ms_ = kWebmWorkerQueueFullInitialSleepMs;
   last_seek_runtime_start_byte_ = 0;
@@ -343,7 +346,11 @@ void WebmPcmDecodeWorker::run() {
 
     const u64 decode_duration_ms =
         osGetTime() >= decode_start_ms ? osGetTime() - decode_start_ms : 0;
-    if (decode_duration_ms >= kWebmWorkerDecodeSlowMs) {
+    if (decode_duration_ms >= kWebmWorkerDecodeSlowMs &&
+        (last_decode_slow_log_ms_ == 0 ||
+         decode_start_ms >=
+             last_decode_slow_log_ms_ + kWebmWorkerQueueFullLogIntervalMs)) {
+      last_decode_slow_log_ms_ = decode_start_ms;
       append_worker_log("worker_decode_slow", snapshot());
     }
 

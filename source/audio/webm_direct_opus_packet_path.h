@@ -36,6 +36,7 @@ public:
   WebmDirectPathOpenResult open(const uint8_t *codec_private,
                                 size_t codec_private_size);
   void reset();
+  void release_storage();
   bool is_open() const;
   bool has_failed() const;
   WebmRemuxError error() const;
