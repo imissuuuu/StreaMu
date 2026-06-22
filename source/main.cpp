@@ -43,6 +43,8 @@ static u64 g_opus_last_frame_observe_ms = 0;
 static int g_opus_observed_max_decoded_buffers = 0;
 static bool g_opus_observed_decode_failure = false;
 static u64 g_webm_update_pressure_last_log_ms = 0;
+static u64 g_webm_dropout_last_log_ms = 0;
+static int g_webm_dropout_last_queue_level = -1;
 static u64 g_startup_perf_start_ms = 0;
 static int g_webm_seek_trace_seq = 0;
 static const uint64_t kWebmSeekPlanPrerollMs = 80;
@@ -50,6 +52,7 @@ static const uint64_t kWebmSeekHeaderProbeSizeBytes = 512ULL * 1024ULL;
 static const uint64_t kWebmSeekProbeSizeBytes = 512ULL * 1024ULL;
 static const uint64_t kWebmParserInitialSeedBytes = 128ULL * 1024ULL;
 static const u64 kWebmSlowUpdateTicks = 9500000ULL;
+static const u64 kWebmDropoutTelemetryIntervalMs = 250ULL;
 
 static uint64_t backtrack_bytes_for_retry(int retry_count);
 
@@ -840,6 +843,151 @@ static void append_webm_update_pressure_log(
   fclose(f);
 }
 
+struct WebmDropoutTelemetry {
+  bool thumbnail_loading = false;
+  bool thumbnail_ready = false;
+  bool thumbnail_pending = false;
+  NonAudioInterferenceReason thumbnail_fetch_reason =
+      NonAudioInterferenceReason::None;
+  NonAudioInterferenceReason thumbnail_upload_reason =
+      NonAudioInterferenceReason::None;
+  u64 thumbnail_track_wait_ms = 0;
+  u64 thumbnail_upload_wait_ms = 0;
+};
+
+static WebmDropoutTelemetry
+make_webm_dropout_telemetry(const AppContext &context, u64 now_ms) {
+  WebmDropoutTelemetry telemetry = {};
+  telemetry.thumbnail_loading = context.thumbnail_loading;
+  telemetry.thumbnail_ready = context.thumbnail_ready;
+  telemetry.thumbnail_pending = !context.playing_id.empty() &&
+                                context.playing_id != context.thumbnail_vid_id;
+  telemetry.thumbnail_fetch_reason = context.thumbnail_fetch_defer_reason;
+  telemetry.thumbnail_upload_reason = context.thumbnail_upload_defer_reason;
+  if (context.thumbnail_track_change_detected_at_ms > 0 &&
+      now_ms >= context.thumbnail_track_change_detected_at_ms) {
+    telemetry.thumbnail_track_wait_ms =
+        now_ms - context.thumbnail_track_change_detected_at_ms;
+  }
+  if (context.thumbnail_fetch_started_at_ms > 0 &&
+      now_ms >= context.thumbnail_fetch_started_at_ms) {
+    telemetry.thumbnail_upload_wait_ms =
+        now_ms - context.thumbnail_fetch_started_at_ms;
+  }
+  return telemetry;
+}
+
+static void append_webm_dropout_telemetry_log(
+    const char *event, PlaybackSessionKind session_kind,
+    WebmPlaybackStage stage, const WebmPlaybackControllerInput &input,
+    const OpusPlayerUpdateStats &stats,
+    const WebmPcmWorkerSnapshot &worker_snapshot_before_update,
+    const WebmPcmWorkerSnapshot &worker_snapshot_after_update,
+    const WebmDropoutTelemetry &telemetry, bool seek_active) {
+  if (!event) {
+    return;
+  }
+  FILE *f = fopen("sdmc:/3ds/StreaMu/webm_perf.log", "a");
+  if (!f) {
+    return;
+  }
+  const u64 now_ms = osGetTime();
+  const u64 elapsed_ms = now_ms >= g_opus_playback_perf_start_ms
+                             ? now_ms - g_opus_playback_perf_start_ms
+                             : 0;
+  fprintf(
+      f,
+      "[webm-dropout] +%llums %s kind=%s stage=%s seek_active=%d "
+      "queued_before=%d queued_after=%d free_before=%d free_after=%d "
+      "decoded=%d target=%d max_decode=%d decode_ticks=%llu bytes=%lu "
+      "complete=%d pre_worker_queued=%d pre_worker_produced=%d "
+      "pre_worker_consumed=%d pre_worker_full=%d pre_worker_eof=%d "
+      "post_worker_queued=%d post_worker_produced=%d "
+      "post_worker_consumed=%d post_worker_full=%d post_worker_failed=%d "
+      "post_worker_eof=%d "
+      "thumb_loading=%d thumb_ready=%d thumb_pending=%d "
+      "thumb_fetch_reason=%s thumb_upload_reason=%s "
+      "thumb_track_wait_ms=%llu thumb_upload_wait_ms=%llu\n",
+      static_cast<unsigned long long>(elapsed_ms), event,
+      playback_session_kind_name(session_kind), webm_stage_name_for_log(stage),
+      seek_active ? 1 : 0, stats.queued_before_update,
+      stats.queued_after_update, stats.free_before_update,
+      stats.free_after_update, stats.decoded_buffers,
+      stats.target_queued_wavebufs, stats.max_decode_buffers,
+      static_cast<unsigned long long>(stats.decode_ticks),
+      static_cast<unsigned long>(input.stream_buffer_bytes),
+      input.download_complete ? 1 : 0,
+      worker_snapshot_before_update.queued_chunks,
+      worker_snapshot_before_update.produced_chunks,
+      worker_snapshot_before_update.consumed_chunks,
+      worker_snapshot_before_update.queue_full_count,
+      worker_snapshot_before_update.eof ? 1 : 0,
+      worker_snapshot_after_update.queued_chunks,
+      worker_snapshot_after_update.produced_chunks,
+      worker_snapshot_after_update.consumed_chunks,
+      worker_snapshot_after_update.queue_full_count,
+      worker_snapshot_after_update.failed ? 1 : 0,
+      worker_snapshot_after_update.eof ? 1 : 0,
+      telemetry.thumbnail_loading ? 1 : 0, telemetry.thumbnail_ready ? 1 : 0,
+      telemetry.thumbnail_pending ? 1 : 0,
+      non_audio_interference_reason_name(telemetry.thumbnail_fetch_reason),
+      non_audio_interference_reason_name(telemetry.thumbnail_upload_reason),
+      static_cast<unsigned long long>(telemetry.thumbnail_track_wait_ms),
+      static_cast<unsigned long long>(telemetry.thumbnail_upload_wait_ms));
+  fclose(f);
+}
+
+static bool
+is_webm_end_drain_low_queue(const WebmPlaybackControllerInput &input,
+                            const WebmPcmWorkerSnapshot &worker_snapshot) {
+  if (!input.download_complete) {
+    return false;
+  }
+  if (worker_snapshot.eof) {
+    return true;
+  }
+  return worker_snapshot.queued_chunks == 0 &&
+         worker_snapshot.produced_chunks == worker_snapshot.consumed_chunks;
+}
+
+static bool should_log_webm_dropout_telemetry(
+    WebmPlaybackStage stage, const WebmPlaybackControllerInput &input,
+    const OpusPlayerUpdateStats &stats,
+    const WebmPcmWorkerSnapshot &worker_snapshot, bool user_paused, u64 now_ms,
+    const char **out_event) {
+  if (out_event) {
+    *out_event = NULL;
+  }
+  const bool low_queue = stage == WebmPlaybackStage::Steady &&
+                         input.has_started_playing && !user_paused &&
+                         stats.queued_after_update <= 2;
+  if (!low_queue) {
+    g_webm_dropout_last_queue_level = -1;
+    return false;
+  }
+  if (is_webm_end_drain_low_queue(input, worker_snapshot)) {
+    g_webm_dropout_last_queue_level = -1;
+    return false;
+  }
+  const bool queue_level_changed =
+      g_webm_dropout_last_queue_level != stats.queued_after_update;
+  const bool interval_elapsed =
+      g_webm_dropout_last_log_ms == 0 ||
+      now_ms >= g_webm_dropout_last_log_ms + kWebmDropoutTelemetryIntervalMs;
+  if (!queue_level_changed && !interval_elapsed) {
+    return false;
+  }
+  g_webm_dropout_last_queue_level = stats.queued_after_update;
+  g_webm_dropout_last_log_ms = now_ms;
+  if (out_event) {
+    const bool worker_pcm_dry = stats.decoded_buffers == 0 &&
+                                worker_snapshot.queued_chunks == 0 &&
+                                !worker_snapshot.failed && !worker_snapshot.eof;
+    *out_event = worker_pcm_dry ? "worker_pcm_dry" : "low_queue";
+  }
+  return true;
+}
+
 static bool
 should_log_webm_update_pressure(const OpusPlayerUpdateStats &stats,
                                 const WebmPlaybackControllerInput &input,
@@ -1338,6 +1486,9 @@ static void thumbnail_dl_thread(void *arg) {
   if (!api || vid_id.empty()) {
     LightLock_Lock(&c->lock);
     c->thumbnail_loading = false;
+    if (!vid_id.empty() && c->thumbnail_vid_id == vid_id) {
+      c->thumbnail_vid_id.clear();
+    }
     c->thumbnail_fetch_started_at_ms = 0;
     LightLock_Unlock(&c->lock);
     return;
@@ -1374,6 +1525,9 @@ static void thumbnail_dl_thread(void *arg) {
 
   LightLock_Lock(&c->lock);
   c->thumbnail_loading = false;
+  if (!vid_id.empty() && c->thumbnail_vid_id == vid_id) {
+    c->thumbnail_vid_id.clear();
+  }
   c->thumbnail_fetch_started_at_ms = 0;
   LightLock_Unlock(&c->lock);
 }
@@ -2104,6 +2258,8 @@ int main(int argc, char *argv[]) {
     g_opus_observed_max_decoded_buffers = 0;
     g_opus_observed_decode_failure = false;
     g_webm_update_pressure_last_log_ms = 0;
+    g_webm_dropout_last_log_ms = 0;
+    g_webm_dropout_last_queue_level = -1;
     cleanup_finished_webm_startup_warmup_thread(&ctx, false);
     append_opus_playback_perf_log(OpusPerfEvent::PlaybackRequest, 0);
 
@@ -3769,6 +3925,7 @@ int main(int argc, char *argv[]) {
     PlaybackCoreSnapshot core_snapshot = {};
     WebmPlaybackControllerInput controller_input = {};
     WebmPlaybackControllerDecision controller_decision = {};
+    WebmDropoutTelemetry dropout_telemetry = {};
     LightLock_Lock(&ctx.lock);
     const bool opus_decode_pending =
         ctx.webm_playback_stage == WebmPlaybackStage::WaitingForDecoderStart &&
@@ -3902,9 +4059,11 @@ int main(int argc, char *argv[]) {
     }
 
     OpusPlayerUpdateStats opus_update_stats = {};
+    WebmPcmWorkerSnapshot webm_worker_snapshot_before_update = {};
     WebmPcmWorkerSnapshot webm_worker_snapshot = {};
     const bool use_opus_poc_for_update = OpusPocPlayer::is_playing;
     if (use_opus_poc_for_update) {
+      webm_worker_snapshot_before_update = opus_player.webm_worker_snapshot();
       opus_update_stats = opus_player.update_with_stats();
       webm_worker_snapshot = opus_player.webm_worker_snapshot();
       if (opus_update_stats.decoded_buffers >
@@ -3946,6 +4105,7 @@ int main(int argc, char *argv[]) {
       controller_input =
           make_webm_controller_input(collect_playback_core_snapshot(),
                                      opus_update_stats, opus_player, ctx);
+      dropout_telemetry = make_webm_dropout_telemetry(ctx, osGetTime());
       LightLock_Unlock(&ctx.lock);
       const WebmPlaybackControllerConfig controller_config =
           controller_config_for_seek(seek_active);
@@ -3968,6 +4128,18 @@ int main(int argc, char *argv[]) {
             playback_observer_current_session_kind(), playback_stage,
             controller_input, controller_decision, opus_update_stats,
             seek_active, controller_input.user_paused);
+      }
+      const char *webm_dropout_event = NULL;
+      if (use_webm_poc &&
+          should_log_webm_dropout_telemetry(
+              playback_stage, controller_input, opus_update_stats,
+              webm_worker_snapshot, controller_input.user_paused, osGetTime(),
+              &webm_dropout_event)) {
+        append_webm_dropout_telemetry_log(
+            webm_dropout_event, playback_observer_current_session_kind(),
+            playback_stage, controller_input, opus_update_stats,
+            webm_worker_snapshot_before_update, webm_worker_snapshot,
+            dropout_telemetry, seek_active);
       }
       LightLock_Lock(&ctx.lock);
       if (use_webm_poc) {

@@ -2,7 +2,6 @@
 
 namespace {
 
-static constexpr size_t kThumbnailFetchSafeBufferBytes = 192U * 1024U;
 static constexpr int kThumbnailFetchSafeQueuedWavebufs = 5;
 static constexpr int kThumbnailUploadSafeQueuedWavebufs = 6;
 
@@ -64,12 +63,11 @@ evaluate_thumbnail_fetch_interference(const NonAudioInterferenceInput &input) {
       break;
   }
 
+  if (!input.audio_started) {
+    return {true, NonAudioInterferenceReason::AudioNotStarted};
+  }
   if (input.queued_wavebufs < kThumbnailFetchSafeQueuedWavebufs) {
     return {true, NonAudioInterferenceReason::QueueBelowFetchTarget};
-  }
-  if (!input.download_complete &&
-      input.stream_buffer_bytes < kThumbnailFetchSafeBufferBytes) {
-    return {true, NonAudioInterferenceReason::BytesBelowFetchTarget};
   }
   return {false, NonAudioInterferenceReason::None};
 }
