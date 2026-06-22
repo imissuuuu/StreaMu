@@ -764,6 +764,21 @@ make_webm_controller_input(const PlaybackCoreSnapshot &core_snapshot,
   return input;
 }
 
+static WebmPipelinePressureStage
+classify_webm_pipeline_pressure(const WebmPcmWorkerSnapshot &worker_snapshot,
+                                const OpusPlayerUpdateStats &stats) {
+  if (worker_snapshot.queued_chunks == 0 && stats.decoded_buffers == 0 &&
+      !worker_snapshot.failed && !worker_snapshot.eof) {
+    return worker_snapshot.packet_queued == 0
+               ? WebmPipelinePressureStage::PacketQueue
+               : WebmPipelinePressureStage::PcmQueue;
+  }
+  if (stats.queued_after_update <= 2) {
+    return WebmPipelinePressureStage::WavebufQueue;
+  }
+  return WebmPipelinePressureStage::None;
+}
+
 static void
 append_webm_queue_state_log(const char *event, PlaybackSessionKind session_kind,
                             WebmPlaybackStage stage,
@@ -783,13 +798,16 @@ append_webm_queue_state_log(const char *event, PlaybackSessionKind session_kind,
   const u64 elapsed_ms = now_ms >= g_opus_playback_perf_start_ms
                              ? now_ms - g_opus_playback_perf_start_ms
                              : 0;
+  const WebmPipelinePressureStage pressure =
+      classify_webm_pipeline_pressure(worker_snapshot, stats);
   fprintf(f,
           "[webm-queue] +%llums %s kind=%s stage=%d seek_active=%d "
           "queued_before=%d queued_after=%d free_before=%d free_after=%d "
           "decoded=%d target=%d max_decode=%d release=%d keep_paused=%d "
-          "user_paused=%d has_started=%d hold=%s worker_queued=%d "
-          "worker_produced=%d worker_consumed=%d worker_full=%d "
-          "worker_failed=%d worker_eof=%d\n",
+          "user_paused=%d has_started=%d hold=%s pressure=%s "
+          "packet_queued=%lu packet_complete=%d worker_queued=%d "
+          "worker_capacity=%d worker_produced=%d worker_consumed=%d "
+          "worker_full=%d worker_failed=%d worker_eof=%d\n",
           static_cast<unsigned long long>(elapsed_ms), event,
           playback_session_kind_name(session_kind), static_cast<int>(stage),
           seek_active ? 1 : 0, stats.queued_before_update,
@@ -799,9 +817,13 @@ append_webm_queue_state_log(const char *event, PlaybackSessionKind session_kind,
           decision.release_prebuffer ? 1 : 0, decision.keep_ndsp_paused ? 1 : 0,
           user_paused ? 1 : 0, input.has_started_playing ? 1 : 0,
           webm_prebuffer_hold_reason_name(decision.hold_reason),
-          worker_snapshot.queued_chunks, worker_snapshot.produced_chunks,
-          worker_snapshot.consumed_chunks, worker_snapshot.queue_full_count,
-          worker_snapshot.failed ? 1 : 0, worker_snapshot.eof ? 1 : 0);
+          webm_pipeline_pressure_stage_name(pressure),
+          static_cast<unsigned long>(worker_snapshot.packet_queued),
+          worker_snapshot.packet_complete ? 1 : 0,
+          worker_snapshot.queued_chunks, worker_snapshot.queue_capacity,
+          worker_snapshot.produced_chunks, worker_snapshot.consumed_chunks,
+          worker_snapshot.queue_full_count, worker_snapshot.failed ? 1 : 0,
+          worker_snapshot.eof ? 1 : 0);
   fclose(f);
 }
 
@@ -895,16 +917,19 @@ static void append_webm_dropout_telemetry_log(
   const u64 elapsed_ms = now_ms >= g_opus_playback_perf_start_ms
                              ? now_ms - g_opus_playback_perf_start_ms
                              : 0;
+  const WebmPipelinePressureStage pressure =
+      classify_webm_pipeline_pressure(worker_snapshot_after_update, stats);
   fprintf(
       f,
       "[webm-dropout] +%llums %s kind=%s stage=%s seek_active=%d "
       "queued_before=%d queued_after=%d free_before=%d free_after=%d "
       "decoded=%d target=%d max_decode=%d decode_ticks=%llu bytes=%lu "
-      "complete=%d pre_worker_queued=%d pre_worker_produced=%d "
+      "complete=%d pressure=%s pre_packet_queued=%lu "
+      "pre_packet_complete=%d pre_worker_queued=%d pre_worker_produced=%d "
       "pre_worker_consumed=%d pre_worker_full=%d pre_worker_eof=%d "
-      "post_worker_queued=%d post_worker_produced=%d "
-      "post_worker_consumed=%d post_worker_full=%d post_worker_failed=%d "
-      "post_worker_eof=%d "
+      "post_packet_queued=%lu post_packet_complete=%d post_worker_queued=%d "
+      "post_worker_produced=%d post_worker_consumed=%d post_worker_full=%d "
+      "post_worker_failed=%d post_worker_eof=%d "
       "thumb_loading=%d thumb_ready=%d thumb_pending=%d "
       "thumb_fetch_reason=%s thumb_upload_reason=%s "
       "thumb_track_wait_ms=%llu thumb_upload_wait_ms=%llu\n",
@@ -917,11 +942,16 @@ static void append_webm_dropout_telemetry_log(
       static_cast<unsigned long long>(stats.decode_ticks),
       static_cast<unsigned long>(input.stream_buffer_bytes),
       input.download_complete ? 1 : 0,
+      webm_pipeline_pressure_stage_name(pressure),
+      static_cast<unsigned long>(worker_snapshot_before_update.packet_queued),
+      worker_snapshot_before_update.packet_complete ? 1 : 0,
       worker_snapshot_before_update.queued_chunks,
       worker_snapshot_before_update.produced_chunks,
       worker_snapshot_before_update.consumed_chunks,
       worker_snapshot_before_update.queue_full_count,
       worker_snapshot_before_update.eof ? 1 : 0,
+      static_cast<unsigned long>(worker_snapshot_after_update.packet_queued),
+      worker_snapshot_after_update.packet_complete ? 1 : 0,
       worker_snapshot_after_update.queued_chunks,
       worker_snapshot_after_update.produced_chunks,
       worker_snapshot_after_update.consumed_chunks,

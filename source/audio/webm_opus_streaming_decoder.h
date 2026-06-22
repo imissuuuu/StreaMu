@@ -34,6 +34,12 @@ enum class WebmDecodeBackend {
   DirectOpusPacket,
 };
 
+struct WebmDirectPacketQueueSnapshot {
+  size_t queued_packets = 0;
+  size_t read_index = 0;
+  bool complete = false;
+};
+
 class WebmOpusStreamingDecoder {
 public:
   struct OggPagePacket {
@@ -58,6 +64,7 @@ public:
   bool is_eof() const;
   bool has_failed() const;
   WebmRemuxError remux_error() const;
+  WebmDirectPacketQueueSnapshot direct_packet_queue_snapshot() const;
   bool get_last_seek_runtime_point(uint64_t *out_start_byte,
                                    int *out_timecode_ms) const;
 

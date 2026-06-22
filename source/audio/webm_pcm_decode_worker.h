@@ -26,18 +26,31 @@ struct WebmPcmDecodeWorkerConfig {
   u64 perf_start_ms = 0;
 };
 
+enum class WebmPipelinePressureStage {
+  None,
+  PacketQueue,
+  PcmQueue,
+  WavebufQueue,
+};
+
 struct WebmPcmWorkerSnapshot {
   bool running = false;
   bool failed = false;
   bool eof = false;
   WebmRemuxError error = WebmRemuxError::None;
+  size_t packet_queued = 0;
+  size_t packet_read_index = 0;
+  bool packet_complete = false;
   int queued_chunks = 0;
+  int queue_capacity = 0;
   int produced_chunks = 0;
   int consumed_chunks = 0;
   int queue_full_count = 0;
   u64 last_decode_ticks = 0;
   u64 queue_full_wait_ms = 0;
 };
+
+const char *webm_pipeline_pressure_stage_name(WebmPipelinePressureStage stage);
 
 class WebmPcmDecodeWorker {
 public:
@@ -75,6 +88,8 @@ private:
   void clear_queue_locked();
   u64 next_queue_full_sleep_ms_locked();
   void reset_queue_full_backoff_locked();
+  void cache_direct_packet_snapshot_locked(
+      const WebmDirectPacketQueueSnapshot &snapshot);
   void append_worker_log(const char *event,
                          const WebmPcmWorkerSnapshot &snapshot) const;
   void mark_failed(WebmRemuxError error);
@@ -94,6 +109,9 @@ private:
   int read_index_;
   int write_index_;
   int queued_chunks_;
+  size_t packet_queued_;
+  size_t packet_read_index_;
+  bool packet_complete_;
   int produced_chunks_;
   int consumed_chunks_;
   int queue_full_count_;

@@ -1915,6 +1915,15 @@ bool WebmOpusStreamingDecoder::direct_packet_queue_full() const {
   return direct_packet_queue_active_count() >= kDirectOpusPacketQueueLimit;
 }
 
+WebmDirectPacketQueueSnapshot
+WebmOpusStreamingDecoder::direct_packet_queue_snapshot() const {
+  WebmDirectPacketQueueSnapshot snapshot = {};
+  snapshot.queued_packets = direct_packet_queue_active_count();
+  snapshot.read_index = direct_packet_read_index_;
+  snapshot.complete = direct_packets_complete_;
+  return snapshot;
+}
+
 bool WebmOpusStreamingDecoder::push_direct_packet(DirectOpusPacket *packet) {
   if (!packet || packet->data.empty()) {
     return false;

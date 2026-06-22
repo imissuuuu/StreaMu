@@ -31,7 +31,8 @@ static u64 elapsed_ms_since(u64 start_ms) {
 WebmPcmDecodeWorker::WebmPcmDecodeWorker()
     : thread_(NULL), running_(false), stop_requested_(false), failed_(false),
       eof_(false), error_(WebmRemuxError::None), read_index_(0),
-      write_index_(0), queued_chunks_(0), produced_chunks_(0),
+      write_index_(0), queued_chunks_(0), packet_queued_(0),
+      packet_read_index_(0), packet_complete_(false), produced_chunks_(0),
       consumed_chunks_(0), queue_full_count_(0), last_decode_ticks_(0),
       last_queue_full_log_ms_(0), queue_full_wait_ms_(0),
       queue_full_backoff_ms_(kWebmWorkerQueueFullInitialSleepMs),
@@ -103,6 +104,7 @@ bool WebmPcmDecodeWorker::start(const WebmPcmDecodeWorkerConfig &config) {
   eof_ = false;
   error_ = WebmRemuxError::None;
   clear_queue_locked();
+  cache_direct_packet_snapshot_locked(WebmDirectPacketQueueSnapshot{});
   produced_chunks_ = 0;
   consumed_chunks_ = 0;
   queue_full_count_ = 0;
@@ -166,7 +168,11 @@ void WebmPcmDecodeWorker::stop() {
     stop_snapshot.failed = failed_;
     stop_snapshot.eof = eof_;
     stop_snapshot.error = error_;
+    stop_snapshot.packet_queued = packet_queued_;
+    stop_snapshot.packet_read_index = packet_read_index_;
+    stop_snapshot.packet_complete = packet_complete_;
     stop_snapshot.queued_chunks = queued_chunks_;
+    stop_snapshot.queue_capacity = kQueueCapacity;
     stop_snapshot.produced_chunks = produced_chunks_;
     stop_snapshot.consumed_chunks = consumed_chunks_;
     stop_snapshot.queue_full_count = queue_full_count_;
@@ -251,7 +257,11 @@ WebmPcmWorkerSnapshot WebmPcmDecodeWorker::snapshot() const {
   value.failed = failed_;
   value.eof = eof_;
   value.error = error_;
+  value.packet_queued = packet_queued_;
+  value.packet_read_index = packet_read_index_;
+  value.packet_complete = packet_complete_;
   value.queued_chunks = queued_chunks_;
+  value.queue_capacity = kQueueCapacity;
   value.produced_chunks = produced_chunks_;
   value.consumed_chunks = consumed_chunks_;
   value.queue_full_count = queue_full_count_;
@@ -320,11 +330,14 @@ void WebmPcmDecodeWorker::run() {
     const u64 decode_start_ms = osGetTime();
     OpusDecodeResult decoded =
         decoder_.decode(decode_scratch_, kWebmPcmCapacitySamples);
+    const WebmDirectPacketQueueSnapshot packet_snapshot =
+        decoder_.direct_packet_queue_snapshot();
     const u64 decode_end_ticks = svcGetSystemTick();
     const u64 decode_ticks = decode_end_ticks >= decode_start_ticks
                                  ? decode_end_ticks - decode_start_ticks
                                  : 0;
     LightLock_Lock(&lock_);
+    cache_direct_packet_snapshot_locked(packet_snapshot);
     last_decode_ticks_ = decode_ticks;
     LightLock_Unlock(&lock_);
 
@@ -414,6 +427,27 @@ void WebmPcmDecodeWorker::reset_queue_full_backoff_locked() {
   queue_full_backoff_ms_ = kWebmWorkerQueueFullInitialSleepMs;
 }
 
+void WebmPcmDecodeWorker::cache_direct_packet_snapshot_locked(
+    const WebmDirectPacketQueueSnapshot &snapshot) {
+  packet_queued_ = snapshot.queued_packets;
+  packet_read_index_ = snapshot.read_index;
+  packet_complete_ = snapshot.complete;
+}
+
+const char *webm_pipeline_pressure_stage_name(WebmPipelinePressureStage stage) {
+  switch (stage) {
+    case WebmPipelinePressureStage::None:
+      return "none";
+    case WebmPipelinePressureStage::PacketQueue:
+      return "packet_queue";
+    case WebmPipelinePressureStage::PcmQueue:
+      return "pcm_queue";
+    case WebmPipelinePressureStage::WavebufQueue:
+      return "wavebuf_queue";
+  }
+  return "unknown";
+}
+
 void WebmPcmDecodeWorker::append_worker_log(
     const char *event, const WebmPcmWorkerSnapshot &state) const {
   if (!event) {
@@ -428,12 +462,13 @@ void WebmPcmDecodeWorker::append_worker_log(
   // occasional line ordering races are acceptable for this hidden telemetry.
   fprintf(
       f,
-      "[webm-worker] +%llums %s queued=%d produced=%d consumed=%d "
-      "full=%d wait_ms=%llu running=%d failed=%d eof=%d error=%d "
-      "decode_ticks=%llu\n",
+      "[webm-worker] +%llums %s packet_queued=%lu packet_complete=%d "
+      "queued=%d capacity=%d produced=%d consumed=%d full=%d wait_ms=%llu "
+      "running=%d failed=%d eof=%d error=%d decode_ticks=%llu\n",
       static_cast<unsigned long long>(elapsed_ms_since(config_.perf_start_ms)),
-      event, state.queued_chunks, state.produced_chunks, state.consumed_chunks,
-      state.queue_full_count,
+      event, static_cast<unsigned long>(state.packet_queued),
+      state.packet_complete ? 1 : 0, state.queued_chunks, state.queue_capacity,
+      state.produced_chunks, state.consumed_chunks, state.queue_full_count,
       static_cast<unsigned long long>(state.queue_full_wait_ms),
       state.running ? 1 : 0, state.failed ? 1 : 0, state.eof ? 1 : 0,
       static_cast<int>(state.error),
