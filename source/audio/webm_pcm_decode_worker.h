@@ -49,6 +49,9 @@ struct WebmPcmWorkerSnapshot {
   int queue_full_count = 0;
   u64 last_decode_ticks = 0;
   u64 queue_full_wait_ms = 0;
+  size_t packet_slot_bytes = 0;
+  size_t packet_max_bytes_seen = 0;
+  int max_decoded_samples_per_channel = 0;
 };
 
 const char *webm_pipeline_pressure_stage_name(WebmPipelinePressureStage stage);
@@ -121,6 +124,9 @@ private:
   u64 last_decode_slow_log_ms_;
   u64 queue_full_wait_ms_;
   u64 queue_full_backoff_ms_;
+  size_t packet_slot_bytes_;
+  size_t packet_max_bytes_seen_;
+  int max_decoded_samples_per_channel_;
   uint64_t last_seek_runtime_start_byte_;
   int last_seek_runtime_timecode_ms_;
   int16_t *decode_scratch_;

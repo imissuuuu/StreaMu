@@ -25,6 +25,8 @@ struct WebmDirectPacketQueueSnapshot {
   size_t queued_packets = 0;
   size_t read_index = 0;
   bool complete = false;
+  size_t packet_slot_bytes = 0;
+  size_t max_packet_bytes_seen = 0;
 };
 
 #endif

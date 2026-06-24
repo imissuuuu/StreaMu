@@ -37,8 +37,9 @@ WebmPcmDecodeWorker::WebmPcmDecodeWorker()
       last_queue_full_log_ms_(0), last_decode_slow_log_ms_(0),
       queue_full_wait_ms_(0),
       queue_full_backoff_ms_(kWebmWorkerQueueFullInitialSleepMs),
-      last_seek_runtime_start_byte_(0), last_seek_runtime_timecode_ms_(-1),
-      decode_scratch_(NULL) {
+      packet_slot_bytes_(0), packet_max_bytes_seen_(0),
+      max_decoded_samples_per_channel_(0), last_seek_runtime_start_byte_(0),
+      last_seek_runtime_timecode_ms_(-1), decode_scratch_(NULL) {
   LightLock_Init(&lock_);
 }
 
@@ -114,6 +115,9 @@ bool WebmPcmDecodeWorker::start(const WebmPcmDecodeWorkerConfig &config) {
   last_decode_slow_log_ms_ = 0;
   queue_full_wait_ms_ = 0;
   queue_full_backoff_ms_ = kWebmWorkerQueueFullInitialSleepMs;
+  packet_slot_bytes_ = 0;
+  packet_max_bytes_seen_ = 0;
+  max_decoded_samples_per_channel_ = 0;
   last_seek_runtime_start_byte_ = 0;
   last_seek_runtime_timecode_ms_ = -1;
   LightLock_Unlock(&lock_);
@@ -180,6 +184,10 @@ void WebmPcmDecodeWorker::stop() {
     stop_snapshot.queue_full_count = queue_full_count_;
     stop_snapshot.last_decode_ticks = last_decode_ticks_;
     stop_snapshot.queue_full_wait_ms = queue_full_wait_ms_;
+    stop_snapshot.packet_slot_bytes = packet_slot_bytes_;
+    stop_snapshot.packet_max_bytes_seen = packet_max_bytes_seen_;
+    stop_snapshot.max_decoded_samples_per_channel =
+        max_decoded_samples_per_channel_;
   }
   thread_ = NULL;
   running_ = false;
@@ -196,6 +204,9 @@ void WebmPcmDecodeWorker::stop() {
   last_decode_slow_log_ms_ = 0;
   queue_full_wait_ms_ = 0;
   queue_full_backoff_ms_ = kWebmWorkerQueueFullInitialSleepMs;
+  packet_slot_bytes_ = 0;
+  packet_max_bytes_seen_ = 0;
+  max_decoded_samples_per_channel_ = 0;
   last_seek_runtime_start_byte_ = 0;
   last_seek_runtime_timecode_ms_ = -1;
   LightLock_Unlock(&lock_);
@@ -270,6 +281,9 @@ WebmPcmWorkerSnapshot WebmPcmDecodeWorker::snapshot() const {
   value.queue_full_count = queue_full_count_;
   value.last_decode_ticks = last_decode_ticks_;
   value.queue_full_wait_ms = queue_full_wait_ms_;
+  value.packet_slot_bytes = packet_slot_bytes_;
+  value.packet_max_bytes_seen = packet_max_bytes_seen_;
+  value.max_decoded_samples_per_channel = max_decoded_samples_per_channel_;
   LightLock_Unlock(&lock_);
   return value;
 }
@@ -342,6 +356,10 @@ void WebmPcmDecodeWorker::run() {
     LightLock_Lock(&lock_);
     cache_direct_packet_snapshot_locked(packet_snapshot);
     last_decode_ticks_ = decode_ticks;
+    if (decoded.ok &&
+        decoded.samples_per_channel > max_decoded_samples_per_channel_) {
+      max_decoded_samples_per_channel_ = decoded.samples_per_channel;
+    }
     LightLock_Unlock(&lock_);
 
     const u64 decode_duration_ms =
@@ -439,6 +457,8 @@ void WebmPcmDecodeWorker::cache_direct_packet_snapshot_locked(
   packet_queued_ = snapshot.queued_packets;
   packet_read_index_ = snapshot.read_index;
   packet_complete_ = snapshot.complete;
+  packet_slot_bytes_ = snapshot.packet_slot_bytes;
+  packet_max_bytes_seen_ = snapshot.max_packet_bytes_seen;
 }
 
 const char *webm_pipeline_pressure_stage_name(WebmPipelinePressureStage stage) {
@@ -471,7 +491,8 @@ void WebmPcmDecodeWorker::append_worker_log(
       f,
       "[webm-worker] +%llums %s packet_queued=%lu packet_complete=%d "
       "queued=%d capacity=%d produced=%d consumed=%d full=%d wait_ms=%llu "
-      "running=%d failed=%d eof=%d error=%d decode_ticks=%llu\n",
+      "running=%d failed=%d eof=%d error=%d decode_ticks=%llu "
+      "packet_slot_bytes=%lu packet_max_bytes=%lu pcm_max_spc=%d\n",
       static_cast<unsigned long long>(elapsed_ms_since(config_.perf_start_ms)),
       event, static_cast<unsigned long>(state.packet_queued),
       state.packet_complete ? 1 : 0, state.queued_chunks, state.queue_capacity,
@@ -479,7 +500,10 @@ void WebmPcmDecodeWorker::append_worker_log(
       static_cast<unsigned long long>(state.queue_full_wait_ms),
       state.running ? 1 : 0, state.failed ? 1 : 0, state.eof ? 1 : 0,
       static_cast<int>(state.error),
-      static_cast<unsigned long long>(state.last_decode_ticks));
+      static_cast<unsigned long long>(state.last_decode_ticks),
+      static_cast<unsigned long>(state.packet_slot_bytes),
+      static_cast<unsigned long>(state.packet_max_bytes_seen),
+      state.max_decoded_samples_per_channel);
   fclose(f);
 }
 

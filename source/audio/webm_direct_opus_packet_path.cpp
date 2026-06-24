@@ -1,13 +1,12 @@
 #include "webm_direct_opus_packet_path.h"
 
 #include <limits.h>
-#include <utility>
+#include <string.h>
 
 WebmDirectOpusPacketPath::WebmDirectOpusPacketPath()
-    : read_index_(0), complete_(false), failed_(false),
-      error_(WebmRemuxError::None) {
-  queue_.reserve(kQueueLimit);
-}
+    : read_index_(0), write_index_(0), queued_count_(0),
+      max_packet_bytes_seen_(0), complete_(false), failed_(false),
+      error_(WebmRemuxError::None) {}
 
 WebmDirectPathOpenResult
 WebmDirectOpusPacketPath::open(const uint8_t *codec_private,
@@ -36,9 +35,12 @@ WebmDirectOpusPacketPath::open(const uint8_t *codec_private,
 
 void WebmDirectOpusPacketPath::reset() {
   decoder_.reset();
-  queue_.clear();
-  queue_.reserve(kQueueLimit);
+  ensure_storage();
+  clear_slots();
   read_index_ = 0;
+  write_index_ = 0;
+  queued_count_ = 0;
+  max_packet_bytes_seen_ = 0;
   complete_ = false;
   failed_ = false;
   error_ = WebmRemuxError::None;
@@ -46,8 +48,12 @@ void WebmDirectOpusPacketPath::reset() {
 
 void WebmDirectOpusPacketPath::release_storage() {
   decoder_.reset();
-  std::vector<Packet>().swap(queue_);
+  std::vector<uint8_t>().swap(packet_storage_);
+  clear_slots();
   read_index_ = 0;
+  write_index_ = 0;
+  queued_count_ = 0;
+  max_packet_bytes_seen_ = 0;
   complete_ = false;
   failed_ = false;
   error_ = WebmRemuxError::None;
@@ -75,14 +81,33 @@ bool WebmDirectOpusPacketPath::enqueue_packet(const unsigned char *data,
     mark_failed(WebmRemuxError::InvalidBlock);
     return false;
   }
-
-  Packet packet;
-  packet.data.assign(data, data + length);
-  packet.tstamp_ns = packet_tstamp_ns;
-  packet.tstamp_ms = packet_tstamp_ms;
-  if (!push_packet(&packet)) {
+  if (length > kPacketSlotBytes) {
+    mark_failed(WebmRemuxError::UnsupportedFeature);
+    return false;
+  }
+  // Queue fullness is enforced before reading the next nestegg packet. Enqueue
+  // still accepts chunks from an already-read packet so multi-chunk packets stay
+  // intact, up to the fixed storage bound.
+  if (queued_count_ >= kQueueSlotCount) {
     mark_failed(WebmRemuxError::InvalidBlock);
     return false;
+  }
+  ensure_storage();
+
+  uint8_t *dst = slot_data(write_index_);
+  if (!dst) {
+    mark_failed(WebmRemuxError::InvalidBlock);
+    return false;
+  }
+  memcpy(dst, data, length);
+  PacketSlot &slot = slots_[write_index_];
+  slot.length = length;
+  slot.tstamp_ns = packet_tstamp_ns;
+  slot.tstamp_ms = packet_tstamp_ms;
+  write_index_ = (write_index_ + 1U) % kQueueSlotCount;
+  ++queued_count_;
+  if (length > max_packet_bytes_seen_) {
+    max_packet_bytes_seen_ = length;
   }
   return true;
 }
@@ -100,13 +125,20 @@ WebmDirectOpusPacketPath::decode_next(int16_t *pcm_out,
     step.decoded.eof = complete_;
     return step;
   }
-
-  Packet packet;
-  if (!pop_packet(&packet)) {
-    step.decoded.eof = complete_;
+  if (read_index_ >= kQueueSlotCount || queued_count_ > kQueueSlotCount) {
+    mark_failed(WebmRemuxError::InvalidBlock);
+    step.failed = true;
+    step.error = error_;
     return step;
   }
-  if (packet.data.empty()) {
+
+  const PacketSlot &slot = slots_[read_index_];
+  const uint8_t *packet_data = slot_data(read_index_);
+  const size_t packet_length = slot.length;
+  if (!packet_data || packet_length == 0U || packet_length > kPacketSlotBytes) {
+    clear_slot(read_index_);
+    read_index_ = (read_index_ + 1U) % kQueueSlotCount;
+    --queued_count_;
     mark_failed(WebmRemuxError::InvalidBlock);
     step.failed = true;
     step.error = error_;
@@ -114,7 +146,11 @@ WebmDirectOpusPacketPath::decode_next(int16_t *pcm_out,
   }
 
   const WebmOpusPacketDecodeResult decoded = decoder_.decode_packet(
-      packet.data.data(), packet.data.size(), pcm_out, pcm_capacity_samples);
+      packet_data, packet_length, pcm_out, pcm_capacity_samples);
+  clear_slot(read_index_);
+  read_index_ = (read_index_ + 1U) % kQueueSlotCount;
+  --queued_count_;
+
   step.decoded = decoded.decoded;
   step.consumed_packet = decoded.consumed_packet;
   step.has_output = decoded.has_output;
@@ -142,62 +178,55 @@ WebmDirectPacketQueueSnapshot WebmDirectOpusPacketPath::snapshot() const {
   snapshot.queued_packets = active_count();
   snapshot.read_index = read_index_;
   snapshot.complete = complete_;
+  snapshot.packet_slot_bytes = packet_storage_.empty() ? 0U : kPacketSlotBytes;
+  snapshot.max_packet_bytes_seen = max_packet_bytes_seen_;
   return snapshot;
 }
 
-bool WebmDirectOpusPacketPath::push_packet(Packet *packet) {
-  if (!packet || packet->data.empty()) {
-    return false;
+void WebmDirectOpusPacketPath::ensure_storage() {
+  const size_t required_size = kQueueSlotCount * kPacketSlotBytes;
+  if (packet_storage_.size() == required_size) {
+    return;
   }
-  // Queue fullness is enforced before reading the next nestegg packet. Push
-  // still accepts chunks from an already-read packet so multi-chunk packets stay
-  // intact.
-  queue_.push_back(std::move(*packet));
-  return true;
+  // resize() has no recoverable false path here: allocation failure is handled
+  // by the runtime before this function returns.
+  packet_storage_.resize(required_size);
 }
 
-bool WebmDirectOpusPacketPath::pop_packet(Packet *out_packet) {
-  if (!out_packet || empty()) {
-    return false;
+uint8_t *WebmDirectOpusPacketPath::slot_data(size_t slot_index) {
+  if (slot_index >= kQueueSlotCount ||
+      packet_storage_.size() < (kQueueSlotCount * kPacketSlotBytes)) {
+    return NULL;
   }
-  Packet &slot = queue_[read_index_];
-  *out_packet = std::move(slot);
-  slot.data.clear();
-  slot.tstamp_ns = 0;
-  slot.tstamp_ms = -1;
-  ++read_index_;
-  compact_if_needed();
-  return true;
+  return packet_storage_.data() + (slot_index * kPacketSlotBytes);
 }
 
-size_t WebmDirectOpusPacketPath::active_count() const {
-  if (read_index_ >= queue_.size()) {
-    return 0U;
+const uint8_t *WebmDirectOpusPacketPath::slot_data(size_t slot_index) const {
+  if (slot_index >= kQueueSlotCount ||
+      packet_storage_.size() < (kQueueSlotCount * kPacketSlotBytes)) {
+    return NULL;
   }
-  return queue_.size() - read_index_;
+  return packet_storage_.data() + (slot_index * kPacketSlotBytes);
 }
+
+void WebmDirectOpusPacketPath::clear_slot(size_t slot_index) {
+  if (slot_index >= kQueueSlotCount) {
+    return;
+  }
+  slots_[slot_index].length = 0;
+  slots_[slot_index].tstamp_ns = 0;
+  slots_[slot_index].tstamp_ms = -1;
+}
+
+void WebmDirectOpusPacketPath::clear_slots() {
+  for (size_t i = 0; i < kQueueSlotCount; ++i) {
+    clear_slot(i);
+  }
+}
+
+size_t WebmDirectOpusPacketPath::active_count() const { return queued_count_; }
 
 bool WebmDirectOpusPacketPath::empty() const { return active_count() == 0U; }
-
-void WebmDirectOpusPacketPath::compact_if_needed() {
-  if (read_index_ == 0U) {
-    return;
-  }
-  const size_t current_active_count = active_count();
-  if (current_active_count == 0U) {
-    queue_.clear();
-    read_index_ = 0;
-    return;
-  }
-  if (read_index_ < kQueueLimit) {
-    return;
-  }
-  for (size_t i = 0; i < current_active_count; ++i) {
-    queue_[i] = std::move(queue_[read_index_ + i]);
-  }
-  queue_.resize(current_active_count);
-  read_index_ = 0;
-}
 
 void WebmDirectOpusPacketPath::mark_failed(WebmRemuxError error) {
   failed_ = true;
